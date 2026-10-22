@@ -1,0 +1,11 @@
+build/
+*.o
+*.elf
+*.bin
+*.g3a
+*.hh3
+*.nb0
+*.dSYM/
+__pycache__/
+.DS_Store
+fpuemu/tests/test_host
