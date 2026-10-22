@@ -59,6 +59,7 @@ sf_u32 dbt_rte_c(sf_u32 guest_spc, sf_u32 *ssr);
 void   dbt_invalidate(sf_u32 lo, sf_u32 hi);
 
 /* translator state visible to generated code */
+sf_u32 dbt_bench_native(sf_u32 which, sf_u32 n);      /* rt/bench.c */
 extern volatile sf_u32 dbt_shadow_vbr;
 extern volatile sf_u32 dbt_shadow_md;
 

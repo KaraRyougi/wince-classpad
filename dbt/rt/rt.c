@@ -204,6 +204,7 @@ void dbt_invalidate(sf_u32 lo, sf_u32 hi)
 #define HC_PUTC   0xF3
 #define HC_PUTHEX 0xF4
 #define HC_STATS  0xF5
+#define HC_BENCH  0xF6
 
 static void print_trace(void);
 
@@ -238,6 +239,7 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
     case HC_PUTHEX: dbt_puthex(ctx->r[4]); return RT_ACT_RESUME;
     case HC_FLUSH: dbt_invalidate(ctx->r[4], ctx->r[5]); return RT_ACT_RESUME;
     case HC_STATS: print_stats(); return RT_ACT_RESUME;
+    case HC_BENCH: ctx->r[0] = dbt_bench_native(ctx->r[4], ctx->r[5]); return RT_ACT_RESUME;
     }
     dbt_puts("[dbt] unknown hypercall "); dbt_puthex(nr); dbt_puts("\n");
     return RT_ACT_RESUME;

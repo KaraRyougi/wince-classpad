@@ -224,6 +224,67 @@ via hypercall 0xF1):
   bank 0): true for hardware-faithful handlers, which keep BL=1 while RB=1,
   but to be checked against the CE kernel's exception entry.
 
+## Performance (casio-emu, 2026-10-22)
+
+`make -C dbt GUEST=bench run`: the kernels in `bench/loops.S` are assembled
+big-endian into the translator image and little-endian into the guest; the
+guest times its (translated) run with TMU1 and asks the runtime through
+`HC_BENCH` to time the same kernel natively. 20000 iterations each,
+interrupts masked, blocks translated by a warm-up call first. casio-emu
+charges one TMU tick per four executed instructions regardless of type, so
+these are *instruction-count* ratios; the per-iteration counts below were
+read from the translated blocks and agree with the measurements.
+
+| kernel | per iteration | native ticks | translated ticks | slowdown | host insns / guest insns |
+|---|---|---|---|---|---|
+| alu | 5 ALU + `dt` + `bf` | 15382 | 27723 | 1.80x | 11 / 7 |
+| mem mixed | 4 longword, 2 word, 2 byte accesses, 2 ALU, loop | 26369 | 81308 | 3.08x | 41 / 12 |
+| mem copy | 2 post-increment loads, 2 stores, pointer wrap, loop | 29391 | 81033 | 2.76x | |
+| stack | push r1, r2, PR; pop them; loop | 19777 | 90096 | 4.56x | 41 / 9 |
+| branch | 3 data-dependent `bt`/`bf` (half taken), loop | 25270 | 47249 | 1.87x | |
+| call jsr | `jsr @r6; nop` to a 3-instruction leaf | 17580 | 156016 | 8.87x | ~65 / 8 |
+| call bsr | `bsr leaf; nop` | 17580 | 105479 | 6.00x | |
+| call frame | `jsr` to a function that pushes/pops r8, r9, PR | 35159 | 235117 | 6.69x | |
+
+Where the cycles go:
+
+- **Direct jumps** (`bra`, taken `bt`/`bf`, block fall-through): 5 host
+  instructions instead of 1 (`lds rT,X0; mov.l lit,rT; jmp @rT; sts X0,rT`
+  plus the inverted skip). That alone makes a pure ALU loop 1.6-1.8x.
+- **Indirect branches** (`jsr`, `rts`, `jmp`): about 10 instructions in the
+  block (PR literal with spill/restore, target to X0, lookup jump) plus 19
+  in the lookup stub's hash-hit path, twice per call/return pair.
+- **Stores**: spill + 3 swaps + store + restore = 6 (byte stores 1); loads:
+  4 (word loads 3). `sts.l pr,@-r15` is 7. SH-4 has no byte-swap
+  instruction, so 3 swaps per longword is the floor; the spill/restore pair
+  costs the other 2.
+- FPU and `mac` go through C helpers (not measured here; hundreds of
+  instructions each, as planned).
+
+On hardware, native code stalls on memory and the translated extra work is
+all register ALU, so memory-heavy ratios should come out a little lower than
+here; the 3-5x code expansion will cost instruction-cache misses instead.
+
+Optimizations, in order of payoff per effort (none done yet):
+
+1. **Branch chaining**: at link time, when the target block is within the
+   `bra` range (+-4 KiB; blocks are allocated in translation order, so loop
+   targets almost always are), overwrite the jump sequence's first word with
+   `bra target` (`nop` after it) and invalidate that cache line. Expected:
+   alu 1.8x -> ~1.15x, every loop back-edge and fall-through 4 instructions
+   cheaper. Taken `bt`/`bf` within +-256 bytes can become a single native
+   conditional branch.
+2. **Inline caches for indirect branches**: per site, compare the guest
+   target with the last seen one (literal) and `jmp` straight to its host
+   address, falling back to the lookup stub on a miss; ~7 instructions on a
+   hit instead of ~29. Calls through registers and most `rts` (same caller
+   in a loop) hit.
+3. **Cheaper PR writes**: `jsr`/`bsr` spend 4 instructions materializing the
+   guest return address; a return-address side table indexed by call site
+   could remove the literal load from the hot path.
+4. **Spill avoidance for stores** when a dead register is provably available
+   (needs liveness across blocks; only after the above).
+
 ## Test platform
 
 casio-emu implements only `lds rm, x0` of the DSP transfers; the patch in
@@ -241,6 +302,7 @@ Status 2026-10-22: all four guests pass under the emulator.
 | `hello` | every access size and addressing mode, literal pool, stack, struct layout | PASS (8 checks) |
 | `exc` | guest VBR, `trapa`, EXPEVT/TRA, SPC rewrite by the handler, `rte`, T bit across exceptions | PASS (6 checks) |
 | `fpu` | raw FPU words through the helper: fpscr reset, fadd/fmul/float/fmov.s, double sub + fcmp/gt | PASS (5 checks, 0x21 helper calls) |
+| `bench` | translated vs native timing of eight kernels (see "Performance") | runs |
 | `tmu` | TMU0 programmed through pre-swapped MMIO, IMASK/BL and IMR masking, INTEVT, `rte` restoring SR, `sleep` wake-up; register probe across `trapa`; 15 one-construct hot loops (loads, stores of every form, `bt/s` with a T-writing slot, `jsr` with a store in the slot, push/pop, pc-relative) plus a compiled loop, each run with ~3000 interrupts landing at arbitrary host instructions and compared with an interrupt-free run | PASS (34 checks) |
 
 The TMU guest found three resume bugs that the host tests could not: `bf/s`

@@ -12,7 +12,7 @@ HOST_CFLAGS  := -mb -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-sta
                 -Wall -Wextra -Wno-unused-parameter -I rt -I src -I ../fpuemu/src
 GUEST_CFLAGS := -ml -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables -Wall
 
-RT_SRC := rt/crt0.S rt/stubs.S rt/main.c rt/rt.c src/sh4dec.c src/sh4emit.c src/translate.c \
+RT_SRC := rt/crt0.S rt/stubs.S rt/main.c rt/rt.c rt/bench.c bench/loops.S src/sh4dec.c src/sh4emit.c src/translate.c \
           ../fpuemu/src/fpuemu.c ../fpuemu/src/softfloat.c
 
 .PHONY: all clean run disasm
@@ -25,6 +25,7 @@ $(BUILD):
 # --- guest (little-endian) ---
 GUEST_EXTRA_exc := guest/exc_vectors.S
 GUEST_EXTRA_tmu := guest/tmu_vectors.S guest/tmu_loops.S
+GUEST_EXTRA_bench := bench/loops.S
 GUEST_EXTRA     := $(GUEST_EXTRA_$(GUEST))
 
 $(BUILD)/$(GUEST).elf: guest/start.S guest/$(GUEST).c $(GUEST_EXTRA) guest/hyper.h guest/mmio.h guest/guest.ld | $(BUILD)
