@@ -10,6 +10,9 @@ SECTIONS
     . = ALIGN(16);
     .data : { *(.data .data.*) }
     . = ALIGN(16);
+    __bss_start = .;
     .bss : { *(.bss .bss.*) *(COMMON) }
+    . = ALIGN(4);
+    __bss_end = .;
     /DISCARD/ : { *(.comment) *(.note*) *(.eh_frame*) }
 }

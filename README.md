@@ -21,7 +21,9 @@ trap-and-emulate FPU lives in the kernel's illegal-instruction path.
 
 ## Status
 
-See [docs/00-plan.md](docs/00-plan.md). Nothing has booted yet.
+See [docs/00-plan.md](docs/00-plan.md). The little-endian→big-endian
+translator (`dbt/`) runs its three test guests to completion inside casio-emu
+(2026-10-22). No Windows CE code has been loaded yet.
 
 ## Host prerequisites
 
@@ -31,6 +33,7 @@ See [docs/00-plan.md](docs/00-plan.md). Nothing has booted yet.
 - casio-emu (fx-CG100 model) for first bring-up before touching hardware.
 
 ```sh
-make test          # build and run the FPU emulator host tests
+make test          # host tests: FPU emulator + translator
+make -C dbt run    # build launcher+translator+guest, run in casio-emu (GUEST=hello|exc|fpu)
 python3 tools/nkbin.py path/to/NK.bin
 ```

@@ -187,6 +187,20 @@ via hypercall 0xF1):
 ## Test platform
 
 casio-emu implements only `lds rm, x0` of the DSP transfers; the patch in
-`dbt/emu-patch/add_dsp_transfers.py` adds the other nine. The emulator starts a
+`dbt/emu-patch/add_dsp_transfers.py` adds the other nine (applied to the local
+casio-emu checkout on 2026-10-22; rerun it after updating the emulator, then
+`node scripts/genDispatch.mjs && cmake --build build`). The emulator starts a
 raw `.g3a` payload at 0x00300000; `dbt/loader` copies the translator image to
-0x8CB00000 and jumps. `make -C dbt run` builds everything and runs it headless.
+0x8CB00000 and jumps. `make -C dbt run` builds everything and runs it headless;
+`GUEST=exc` / `GUEST=fpu` select the other guests.
+
+Status 2026-10-22: all three guests pass under the emulator.
+
+| Guest | What it covers | Result |
+|---|---|---|
+| `hello` | every access size and addressing mode, literal pool, stack, struct layout | PASS (8 checks) |
+| `exc` | guest VBR, `trapa`, EXPEVT/TRA, SPC rewrite by the handler, `rte`, T bit across exceptions | PASS (6 checks) |
+| `fpu` | raw FPU words through the helper: fpscr reset, fadd/fmul/float/fmov.s, double sub + fcmp/gt | PASS (5 checks, 0x21 helper calls) |
+
+The guest blob carries file contents only, so guests zero their own `.bss`
+(`guest/start.S`); a CE image does that itself.

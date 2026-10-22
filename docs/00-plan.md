@@ -33,9 +33,10 @@ Consequences:
 | A. Emulator-only | WinCE booting on an emulated SH7305 (LE mode) with a full debugger | casio-emu LE mode; no device |
 | B. Strapped device | WinCE on a sacrificial fx-CG50/CG100 | find and flip the MD strap; flash own LE bootloader first; brick risk; device loses Casio OS |
 | C. Drop WinCE, go Linux | Big-endian SH4A is supported, GCC `-m4al` needs no FPU emulation, mainline SH7305 work started 2026-10 | no Win32 stack; all hardware knowledge carries over |
+| **D. Same-ISA translator (chosen)** | A little-endian SH-4 guest (WinCE) runs on the stock big-endian device under a dynamic binary translator that byte-swaps every memory access and emulates the FPU; no hardware mod | translator overhead on every load/store; all guest MMIO must be pre-swapped; the translator owns VBR and the DSP transfer registers (`docs/04-dbt-design.md`) |
 
-Route A is a prerequisite for B. Everything in this repository except the
-boot path is shared by A and B.
+Route D is what we are building. Route A (emulator LE mode) is no longer
+needed: casio-emu runs the translator as an ordinary big-endian add-in.
 
 ## What exists
 
@@ -43,25 +44,32 @@ boot path is shared by A and B.
   verified bit-exact against the host FPU for add/sub/mul/div/sqrt/fmac/
   conversions/compares in RN and RZ, plus instruction-level decoder tests.
 - `tools/nkbin.py`: CE `.bin` image inspector (records, ROMHDR, module table).
-- Docs 01-03: hardware facts, FPU emulation design, boot/image notes.
+- `dbt/`: the translator (decoder, emitter, block translator with resume
+  metadata; host tests), its bare-metal runtime (code cache, lookup/link
+  stubs, exception vectors, FPU/mac helpers, hypercall console), a `.g3a`
+  launcher and three little-endian test guests. As of 2026-10-22 all three
+  guests pass in casio-emu (with `dbt/emu-patch` applied to the emulator).
+- Docs 01-04: hardware facts, FPU emulation design, boot/image notes, DBT design.
 
-## Milestones (routes A/B)
+## Milestones (route D)
 
-1. Decide the route. (Blocked on the user.)
-2. casio-emu: little-endian mode + "raw kernel" load (write NK.bin records to
-   RAM, set PC/SP/VBR, go). Needed before any CE code can be tried.
-3. Platform Builder 6.0 R3 + VS2005 in a Windows VM; build a headless SH4
-   image; confirm the toolchain works on a stock BSP (emulator `r2d` in QEMU
-   is a sanity check that needs no Casio code).
-4. OAL for SH7305: startup, INTC, TMU tick, SCIF debug serial, KITL (serial).
-   Boot headless to a serial shell inside casio-emu.
-5. Hook `fpuemu` into the kernel's general-illegal-instruction path
-   (EXPEVT 0x180/0x1A0), including delay-slot handling and lazy per-thread
-   FPU state. Count traps per module.
+1. ~~Translator core + runtime; hello/exception/FPU guests pass in casio-emu.~~
+   Done 2026-10-22.
+2. Interrupt guest: guest programs the TMU through pre-swapped MMIO, takes
+   the interrupt through its own VBR under the translator, `rte` back into
+   translated code. Then a guest that writes the LCD framebuffer.
+3. Measure: translated vs native slowdown on a memory-heavy loop and on a
+   branch-heavy loop; code-cache pressure with a larger guest.
+4. Guest image choice (blocked on the user): Pocket PC 2000 SH3 ROM (closed,
+   Jornada 540 hardware to emulate in the OAL layer) vs self-built CE 6.0 R3
+   SH4 image (Platform Builder + VS2005 in a Windows VM, our own OAL).
+5. CE image loading: `.bin` records to guest RAM, ROMHDR, PC/SP/VBR, entry.
+   For CE 6.0: OAL for SH7305 (startup, INTC, TMU tick, debug serial via
+   hypercall first), headless boot to a serial shell inside casio-emu.
 6. Display driver (flat framebuffer, 320x528 CP400 / 396x224 CG50-class),
    keyboard, touch. GWES up.
-7. Only for route B: NOR boot sector with our own LE bootloader, flash
-   layout, CFI programming code, strap mod procedure.
+7. Real hardware: run the `.g3a` on an fx-CG50/CP400; fix anything the
+   emulator was lenient about (cache coherency, TLB, DSP register state).
 
 ## Open questions
 

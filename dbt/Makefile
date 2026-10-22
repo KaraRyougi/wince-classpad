@@ -51,7 +51,7 @@ $(BUILD)/dbt.g3a: $(BUILD)/loader.bin
 	( dd if=/dev/zero bs=28672 count=1 2>/dev/null; cat $< ) > $@
 
 run: $(BUILD)/dbt.g3a
-	$(EMU)/run-headless.sh $(abspath $(BUILD)/dbt.g3a) 20
+	-$(EMU)/run-headless.sh $(abspath $(BUILD)/dbt.g3a) 20
 
 disasm: $(BUILD)/dbt.elf $(BUILD)/$(GUEST).elf
 	$(OBJDUMP) -d $(BUILD)/dbt.elf > $(BUILD)/dbt.dis
