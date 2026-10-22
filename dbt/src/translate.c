@@ -1,0 +1,617 @@
+#include <string.h>
+#include "translate.h"
+
+#define R(n) (1u << (n))
+#define SR_MD 0x40000000u
+
+/* literal tags */
+#define TAG_LINK(k)   (100 + (k))   /* branch literal holding the host target (patched when linked) */
+#define TAG_STUB_T(k) (200 + (k))   /* exit stub: guest target */
+#define TAG_STUB_L(k) (300 + (k))   /* exit stub: address of the link literal */
+#define TAG_NONE      (-1)
+
+typedef struct {
+    const dbt_env *env;
+    emitter em;
+    dbt_block *blk;
+    sf_u32 gpc;            /* guest pc of the instruction being translated */
+    dbt_imeta *cur;        /* meta entry being filled */
+    int err;
+    sf_u32 fault;
+} tctx;
+
+/* ------------------------------------------------------------ helpers */
+
+static int pick_scratch(sf_u32 avoid)
+{
+    int r;
+    for (r = 1; r <= 14; r++) if (!(avoid & R(r))) return r;
+    return -1;
+}
+
+static void spill(tctx *t, int gpr, int slot)
+{
+    dbt_imeta *m = t->cur;
+    if (m->nspill < DBT_MAX_SPILLS) {
+        m->spill[m->nspill].gpr = (sf_u16)gpr;
+        m->spill[m->nspill].slot = (sf_u16)slot;
+        m->spill[m->nspill].start = (sf_u16)emit_pos(&t->em);
+        m->spill[m->nspill].end = 0xFFFF;
+        m->nspill++;
+    } else {
+        t->err = DBT_ERR_INTERNAL;
+    }
+    emit16(&t->em, op_lds_slot(gpr, slot));
+}
+
+static void restore(tctx *t, int gpr, int slot)
+{
+    dbt_imeta *m = t->cur;
+    int i;
+    for (i = m->nspill - 1; i >= 0; i--)
+        if (m->spill[i].gpr == gpr && m->spill[i].slot == slot) {
+            m->spill[i].end = (sf_u16)emit_pos(&t->em);
+            break;
+        }
+    emit16(&t->em, op_sts_slot(slot, gpr));
+}
+
+static void swap32(tctx *t, int src, int dst)
+{
+    emit16(&t->em, OP_SWAPB(src, dst));
+    emit16(&t->em, OP_SWAPW(dst, dst));
+    emit16(&t->em, OP_SWAPB(dst, dst));
+}
+
+static void swapN(tctx *t, int size, int src, int dst)
+{
+    if (size == 4) swap32(t, src, dst);
+    else emit16(&t->em, OP_SWAPB(src, dst));
+}
+
+/* control register <-> GPR (non-privileged ones) */
+static sf_u32 op_read_cr(int cr, int bank, int rn)
+{
+    switch (cr) {
+    case CR_MACH: return OP_STS_MACH(rn);
+    case CR_MACL: return OP_STS_MACL(rn);
+    case CR_PR:   return OP_STS_PR(rn);
+    case CR_GBR:  return OP_STC_GBR(rn);
+    case CR_SSR:  return OP_STC_SSR(rn);
+    case CR_SPC:  return OP_STC_SPC(rn);
+    case CR_SGR:  return OP_STC_SGR(rn);
+    case CR_DBR:  return OP_STC_DBR(rn);
+    case CR_RBANK: return OP_STC_RBANK(bank, rn);
+    }
+    return OP_NOP;
+}
+static sf_u32 op_write_cr(int cr, int bank, int rm)
+{
+    switch (cr) {
+    case CR_MACH: return OP_LDS_MACH(rm);
+    case CR_MACL: return OP_LDS_MACL(rm);
+    case CR_PR:   return OP_LDS_PR(rm);
+    case CR_GBR:  return OP_LDC_GBR(rm);
+    case CR_SSR:  return OP_LDC_SSR(rm);
+    case CR_SPC:  return OP_LDC_SPC(rm);
+    case CR_DBR:  return OP_LDC_DBR(rm);
+    case CR_RBANK: return OP_LDC_RBANK(rm, bank);
+    }
+    return OP_NOP;
+}
+
+/* Re-encode a store with a different data register (forms with a free data field). */
+static sf_u32 store_with_data(const sh_insn *d, int data)
+{
+    sf_u32 n = (sf_u32)d->base << 8, m = (sf_u32)data << 4;
+    switch (d->am) {
+    case AM_REG:    return (0x2000u + (d->size == 1 ? 0 : d->size == 2 ? 1 : 2)) | n | m;
+    case AM_PREDEC: return (0x2004u + (d->size == 1 ? 0 : d->size == 2 ? 1 : 2)) | n | m;
+    case AM_R0IDX:  return (0x0004u + (d->size == 1 ? 0 : d->size == 2 ? 1 : 2)) | n | m;
+    case AM_DISP:   return 0x1000u | n | m | (sf_u32)(d->disp / 4);   /* size 4 only */
+    }
+    return OP_NOP;
+}
+
+static int store_data_is_fixed_r0(const sh_insn *d)
+{
+    if (d->movca) return 1;
+    if (d->am == AM_GBR) return 1;
+    if (d->am == AM_DISP && d->size != 4) return 1;
+    return 0;
+}
+
+/* --------------------------------------------------------- memory ops */
+
+static void tr_mem(tctx *t, const sh_insn *d)
+{
+    emitter *e = &t->em;
+    if (d->ctrl != CR_NONE) {
+        /* sts.l/stc.l CR,@-Rn  or  lds.l/ldc.l @Rm+,CR */
+        int rT = pick_scratch(R(d->base));
+        spill(t, rT, SLOT_X0);
+        if (d->is_store) {
+            emit16(e, op_read_cr(d->ctrl, d->ctrl_bank, rT));
+            swap32(t, rT, rT);
+            emit16(e, OP_MOVL_PREDEC(rT, d->base));
+        } else {
+            emit16(e, OP_MOVL_POSTINC(d->base, rT));
+            swap32(t, rT, rT);
+            emit16(e, op_write_cr(d->ctrl, d->ctrl_bank, rT));
+        }
+        restore(t, rT, SLOT_X0);
+        return;
+    }
+    if (d->size == 1) { emit16(e, d->op); return; }
+    if (!d->is_store) {
+        emit16(e, d->op);
+        if (d->size == 2) { emit16(e, OP_SWAPB(d->data, d->data)); emit16(e, OP_EXTSW(d->data, d->data)); }
+        else swap32(t, d->data, d->data);
+        return;
+    }
+    /* stores */
+    if (!store_data_is_fixed_r0(d)) {
+        int rT = pick_scratch(d->touched);
+        spill(t, rT, SLOT_X0);
+        if (d->am == AM_PREDEC && d->data == d->base) {
+            /* SH stores the decremented register value */
+            emit16(e, OP_MOV_RR(d->data, rT));
+            emit16(e, OP_ADD_IMM(-d->size, rT));
+            swapN(t, d->size, rT, rT);
+        } else {
+            swapN(t, d->size, d->data, rT);
+        }
+        emit16(e, store_with_data(d, rT));
+        restore(t, rT, SLOT_X0);
+        return;
+    }
+    /* data fixed to r0 */
+    if (d->am == AM_GBR || d->base != 0) {
+        spill(t, 0, SLOT_X0);
+        swapN(t, d->size, 0, 0);
+        emit16(e, d->op);
+        restore(t, 0, SLOT_X0);
+        return;
+    }
+    /* base is r0 too: materialize the address in a scratch */
+    if (d->movca) {
+        int rA = pick_scratch(R(0));
+        spill(t, rA, SLOT_X0);
+        emit16(e, OP_MOV_RR(0, rA));
+        swap32(t, 0, 0);
+        emit16(e, OP_MOVCA(rA));
+        swap32(t, 0, 0);                    /* undo in place */
+        restore(t, rA, SLOT_X0);
+        return;
+    }
+    {
+        int rA = pick_scratch(R(0));
+        int rV = pick_scratch(R(0) | R(rA));
+        sh_insn s2;
+        spill(t, rA, SLOT_X0);
+        emit16(e, OP_MOV_RR(0, rA));
+        if (d->disp) emit16(e, OP_ADD_IMM(d->disp, rA));
+        spill(t, rV, SLOT_X1);
+        swapN(t, d->size, 0, rV);
+        s2 = *d; s2.am = AM_REG; s2.base = rA;
+        emit16(e, store_with_data(&s2, rV));
+        restore(t, rV, SLOT_X1);
+        restore(t, rA, SLOT_X0);
+    }
+}
+
+/* ----------------------------------------------------------- pc-relative */
+
+static void tr_pcrel(tctx *t, const sh_insn *d)
+{
+    sf_u32 val = 0, addr;
+    switch (d->pcrel) {
+    case PC_MOVW:
+        addr = t->gpc + 4 + (sf_u32)d->disp;
+        if (t->env->read16le(t->env->ctx, addr, &val)) { t->err = DBT_ERR_READ; t->fault = addr; return; }
+        if (val & 0x8000) val |= 0xFFFF0000u;
+        break;
+    case PC_MOVL:
+        addr = ((t->gpc + 4) & ~3u) + (sf_u32)d->disp;
+        if (t->env->read32le(t->env->ctx, addr, &val)) { t->err = DBT_ERR_READ; t->fault = addr; return; }
+        break;
+    default: /* mova */
+        val = ((t->gpc + 4) & ~3u) + (sf_u32)d->disp;
+        break;
+    }
+    emit_mov_imm(&t->em, d->pc_reg, val);
+}
+
+/* ------------------------------------------------------------- helper calls */
+
+/* X0 = arg, X1 = return address (host), jump to helper. rT is spilled in Y0
+ * and restored in the jump's delay slot. */
+/* arg_mode: 0 = X0 already holds the argument, 1 = X0 <- register arg_reg,
+ * 2 = X0 <- immediate arg_imm */
+static void call_helper(tctx *t, sf_u32 helper, sf_u32 arg_reg, int arg_mode, sf_u32 arg_imm, sf_u32 avoid)
+{
+    emitter *e = &t->em;
+    int rT = pick_scratch(avoid);
+    int ret_lit;
+    if (arg_mode == 1) emit16(e, op_lds_slot((int)arg_reg, SLOT_X0));
+    spill(t, rT, SLOT_Y0);
+    if (arg_mode == 2) { emit_mov_imm(e, rT, arg_imm); emit16(e, op_lds_slot(rT, SLOT_X0)); }
+    ret_lit = emit_mov_lit(e, rT, 0, TAG_NONE);              /* return address, patched below */
+    emit16(e, op_lds_slot(rT, SLOT_X1));
+    emit_mov_lit(e, rT, helper, TAG_NONE);
+    emit16(e, OP_JMP(rT));
+    restore(t, rT, SLOT_Y0);
+    if (ret_lit >= 0) e->lits[ret_lit].value = t->blk->host_base + (sf_u32)emit_pos(e);
+}
+
+/* ------------------------------------------------------------- branches */
+
+/* Jump to a guest target known at translation time, through a link literal. */
+static void jump_direct(tctx *t, sf_u32 guest_target, sf_u32 avoid)
+{
+    emitter *e = &t->em;
+    dbt_block *b = t->blk;
+    int rT = pick_scratch(avoid);
+    int k = b->nlinks;
+    if (k >= DBT_MAX_LINKS) { t->err = DBT_ERR_OVERFLOW; return; }
+    b->links[k].guest_target = guest_target;
+    b->links[k].lit_off = -1;
+    b->nlinks++;
+    spill(t, rT, SLOT_X0);
+    emit_mov_lit(e, rT, 0, TAG_LINK(k));                     /* host target; initially the exit stub */
+    emit16(e, OP_JMP(rT));
+    restore(t, rT, SLOT_X0);
+}
+
+/* Jump to the guest address already placed in X0. */
+static void jump_lookup(tctx *t, sf_u32 avoid)
+{
+    emitter *e = &t->em;
+    int rT = pick_scratch(avoid);
+    spill(t, rT, SLOT_Y0);
+    emit_mov_lit(e, rT, t->env->rt_lookup, TAG_NONE);
+    emit16(e, OP_JMP(rT));
+    restore(t, rT, SLOT_Y0);
+}
+
+/* X0 = Rn (or PR when reg < 0), without disturbing guest registers. */
+static void target_to_x0(tctx *t, int reg, int from_pr, sf_u32 add_const, sf_u32 avoid)
+{
+    emitter *e = &t->em;
+    if (!from_pr && add_const == 0) { emit16(e, op_lds_slot(reg, SLOT_X0)); return; }
+    {
+        int rT = pick_scratch(avoid);
+        spill(t, rT, SLOT_Y0);
+        if (from_pr) emit16(e, OP_STS_PR(rT));
+        else { emit_mov_imm(e, rT, add_const); emit16(e, OP_ADD_RR(reg, rT)); }
+        emit16(e, op_lds_slot(rT, SLOT_X0));
+        restore(t, rT, SLOT_Y0);
+    }
+}
+
+static void set_pr(tctx *t, sf_u32 value, sf_u32 avoid)
+{
+    emitter *e = &t->em;
+    int rT = pick_scratch(avoid);
+    spill(t, rT, SLOT_Y0);
+    emit_mov_imm(e, rT, value);
+    emit16(e, OP_LDS_PR(rT));
+    restore(t, rT, SLOT_Y0);
+}
+
+static void tr_insn(tctx *t, const sh_insn *d, int in_slot);
+
+static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
+{
+    emitter *e = &t->em;
+    sf_u32 next = t->gpc + 4;                     /* PC+4 semantics */
+    sf_u32 avoid = slot ? slot->touched : 0;
+    sf_u32 target = t->gpc + 4 + (sf_u32)d->br_disp;
+
+    switch (d->br) {
+    case BR_BRA:
+        if (slot) tr_insn(t, slot, 1);
+        jump_direct(t, target, 0);
+        return;
+    case BR_BSR:
+        set_pr(t, next, avoid);
+        if (slot) tr_insn(t, slot, 1);
+        jump_direct(t, target, 0);
+        return;
+    case BR_BRAF:
+    case BR_BSRF:
+        if (d->br == BR_BSRF) set_pr(t, next, avoid | R(d->br_reg));
+        target_to_x0(t, d->br_reg, 0, next, avoid | R(d->br_reg));
+        if (slot) tr_insn(t, slot, 1);
+        jump_lookup(t, 0);
+        return;
+    case BR_JMP:
+    case BR_JSR:
+        if (d->br == BR_JSR) set_pr(t, next, avoid | R(d->br_reg));
+        if (slot && (slot->defs & R(d->br_reg))) {
+            target_to_x0(t, d->br_reg, 0, 0, 0);
+            tr_insn(t, slot, 1);
+        } else {
+            if (slot) tr_insn(t, slot, 1);
+            target_to_x0(t, d->br_reg, 0, 0, 0);
+        }
+        jump_lookup(t, 0);
+        return;
+    case BR_RTS:
+        target_to_x0(t, -1, 1, 0, avoid);
+        if (slot) tr_insn(t, slot, 1);
+        jump_lookup(t, 0);
+        return;
+    case BR_RTE: {
+        int rT;
+        if (slot) tr_insn(t, slot, 1);
+        rT = pick_scratch(0);
+        spill(t, rT, SLOT_Y0);
+        emit_mov_lit(e, rT, t->env->rt_rte, TAG_NONE);
+        emit16(e, OP_JMP(rT));
+        restore(t, rT, SLOT_Y0);
+        return;
+    }
+    case BR_BT:
+    case BR_BF:
+        /* inverted conditional over the 4-instruction direct jump */
+        emit16(e, d->br == BR_BT ? OP_BF(3) : OP_BT(3));
+        jump_direct(t, target, 0);
+        return;
+    case BR_BTS:
+    case BR_BFS:
+        if (!slot || !slot->writes_t) {
+            if (slot) tr_insn(t, slot, 1);
+            emit16(e, d->br == BR_BTS ? OP_BF(3) : OP_BT(3));
+            jump_direct(t, target, 0);
+            return;
+        } else {
+            /* slot writes T: branch on the old T, leave the slot's T visible */
+            int rA = pick_scratch(avoid);
+            int rB = pick_scratch(avoid | R(rA));
+            spill(t, rA, SLOT_Y0);
+            emit16(e, OP_MOVT(rA));
+            tr_insn(t, slot, 1);
+            spill(t, rB, SLOT_Y1);
+            emit16(e, OP_MOVT(rB));
+            emit16(e, OP_TST_RR(rA, rA));            /* T = (old T == 0) */
+            emit16(e, d->br == BR_BTS ? OP_BF(4) : OP_BT(4));
+            /* not taken */
+            emit16(e, OP_SHLR(rB));                  /* T = slot's T */
+            emit16(e, op_sts_slot(SLOT_Y1, rB));
+            emit16(e, op_sts_slot(SLOT_Y0, rA));
+            emit16(e, OP_BRA(7));                    /* over: shlr, 2 restores, 4-word jump */
+            emit16(e, OP_NOP);
+            /* taken */
+            emit16(e, OP_SHLR(rB));
+            restore(t, rB, SLOT_Y1);
+            restore(t, rA, SLOT_Y0);
+            jump_direct(t, target, 0);
+            return;
+        }
+    }
+}
+
+/* ------------------------------------------------------------- privileged */
+
+static void tr_priv(tctx *t, const sh_insn *d)
+{
+    emitter *e = &t->em;
+    if (d->ctrl == CR_VBR) {
+        if (d->priv_mem) {
+            int rT = pick_scratch(R(d->base)), rU = pick_scratch(R(d->base) | R(rT));
+            if (d->is_store) {                                  /* stc.l vbr,@-rn */
+                spill(t, rT, SLOT_X0);
+                emit_mov_lit(e, rT, t->env->shadow_vbr_addr, TAG_NONE);
+                emit16(e, OP_MOVL_LOAD(rT, rT));
+                swap32(t, rT, rT);
+                emit16(e, OP_MOVL_PREDEC(rT, d->base));
+                restore(t, rT, SLOT_X0);
+            } else {                                            /* ldc.l @rm+,vbr */
+                spill(t, rT, SLOT_X0); spill(t, rU, SLOT_X1);
+                emit16(e, OP_MOVL_POSTINC(d->base, rT));
+                swap32(t, rT, rT);
+                emit_mov_lit(e, rU, t->env->shadow_vbr_addr, TAG_NONE);
+                emit16(e, OP_MOVL_STORE(rT, rU));
+                restore(t, rU, SLOT_X1); restore(t, rT, SLOT_X0);
+            }
+        } else if ((d->op & 0xF0FF) == 0x402E) {                /* ldc rm,vbr */
+            int rm = (d->op >> 8) & 0xF, rT = pick_scratch(R(rm));
+            spill(t, rT, SLOT_X0);
+            emit_mov_lit(e, rT, t->env->shadow_vbr_addr, TAG_NONE);
+            emit16(e, OP_MOVL_STORE(rm, rT));
+            restore(t, rT, SLOT_X0);
+        } else {                                                /* stc vbr,rn */
+            int rn = (d->op >> 8) & 0xF;
+            emit_mov_lit(e, rn, t->env->shadow_vbr_addr, TAG_NONE);
+            emit16(e, OP_MOVL_LOAD(rn, rn));
+        }
+        return;
+    }
+    /* CR_SR */
+    if (d->priv_mem && !d->is_store) {                          /* ldc.l @rm+,sr */
+        int rT = pick_scratch(R(d->base));
+        spill(t, rT, SLOT_X1);
+        emit16(e, OP_MOVL_POSTINC(d->base, rT));
+        swap32(t, rT, rT);
+        emit16(e, op_lds_slot(rT, SLOT_X0));                    /* X0 = new SR */
+        restore(t, rT, SLOT_X1);
+        call_helper(t, t->env->rt_ldc_sr, 0, 0, 0, R(d->base));
+        return;
+    }
+    if (!d->priv_mem && (d->op & 0xF0FF) == 0x400E) {           /* ldc rm,sr */
+        call_helper(t, t->env->rt_ldc_sr, (sf_u32)((d->op >> 8) & 0xF), 1, 0, R((d->op >> 8) & 0xF));
+        return;
+    }
+    {
+        /* stc sr,rn / stc.l sr,@-rn : read SR, patch MD from shadow */
+        int rn = d->priv_mem ? -1 : (int)((d->op >> 8) & 0xF);
+        int dst = d->priv_mem ? pick_scratch(R(d->base)) : rn;
+        int rT = pick_scratch(R(dst) | (d->priv_mem ? R(d->base) : 0));
+        int rU = pick_scratch(R(dst) | R(rT) | (d->priv_mem ? R(d->base) : 0));
+        if (d->priv_mem) spill(t, dst, SLOT_Y1);
+        spill(t, rT, SLOT_X0); spill(t, rU, SLOT_X1);
+        emit16(e, OP_STC_SR(dst));
+        emit_mov_lit(e, rT, t->env->shadow_md_addr, TAG_NONE);
+        emit16(e, OP_MOVL_LOAD(rT, rT));
+        emit_mov_lit(e, rU, ~SR_MD, TAG_NONE);
+        emit16(e, 0x2009u | ((sf_u32)dst << 8) | ((sf_u32)rU << 4));   /* and rU,dst */
+        emit16(e, 0x200Bu | ((sf_u32)dst << 8) | ((sf_u32)rT << 4));   /* or rT,dst */
+        if (d->priv_mem) { swap32(t, dst, dst); emit16(e, OP_MOVL_PREDEC(dst, d->base)); }
+        restore(t, rU, SLOT_X1); restore(t, rT, SLOT_X0);
+        if (d->priv_mem) restore(t, dst, SLOT_Y1);
+    }
+}
+
+/* ------------------------------------------------------------- dispatcher */
+
+static void tr_insn(tctx *t, const sh_insn *d, int in_slot)
+{
+    (void)in_slot;
+    if (t->err) return;
+    switch (d->kind) {
+    case K_PASS: case K_TRAP: case K_ILLEGAL:
+        emit16(&t->em, d->op); break;
+    case K_MEM:   tr_mem(t, d); break;
+    case K_PCREL: tr_pcrel(t, d); break;
+    case K_FPU:   call_helper(t, t->env->rt_fpu, 0, 2, d->op, d->touched); break;
+    case K_FALLBACK: call_helper(t, t->env->rt_fallback, 0, 2, d->op, d->touched); break;
+    case K_PRIV:  tr_priv(t, d); break;
+    case K_BRANCH: /* handled by caller */ break;
+    }
+}
+
+static void begin_meta(tctx *t, sf_u32 guest_off)
+{
+    dbt_block *b = t->blk;
+    dbt_imeta *m = &b->meta[b->nmeta++];
+    memset(m, 0, sizeof *m);
+    m->host_off = (sf_u16)emit_pos(&t->em);
+    m->guest_off = (sf_u16)guest_off;
+    t->cur = m;
+}
+
+static int fetch(tctx *t, sf_u32 gpc, sh_insn *d)
+{
+    sf_u32 op;
+    if (t->env->fetch16(t->env->ctx, gpc, &op)) { t->err = DBT_ERR_FETCH; t->fault = gpc; return 0; }
+    sh4_decode(op, d);
+    return 1;
+}
+
+int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
+                        sf_u16 *buf, int cap, dbt_block *out, sf_u32 *fault_addr)
+{
+    tctx t;
+    dbt_block *b = out;
+    int max = env->max_insns > 0 && env->max_insns <= DBT_MAX_INSNS ? env->max_insns : DBT_MAX_INSNS;
+    int n = 0, ended = 0, k;
+    sf_u32 gpc = guest_pc;
+
+    memset(b, 0, sizeof *b);
+    memset(&t, 0, sizeof t);
+    t.env = env; t.blk = b;
+    emit_init(&t.em, buf, cap);
+    b->guest_pc = guest_pc; b->host_base = host_base; b->end_reason = END_FULL;
+
+    while (!ended && n < max && !t.err) {
+        sh_insn d, s;
+        /* size budget: code + worst-case tail must stay within literal reach */
+        if (emit_pos(&t.em) > 560 || emit_lits_bytes(&t.em) > 160 || b->nlinks >= DBT_MAX_LINKS - 1) break;
+        t.gpc = gpc;
+        if (!fetch(&t, gpc, &d)) break;
+        begin_meta(&t, gpc - guest_pc);
+        n++;
+        if (d.kind == K_BRANCH) {
+            const sh_insn *slot = 0;
+            if (d.has_slot) {
+                if (!fetch(&t, gpc + 2, &s)) break;
+                if (!sh4_slot_legal(&s)) { /* let hardware raise slot-illegal: pass both through */
+                    emit16(&t.em, d.op); emit16(&t.em, s.op);
+                    gpc += 4; b->end_reason = END_ILLEGAL; ended = 1; break;
+                }
+                slot = &s;
+            }
+            tr_branch(&t, &d, slot);
+            gpc += d.has_slot ? 4 : 2;
+            if (d.br != BR_BT && d.br != BR_BF && d.br != BR_BTS && d.br != BR_BFS) { ended = 1; b->end_reason = END_BRANCH; }
+            continue;
+        }
+        tr_insn(&t, &d, 0);
+        gpc += 2;
+        if (d.kind == K_TRAP && (d.op & 0xFF00) == 0xC300) { ended = 1; b->end_reason = END_TRAP; }
+        else if (d.kind == K_PRIV && d.ctrl == CR_SR && !d.is_store) { ended = 1; b->end_reason = END_PRIV; }
+        else if (d.kind == K_ILLEGAL) { ended = 1; b->end_reason = END_ILLEGAL; }
+    }
+
+    if (t.err == DBT_ERR_FETCH || t.err == DBT_ERR_READ) {
+        if (fault_addr) *fault_addr = t.fault;
+        b->guest_len = gpc - guest_pc;
+        return t.err;
+    }
+    if (t.err) return t.err;
+
+    b->guest_len = gpc - guest_pc;
+    /* fall-through exit: also after trapa / ldc sr / illegal, where execution
+     * resumes at the next guest instruction */
+    if (!ended || b->end_reason != END_BRANCH) {
+        begin_meta(&t, b->guest_len);
+        jump_direct(&t, gpc, 0);
+        b->nmeta--;                       /* that entry is only a sentinel */
+    }
+    /* sentinel */
+    b->meta[b->nmeta].host_off = (sf_u16)emit_pos(&t.em);
+    b->meta[b->nmeta].guest_off = (sf_u16)b->guest_len;
+    b->meta[b->nmeta].nspill = 0;
+    b->code_len = emit_pos(&t.em);
+
+    /* exit stubs: one per link. Enter with all guest registers intact. */
+    for (k = 0; k < b->nlinks; k++) {
+        int stub_off = emit_pos(&t.em);
+        int rS = 1;
+        int i;
+        /* record the stub address as the initial value of the link literal */
+        for (i = 0; i < t.em.nlits; i++)
+            if (t.em.lits[i].tag == TAG_LINK(k)) t.em.lits[i].value = host_base + (sf_u32)stub_off;
+        emit16(&t.em, op_lds_slot(rS, SLOT_Y0));
+        emit_mov_lit(&t.em, rS, b->links[k].guest_target, TAG_STUB_T(k));
+        emit16(&t.em, op_lds_slot(rS, SLOT_X0));
+        emit_mov_lit(&t.em, rS, 0, TAG_STUB_L(k));              /* address of the link literal, patched below */
+        emit16(&t.em, op_lds_slot(rS, SLOT_X1));
+        emit_mov_lit(&t.em, rS, env->rt_lookup_link, TAG_NONE);
+        emit16(&t.em, OP_JMP(rS));
+        emit16(&t.em, op_sts_slot(SLOT_Y0, rS));
+    }
+    emit_flush_lits(&t.em);
+    for (k = 0; k < b->nlinks; k++) {
+        int link_off = emit_lit_offset(&t.em, TAG_LINK(k));
+        int l_off = emit_lit_offset(&t.em, TAG_STUB_L(k));
+        sf_u32 v = host_base + (sf_u32)link_off;
+        b->links[k].lit_off = link_off;
+        if (l_off >= 0) { emit_patch16(&t.em, l_off, v >> 16); emit_patch16(&t.em, l_off + 2, v & 0xFFFFu); }
+    }
+    b->host_len = emit_pos(&t.em);
+    if (t.em.overflow) return DBT_ERR_OVERFLOW;
+    return DBT_OK;
+}
+
+int dbt_block_find(const dbt_block *b, sf_u32 host_off)
+{
+    int lo = 0, hi = b->nmeta - 1;
+    if (b->nmeta == 0 || host_off >= b->meta[b->nmeta].host_off) return -1;
+    while (lo < hi) {
+        int mid = (lo + hi + 1) / 2;
+        if (b->meta[mid].host_off <= host_off) lo = mid; else hi = mid - 1;
+    }
+    return lo;
+}
+
+int dbt_block_pending_spills(const dbt_block *b, int idx, sf_u32 host_off, dbt_spill *out)
+{
+    const dbt_imeta *m = &b->meta[idx];
+    int i, n = 0;
+    for (i = 0; i < m->nspill; i++)
+        if (m->spill[i].start < host_off && host_off <= m->spill[i].end)
+            out[n++] = m->spill[i];
+    return n;
+}

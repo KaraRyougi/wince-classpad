@@ -13,12 +13,16 @@ typedef unsigned __int64 sf_u64;
 typedef __int64          sf_i64;
 typedef unsigned int     sf_u32;
 typedef int              sf_i32;
+typedef unsigned short   sf_u16;
+typedef unsigned char    sf_u8;
 #else
 #include <stdint.h>
 typedef uint64_t sf_u64;
 typedef int64_t  sf_i64;
 typedef uint32_t sf_u32;
 typedef int32_t  sf_i32;
+typedef uint16_t sf_u16;
+typedef uint8_t  sf_u8;
 #endif
 
 typedef sf_u32 f32;   /* raw IEEE single bits */
