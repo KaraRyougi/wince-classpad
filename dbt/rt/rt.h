@@ -79,6 +79,9 @@ extern char dbt_stubs_start[], dbt_stubs_end[];
 extern dbt_gctx dbt_ctx_rt;      /* used by lookup-miss and helper stubs */
 extern dbt_gctx dbt_ctx_exc;     /* used by the exception handlers */
 
+void *memcpy(void *d, const void *s, __SIZE_TYPE__ n);
+void *memset(void *d, int c, __SIZE_TYPE__ n);
+
 /* debug console (emulator debug port now, SCIF later) */
 void dbt_putc(int c);
 void dbt_puts(const char *s);

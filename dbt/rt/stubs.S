@@ -29,11 +29,37 @@
         .word 0x00AB
         .endm
 
+/* One literal pool per region (mov.l @(disp,PC) reaches only 1 KiB). */
+        .macro POOL sfx
+        .align 2
+.Lvectors\sfx:      .long _dbt_vectors
+.Lsr_init\sfx:      .long 0x400010F0        /* MD | DSP | IMASK=15 */
+.Lhmask\sfx:        .long 8191              /* HSIZE - 1, must match rt.c */
+.Lhash\sfx:         .long _dbt_hash
+.Limask\sfx:        .long 0x000000F0
+.Lctx_rt\sfx:       .long _dbt_ctx_rt
+.Lctx_rt_rend\sfx:  .long _dbt_ctx_rt + CTX_REND
+.Lctx_exc\sfx:      .long _dbt_ctx_exc
+.Lctx_exc_rend\sfx: .long _dbt_ctx_exc + CTX_REND
+.Lstack_rt\sfx:     .long _dbt_stack_rt_top
+.Lstack_exc\sfx:    .long _dbt_stack_exc_top
+.Lresolve\sfx:      .long _dbt_resolve
+.Lexc_c\sfx:        .long _dbt_exc_c
+.Lrte_c\sfx:        .long _dbt_rte_c
+.Lfpu_c\sfx:        .long _dbt_fpu_c
+.Lfallback_c\sfx:   .long _dbt_fallback_c
+.Lldc_sr_c\sfx:     .long _dbt_ldc_sr_c
+.Lexpevt\sfx:       .long 0xFF000024
+.Ltra\sfx:          .long 0xFF000020
+.Ltea\sfx:          .long 0xFF00000C
+.Lintevt\sfx:       .long 0xFF000028
+        .endm
+
 /* Save the guest context into dbt_ctx_rt with descending stores.
  * Precondition: guest r0,r1,r2 are in Y0,Y1,A0; r1 holds the guest SR;
  * r0 and r2 are free. Postcondition: r2 = &dbt_ctx_rt, r0/r1 clobbered. */
-        .macro SAVE_CTX_RT
-        mov.l   .Lctx_rt_rend, r2
+        .macro SAVE_CTX_RT sfx
+        mov.l   .Lctx_rt_rend\sfx, r2
         mov.l   r15, @-r2
         mov.l   r14, @-r2
         mov.l   r13, @-r2
@@ -73,9 +99,9 @@ _dbt_stubs_start:
 /* dbt_enter(r4 = host entry): install VBR, set MD|DSP, interrupts masked */
         .global _dbt_enter
 _dbt_enter:
-        mov.l   .Lvectors, r0
+        mov.l   .LvectorsA, r0
         ldc     r0, vbr
-        mov.l   .Lsr_init, r0
+        mov.l   .Lsr_initA, r0
         ldc     r0, sr
         jmp     @r4
         nop
@@ -109,11 +135,11 @@ _dbt_\name:
 \s3:    STSX    SLOT_X0, 0             /* r0 = gpc */
         mov     r0, r1
         shlr    r1
-        mov.l   .Lhmask, r2
+        mov.l   .LhmaskA, r2
         and     r2, r1
         shll2   r1
         shll    r1                     /* index * 8 */
-        mov.l   .Lhash, r2
+        mov.l   .LhashA, r2
         add     r2, r1                 /* r1 = &hash[i] */
         mov.l   @r1, r2
         cmp/eq  r0, r2
@@ -127,18 +153,18 @@ _dbt_\name:
         nop
 2:      /* miss: r0 = gpc (also in X0) */
         stc     sr, r1                 /* guest SR */
-        mov.l   .Limask, r2
+        mov.l   .LimaskA, r2
         or      r1, r2
         ldc     r2, sr                 /* interrupts masked from here on */
-        SAVE_CTX_RT
+        SAVE_CTX_RT A
         STSX    SLOT_X0, 4             /* arg0 = gpc */
         .if \link
         STSX    SLOT_X1, 5             /* arg1 = link literal address */
         .else
         mov     #0, r5
         .endif
-        mov.l   .Lstack_rt, r15
-        mov.l   .Lresolve, r0
+        mov.l   .Lstack_rtA, r15
+        mov.l   .LresolveA, r0
         jsr     @r0
         nop
         bra     _dbt_tail_full_prep    /* r0 = host target */
@@ -168,7 +194,7 @@ _dbt_hit_end:
         .global _dbt_tail_full_prep
 _dbt_tail_full_prep:
         mov     r0, r1
-        mov.l   .Lctx_rt, r2
+        mov.l   .Lctx_rtA, r2
         mov.l   @(CTX_SR, r2), r3
         mov.l   @(CTX_PR, r2), r0
         lds     r0, pr
@@ -212,6 +238,7 @@ _dbt_full_m4:
         jmp     @r1
         STSX    SLOT_Y1, 1
 _dbt_full_end:
+        POOL    A
 
 /* ------------------------------------------------------------------ */
 /* Helper stubs. In: X0 = argument (opcode / new SR), X1 = return address. */
@@ -222,14 +249,14 @@ _dbt_\name:
 \s1:    LDSX    1, SLOT_Y1
 \s2:    LDSX    2, SLOT_A0
 \s3:    stc     sr, r1
-        mov.l   .Limask, r2
+        mov.l   .LimaskB, r2
         or      r1, r2
         ldc     r2, sr
 \masked:
-        SAVE_CTX_RT
+        SAVE_CTX_RT B
         mov     r2, r4                 /* arg0 = ctx */
         STSX    SLOT_X0, 5             /* arg1 = opcode / value */
-        mov.l   .Lstack_rt, r15
+        mov.l   .Lstack_rtB, r15
         mov.l   \cfunc, r0
         jsr     @r0
         nop
@@ -238,12 +265,13 @@ _dbt_\name:
         nop
         .endm
 
-        HELPER  fpu_stub, .Lfpu_c, _dbt_hfpu_s1, _dbt_hfpu_s2, _dbt_hfpu_s3, _dbt_hfpu_masked
-        HELPER  fallback_stub, .Lfallback_c, _dbt_hfb_s1, _dbt_hfb_s2, _dbt_hfb_s3, _dbt_hfb_masked
-        HELPER  ldc_sr_stub, .Lldc_sr_c, _dbt_hsr_s1, _dbt_hsr_s2, _dbt_hsr_s3, _dbt_hsr_masked
+        HELPER  fpu_stub, .Lfpu_cB, _dbt_hfpu_s1, _dbt_hfpu_s2, _dbt_hfpu_s3, _dbt_hfpu_masked
+        HELPER  fallback_stub, .Lfallback_cB, _dbt_hfb_s1, _dbt_hfb_s2, _dbt_hfb_s3, _dbt_hfb_masked
+        HELPER  ldc_sr_stub, .Lldc_sr_cB, _dbt_hsr_s1, _dbt_hsr_s2, _dbt_hsr_s3, _dbt_hsr_masked
         .global _dbt_hfpu_s1, _dbt_hfpu_s2, _dbt_hfpu_s3, _dbt_hfpu_masked
         .global _dbt_hfb_s1, _dbt_hfb_s2, _dbt_hfb_s3, _dbt_hfb_masked
         .global _dbt_hsr_s1, _dbt_hsr_s2, _dbt_hsr_s3, _dbt_hsr_masked
+        POOL    B
 
 /* ------------------------------------------------------------------ */
 /* Guest rte. Entered after the guest's delay slot with the guest SR (BL is
@@ -254,22 +282,24 @@ _dbt_rte_stub:
         LDSX    1, SLOT_Y1
         LDSX    2, SLOT_A0
         stc     sr, r1
-        mov.l   .Limask, r2
+        mov.l   .LimaskC, r2
         or      r1, r2
         ldc     r2, sr
-        SAVE_CTX_RT
+        SAVE_CTX_RT C
         stc     spc, r4                /* arg0 = guest spc */
-        mov.l   .Lctx_rt, r5
-        stc     ssr, r0
-        mov.l   r0, @(CTX_SSR, r5)
+        mov.l   .Lctx_rtC, r5
         add     #CTX_SSR, r5           /* arg1 = &ctx->ssr */
-        mov.l   .Lstack_rt, r15
-        mov.l   .Lrte_c, r0
+        stc     ssr, r0
+        mov.l   r0, @r5
+        mov.l   .Lstack_rtC, r15
+        mov.l   .Lrte_cC, r0
         jsr     @r0
         nop
         /* r0 = host target; new SSR in ctx->ssr */
-        mov.l   .Lctx_rt, r2
-        mov.l   @(CTX_SSR, r2), r1
+        mov.l   .Lctx_rtC, r2
+        mov     r2, r1
+        add     #CTX_SSR, r1
+        mov.l   @r1, r1
         ldc     r1, ssr
         ldc     r0, spc
         /* restore guest registers (SR is restored by rte itself) */
@@ -303,6 +333,7 @@ _dbt_rte_stub:
         STSX    SLOT_Y0, 0
         rte
         STSX    SLOT_A0, 2             /* r2 restored in the slot (r8-r15 are bank-independent) */
+        POOL    C
 
 /* ------------------------------------------------------------------ */
 /* Exception vectors. VBR = _dbt_vectors. Entered with MD=1 RB=1 BL=1, so
@@ -310,17 +341,17 @@ _dbt_rte_stub:
         .balign 4096
         .global _dbt_vectors
 _dbt_vectors:
-        .org    0x100
+        .org    _dbt_vectors + 0x100
         mov     #1, r0
         shll8   r0
         bra     _dbt_exc_common
         nop
-        .org    0x400
+        .org    _dbt_vectors + 0x400
         mov     #4, r0
         shll8   r0
         bra     _dbt_exc_common
         nop
-        .org    0x600
+        .org    _dbt_vectors + 0x600
         mov     #6, r0
         shll8   r0
         bra     _dbt_exc_common
@@ -329,7 +360,7 @@ _dbt_vectors:
         .align 2
 _dbt_exc_common:
         /* r0 = vector offset. Save guest state into dbt_ctx_exc. */
-        mov.l   .Lctx_exc_rend, r2
+        mov.l   .Lctx_exc_rendD, r2
         mov.l   r15, @-r2
         mov.l   r14, @-r2
         mov.l   r13, @-r2
@@ -381,25 +412,25 @@ _dbt_exc_common:
         mov.l   r1, @(CTX_HOSTSPC - CTX_SLOTS, r3)
         stc     ssr, r1
         mov.l   r1, @(CTX_SSR - CTX_SLOTS, r3)
-        mov.l   .Lexpevt, r1
+        mov.l   .LexpevtD, r1
         mov.l   @r1, r1
         mov.l   r1, @(CTX_EXPEVT - CTX_SLOTS, r3)
-        mov.l   .Ltra, r1
+        mov.l   .LtraD, r1
         mov.l   @r1, r1
         mov.l   r1, @(CTX_TRA - CTX_SLOTS, r3)
-        mov.l   .Ltea, r1
+        mov.l   .LteaD, r1
         mov.l   @r1, r1
         mov.l   r1, @(CTX_TEA - CTX_SLOTS, r3)
-        mov.l   .Lintevt, r1
+        mov.l   .LintevtD, r1
         mov.l   @r1, r1
         mov.l   r1, @(CTX_INTEVT - CTX_SLOTS, r3)
         mov.l   r0, @(CTX_VECOFF - CTX_SLOTS, r3)
         mov     r2, r4
-        mov.l   .Lstack_exc, r15
-        mov.l   .Lexc_c, r1
+        mov.l   .Lstack_excD, r15
+        mov.l   .Lexc_cD, r1
         jsr     @r1
         nop
-        mov.l   .Lctx_exc, r2
+        mov.l   .Lctx_excD, r2
         mov     r2, r3
         add     #CTX_SLOTS, r3
         cmp/eq  #1, r0
@@ -462,32 +493,14 @@ _dbt_exc_common:
         rte
         nop
 .Lexc_do_jump:
-        mov.l   @(CTX_JUMPTO, r2), r1
+        mov     r2, r1
+        add     #CTX_SLOTS, r1
+        mov.l   @(CTX_JUMPTO - CTX_SLOTS, r1), r1
         jmp     @r1
         nop
 
         .align 2
-.Lvectors:      .long _dbt_vectors
-.Lsr_init:      .long 0x400010F0        /* MD | DSP | IMASK=15 */
-.Lhmask:        .long 8191              /* HSIZE - 1, must match rt.c */
-.Lhash:         .long _dbt_hash
-.Limask:        .long 0x000000F0
-.Lctx_rt:       .long _dbt_ctx_rt
-.Lctx_rt_rend:  .long _dbt_ctx_rt + CTX_REND
-.Lctx_exc:      .long _dbt_ctx_exc
-.Lctx_exc_rend: .long _dbt_ctx_exc + CTX_REND
-.Lstack_rt:     .long _dbt_stack_rt_top
-.Lstack_exc:    .long _dbt_stack_exc_top
-.Lresolve:      .long _dbt_resolve
-.Lexc_c:        .long _dbt_exc_c
-.Lrte_c:        .long _dbt_rte_c
-.Lfpu_c:        .long _dbt_fpu_c
-.Lfallback_c:   .long _dbt_fallback_c
-.Lldc_sr_c:     .long _dbt_ldc_sr_c
-.Lexpevt:       .long 0xFF000024
-.Ltra:          .long 0xFF000020
-.Ltea:          .long 0xFF00000C
-.Lintevt:       .long 0xFF000028
+        POOL    D
         .global _dbt_stubs_end
 _dbt_stubs_end:
 

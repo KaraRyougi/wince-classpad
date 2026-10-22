@@ -1,4 +1,4 @@
-OUTPUT_FORMAT("elf32-sh-linux", "elf32-shbig-linux", "elf32-sh-linux")
+OUTPUT_FORMAT("elf32-shl", "elf32-sh", "elf32-shl")
 OUTPUT_ARCH(sh)
 ENTRY(_start)
 SECTIONS

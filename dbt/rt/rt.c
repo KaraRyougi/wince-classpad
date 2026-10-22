@@ -2,11 +2,14 @@
  * rt.c - translator runtime, C half. Target-only (big-endian SH7305, P1
  * addresses, no OS). Everything here runs with interrupts masked or BL=1.
  */
-#include <string.h>
 #include "rt.h"
 
+typedef __SIZE_TYPE__ dbt_size_t;
+void *memcpy(void *d, const void *s, dbt_size_t n);
+void *memset(void *d, int c, dbt_size_t n);
+
 #define HSIZE        8192                 /* hash entries, power of two */
-#define MAX_BLOCKS   2048
+#define MAX_BLOCKS   768                  /* ~2 MiB of metadata; see docs/04 */
 #define EXPEVT_REG   (*(volatile sf_u32 *)0xFF000024u)
 #define TRA_REG      (*(volatile sf_u32 *)0xFF000020u)
 #define DEBUG_PORT   (*(volatile sf_u8 *)0xFFFFF000u)
@@ -23,8 +26,8 @@ typedef char check_size[(sizeof(dbt_gctx) == CTX_SIZE) ? 1 : -1];
 dbt_gctx dbt_ctx_rt, dbt_ctx_exc;
 
 /* freestanding helpers GCC may call */
-void *memcpy(void *d, const void *s, unsigned long n) { sf_u8 *a = d; const sf_u8 *b = s; while (n--) *a++ = *b++; return d; }
-void *memset(void *d, int c, unsigned long n) { sf_u8 *a = d; while (n--) *a++ = (sf_u8)c; return d; }
+void *memcpy(void *d, const void *s, dbt_size_t n) { sf_u8 *a = d; const sf_u8 *b = s; while (n--) *a++ = *b++; return d; }
+void *memset(void *d, int c, dbt_size_t n) { sf_u8 *a = d; while (n--) *a++ = (sf_u8)c; return d; }
 
 volatile sf_u32 dbt_shadow_vbr = 0;
 volatile sf_u32 dbt_shadow_md = SR_MD;
