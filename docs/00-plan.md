@@ -55,9 +55,11 @@ needed: casio-emu runs the translator as an ordinary big-endian add-in.
 
 1. ~~Translator core + runtime; hello/exception/FPU guests pass in casio-emu.~~
    Done 2026-10-22.
-2. Interrupt guest: guest programs the TMU through pre-swapped MMIO, takes
-   the interrupt through its own VBR under the translator, `rte` back into
-   translated code. Then a guest that writes the LCD framebuffer.
+2. ~~Interrupt guest: TMU through pre-swapped MMIO, interrupt through the
+   guest VBR under the translator, `rte` back into translated code.~~ Done
+   2026-10-22 (34 checks, including interrupts at arbitrary points of
+   store/load/branch-heavy loops). Next: a guest that writes the LCD
+   framebuffer.
 3. Measure: translated vs native slowdown on a memory-heavy loop and on a
    branch-heavy loop; code-cache pressure with a larger guest.
 4. Guest image choice (blocked on the user): Pocket PC 2000 SH3 ROM (closed,

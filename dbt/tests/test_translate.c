@@ -251,7 +251,8 @@ int main(void)
       /* bf(4) from offset 12 lands on offset 12+4+8 = 24 = taken path */
       expect("bt/s bf target", 12 + 4 + 4 * 2 == 24 && hbuf[12] == OP_SHLR(4));
       /* bra(7) at offset 20 lands at 20+4+14 = 38, right after the 4-word jump at 30..37 */
-      expect("bt/s bra target", 20 + 4 + 7 * 2 == 38 && blk.meta[1].host_off == 38 && blk.meta[1].kind == META_INSN);
+      expect("bt/s bra target", 20 + 4 + 7 * 2 == 38 && blk.meta[4].host_off == 38 && blk.meta[4].kind == META_INSN
+             && blk.meta[1].kind == META_COND_REG && blk.meta[1].fix_reg == 3);
     }
 
     /* 14b. bt/s +6 ; nop : slot, COND boundary, inverted conditional, jump */
@@ -294,6 +295,72 @@ int main(void)
       env.max_insns = 4;
       r = dbt_translate_block(&env, GBASE + 4092, HBASE, hbuf, DBT_BLOCK_WORDS, &blk, &fa);
       expect("fault", r == DBT_ERR_FETCH && fa == GBASE + 4096 && blk.guest_len == 4);
+    }
+
+    /* 19. commit points: mov.l @r1+,r2 ; mov.w @r3,r3 ; mov.l r2,@-r15 ; lds.l @r15+,pr */
+    { sf_u32 ops[] = { 0x6216, 0x6331, 0x2F26, 0x4F26 };
+      translate(ops, 4, 4);
+      expect("commit load32", blk.meta[0].commit_rel == 0 && blk.meta[0].fix_kind == FIX_SWAP32 && blk.meta[0].fix_reg == 2);
+      expect("commit load16", blk.meta[1].commit_rel == 0 && blk.meta[1].fix_kind == FIX_SWAP16 && blk.meta[1].fix_reg == 3);
+      /* store: lds (2) + three swaps (6) then the store at +8 */
+      expect("commit store", blk.meta[2].commit_rel == 8 && blk.meta[2].fix_kind == FIX_NONE);
+      expect("commit lds.l pr", blk.meta[3].commit_rel == 2 && blk.meta[3].fix_kind == FIX_CR_BASE + CR_PR && blk.meta[3].fix_reg == 1);
+      expect("sentinel no commit", blk.meta[4].commit_rel == 0xFF && blk.meta[4].kind == META_INSN);
+    }
+
+    /* 20. jsr @r1 ; mov.l r4,@-r15 : the slot store must not touch X0 (the target) */
+    { sf_u32 ops[] = { 0x410B, 0x2F46 };
+      translate(ops, 2, 2);
+      /* set_pr (4 words), lds r1,x0, then the store with its scratch in X1 */
+      expect("jsr slot target first", hbuf[4] == LDS_X0(1));
+      expect("jsr slot spill shifted", hbuf[5] == LDS_X1(1) && hbuf[9] == 0x2F16 && hbuf[10] == STS_X1(1));
+      expect("jsr slot commit", blk.meta[0].commit_rel == 18 && blk.meta[1].kind == META_TARGET_X0 && blk.meta[1].host_off == 22);
+      { dbt_spill sp[4];
+        expect("jsr slot pending@store", dbt_block_pending_spills(&blk, 0, 20, sp, 4) == 1 && sp[0].slot == SLOT_X1 && sp[0].gpr == 1);
+      }
+    }
+
+    /* 21. rts ; fmov.s @r4+,fr0 : helper call first, target capture afterwards */
+    { sf_u32 ops[] = { 0x000B, 0xF049 };
+      int i, jmp_at = -1, stspr_at = -1;
+      translate(ops, 2, 2);
+      for (i = 0; i < blk.code_len / 2; i++) {
+          if (jmp_at < 0 && (hbuf[i] & 0xF0FF) == 0x402B) jmp_at = i;          /* jmp @rT (helper) */
+          if (stspr_at < 0 && (hbuf[i] & 0xF0FF) == 0x002A) stspr_at = i;      /* sts pr,rT */
+      }
+      expect("rts helper slot order", jmp_at >= 0 && stspr_at > jmp_at && hbuf[stspr_at + 1] == LDS_X0((hbuf[stspr_at] >> 8) & 0xF));
+      expect("rts helper slot no commit", blk.meta[0].commit_rel == 0xFF && blk.meta[1].kind == META_TARGET_X0);
+    }
+
+    /* 22. jsr @r1 ; fmov.s @r1+,fr0 : helper slot writing the target register is rejected */
+    { sf_u32 ops[] = { 0x410B, 0xF019 };
+      expect("helper slot clobbers target", translate(ops, 2, 2) == DBT_ERR_UNSUPPORTED);
+    }
+
+    /* 24. bf/s +1 ; add #1,r3 : T=1 falls through, T=0 takes the branch */
+    { sf_u32 ops[] = { 0x8F01, 0x7301 };
+      translate(ops, 2, 2);
+      expect("bf/s cond order", blk.meta[1].kind == META_COND && blk.meta[1].target == GBASE + 4 && blk.meta[1].fallthrough == GBASE + 6);
+    }
+
+    /* 25. bt/s +2 ; dt r1 : slot writes T; old T kept in rA, each path resumable */
+    { sf_u32 ops[] = { 0x8D02, 0x4110 };
+      translate(ops, 2, 2);
+      expect("bt/s dt ranges", blk.nmeta >= 4 && blk.meta[1].kind == META_COND_REG && blk.meta[1].host_off == 6
+             && blk.meta[1].fix_reg == 2 && blk.meta[1].target == GBASE + 8 && blk.meta[1].fallthrough == GBASE + 4
+             && blk.meta[2].kind == META_TARGET_CONST && blk.meta[2].host_off == 14 && blk.meta[2].target == GBASE + 4
+             && blk.meta[3].kind == META_TARGET_CONST && blk.meta[3].host_off == 24 && blk.meta[3].target == GBASE + 8);
+      expect("bt/s dt words", hbuf[0] == LDS_Y0(2) && hbuf[1] == OP_MOVT(2) && hbuf[2] == 0x4110 && hbuf[7] == OP_SHLR(3));
+      /* rA's spill is open from host 0 to its restore in the taken path: pending at the not-taken sts too */
+      { dbt_spill sp[4]; int n = dbt_block_pending_spills(&blk, 2, 18, sp, 4);
+        expect("bt/s dt pending", n == 2 && sp[1].gpr == 2 && sp[1].slot == SLOT_Y0 && sp[0].gpr == 3 && sp[0].slot == SLOT_Y1);
+      }
+    }
+
+    /* 23. exit stub offsets are recorded */
+    { sf_u32 ops[] = { 0xA000 };
+      translate(ops, 1, 1);
+      expect("stub_off", blk.nlinks == 1 && blk.links[0].stub_off == blk.code_len);
     }
 
     printf("%d checks, %d failures\n", checks, failures);

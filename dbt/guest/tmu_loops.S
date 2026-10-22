@@ -1,0 +1,297 @@
+/* tmu_loops.S - hot loops of one construct each, run with interrupts on and
+ * off by tmu.c to localize resume bugs. r4 = iterations, r5 = &scratch[0]
+ * (16 words), returns a checksum in r0. Only r0-r7 and r15 are used. */
+        .text
+        .macro  HEAD
+        mov     #1, r1
+        mov     #2, r2
+        mov     #3, r3
+        mov     #0, r7
+        mov     #5, r6
+        .endm
+        .macro  BODY
+        add     r1, r2
+        xor     r2, r3
+        add     r3, r1
+        rotl    r6
+        add     #1, r7
+        .endm
+        .macro  TAIL
+        mov     r1, r0
+        xor     r2, r0
+        xor     r3, r0
+        xor     r6, r0
+        xor     r7, r0
+        rts
+        nop
+        .endm
+
+        .global _loop_alu
+_loop_alu:
+        HEAD
+1:      BODY
+        dt      r4
+        bf      1b
+        TAIL
+
+        .global _loop_trapa                    /* same as loop_alu plus a trapa each iteration */
+_loop_trapa:
+        HEAD
+1:      BODY
+        trapa   #5
+        dt      r4
+        bf      1b
+        TAIL
+
+        .global _loop_bfs
+_loop_bfs:
+        HEAD
+1:      BODY
+        dt      r4
+        bf/s    1b
+        xor     r1, r6
+        TAIL
+
+        .global _loop_tslot                    /* bt/s with a T-writing slot */
+_loop_tslot:
+        HEAD
+1:      BODY
+        cmp/pl  r4
+        bt/s    1b
+        dt      r4
+        TAIL
+
+        .global _loop_ld
+_loop_ld:
+        HEAD
+        mov.l   r1, @r5
+1:      BODY
+        mov.l   @r5, r6                        /* plain load */
+        add     r6, r1
+        dt      r4
+        bf      1b
+        TAIL
+
+        .global _loop_ldpost
+_loop_ldpost:
+        HEAD
+        mov.l   r1, @r5
+1:      BODY
+        mov.l   @r5+, r6                       /* post-increment load */
+        add     #-4, r5
+        add     r6, r1
+        dt      r4
+        bf      1b
+        TAIL
+
+        .global _loop_ldself                   /* mov.l @r6,r6 */
+_loop_ldself:
+        HEAD
+        mov.l   r5, @r5                        /* scratch[0] = &scratch */
+1:      BODY
+        mov     r5, r6
+        mov.l   @r6, r6
+        xor     r6, r1
+        dt      r4
+        bf      1b
+        TAIL
+
+        .global _loop_st
+_loop_st:
+        HEAD
+1:      BODY
+        mov.l   r1, @r5                        /* plain store */
+        mov.l   @r5, r6
+        dt      r4
+        bf      1b
+        TAIL
+
+        .global _loop_stpre
+_loop_stpre:
+        HEAD
+        add     #8, r5
+1:      BODY
+        mov.l   r1, @-r5                       /* pre-decrement store */
+        mov.l   @r5+, r6
+        xor     r6, r2
+        dt      r4
+        bf      1b
+        TAIL
+
+        .global _loop_r0idx
+_loop_r0idx:
+        HEAD
+1:      BODY
+        mov     r7, r0
+        and     #15, r0
+        shll2   r0
+        mov.l   r1, @(r0, r5)                  /* r0-indexed store */
+        mov.l   @(r0, r5), r6
+        dt      r4
+        bf      1b
+        TAIL
+
+        .global _loop_r0disp                   /* r0 as data: mov.l r0,@(disp,rn) */
+_loop_r0disp:
+        HEAD
+1:      BODY
+        mov     r1, r0
+        mov.l   r0, @(4, r5)
+        mov.l   @(4, r5), r6
+        dt      r4
+        bf      1b
+        TAIL
+
+        .global _loop_rmw
+_loop_rmw:
+        HEAD
+        mov.l   r1, @r5
+1:      BODY
+        mov.l   @r5, r6
+        add     r1, r6
+        mov.l   r6, @r5
+        dt      r4
+        bf      1b
+        mov.l   @r5, r6
+        xor     r6, r1
+        TAIL
+
+        .global _loop_pcrel
+_loop_pcrel:
+        HEAD
+1:      BODY
+        mov.l   2f, r6
+        xor     r6, r1
+        mova    2f, r0
+        xor     r0, r2
+        dt      r4
+        bf      1b
+        TAIL
+        .align 2
+2:      .long   0x12345678
+
+        .global _loop_jsr
+_loop_jsr:
+        sts.l   pr, @-r15
+        HEAD
+1:      BODY
+        mov.l   .Lsub, r6
+        jsr     @r6
+        nop
+        dt      r4
+        bf      1b
+        lds.l   @r15+, pr
+        TAIL
+
+        .global _loop_jsrslot                  /* store in the slot of jsr */
+_loop_jsrslot:
+        sts.l   pr, @-r15
+        HEAD
+1:      BODY
+        mov.l   .Lsub, r6
+        jsr     @r6
+        mov.l   r1, @r5
+        mov.l   @r5, r6
+        xor     r6, r3
+        dt      r4
+        bf      1b
+        lds.l   @r15+, pr
+        TAIL
+
+        .global _loop_pushpop                  /* sts.l/lds.l pr, mov.l @-r15 / @r15+ */
+_loop_pushpop:
+        HEAD
+1:      BODY
+        mov.l   r1, @-r15
+        sts.l   pr, @-r15
+        mov.l   r2, @-r15
+        mov.l   @r15+, r6
+        lds.l   @r15+, pr
+        mov.l   @r15+, r6
+        xor     r6, r3
+        dt      r4
+        bf      1b
+        TAIL
+
+/* trap_probe(out): r0-r14 = 0x11111111*k+0x100, trapa #5, store r0-r14 to out[0..14], T to out[15] */
+        .global _trap_probe
+_trap_probe:
+        mov.l   r8, @-r15
+        mov.l   r9, @-r15
+        mov.l   r10, @-r15
+        mov.l   r11, @-r15
+        mov.l   r12, @-r15
+        mov.l   r13, @-r15
+        mov.l   r14, @-r15
+        mov.l   r4, @-r15                      /* out */
+        mov.l   .Lp0, r0
+        mov     r0, r1
+        add     r0, r1
+        mov     r1, r2
+        add     r0, r2
+        mov     r2, r3
+        add     r0, r3
+        mov     r3, r4
+        add     r0, r4
+        mov     r4, r5
+        add     r0, r5
+        mov     r5, r6
+        add     r0, r6
+        mov     r6, r7
+        add     r0, r7
+        mov     r7, r8
+        add     r0, r8
+        mov     r8, r9
+        add     r0, r9
+        mov     r9, r10
+        add     r0, r10
+        mov     r10, r11
+        add     r0, r11
+        mov     r11, r12
+        add     r0, r12
+        mov     r12, r13
+        add     r0, r13
+        mov     r13, r14
+        add     r0, r14
+        sett
+        trapa   #5
+        mov.l   @r15, r15                      /* r15 = out (stack pointer value saved separately below) */
+        mov.l   r0, @(0, r15)
+        mov.l   r1, @(4, r15)
+        mov.l   r2, @(8, r15)
+        mov.l   r3, @(12, r15)
+        mov.l   r4, @(16, r15)
+        mov.l   r5, @(20, r15)
+        mov.l   r6, @(24, r15)
+        mov.l   r7, @(28, r15)
+        mov.l   r8, @(32, r15)
+        mov.l   r9, @(36, r15)
+        mov.l   r10, @(40, r15)
+        mov.l   r11, @(44, r15)
+        mov.l   r12, @(48, r15)
+        mov.l   r13, @(52, r15)
+        mov.l   r14, @(56, r15)
+        movt    r0
+        mov.l   r0, @(60, r15)
+        add     #64, r15
+        mov.l   @r15, r15                      /* out[16] holds the saved stack pointer */
+        add     #4, r15
+        mov.l   @r15+, r14
+        mov.l   @r15+, r13
+        mov.l   @r15+, r12
+        mov.l   @r15+, r11
+        mov.l   @r15+, r10
+        mov.l   @r15+, r9
+        mov.l   @r15+, r8
+        rts
+        nop
+        .align 2
+.Lp0:   .long   0x11111111
+
+        .align 2
+.Lsub:  .long   _loop_sub
+        .global _loop_sub
+_loop_sub:
+        add     #3, r1
+        rts
+        xor     r1, r2

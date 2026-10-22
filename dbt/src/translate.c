@@ -18,7 +18,23 @@ typedef struct {
     dbt_imeta *cur;        /* meta entry being filled */
     int err;
     sf_u32 fault;
+    int    slot_x0;          /* translating the delay slot of a branch whose target sits in X0 */
 } tctx;
+
+/* DSP slots for scratch spills. Inside the delay slot of an indirect branch
+ * X0 holds the target, so the slots shift: X0->X1, X1->Y1, Y1->A0. */
+static int SA(const tctx *t) { return t->slot_x0 ? SLOT_X1 : SLOT_X0; }
+static int SB(const tctx *t) { return t->slot_x0 ? SLOT_Y1 : SLOT_X1; }
+static int SC(const tctx *t) { return t->slot_x0 ? SLOT_A0 : SLOT_Y1; }
+
+/* Mark the memory operation about to be emitted as the range's commit point. */
+static void commit(tctx *t, int fix_kind, int fix_reg)
+{
+    dbt_imeta *m = t->cur;
+    sf_u32 rel = (sf_u32)emit_pos(&t->em) - m->host_off;
+    if (rel >= 0xFF || m->commit_rel != 0xFF) { t->err = DBT_ERR_INTERNAL; return; }
+    m->commit_rel = (sf_u8)rel; m->fix_kind = (sf_u8)fix_kind; m->fix_reg = (sf_u8)fix_reg;
+}
 
 /* ------------------------------------------------------------ helpers */
 
@@ -129,30 +145,34 @@ static void tr_mem(tctx *t, const sh_insn *d)
     if (d->ctrl != CR_NONE) {
         /* sts.l/stc.l CR,@-Rn  or  lds.l/ldc.l @Rm+,CR */
         int rT = pick_scratch(R(d->base));
-        spill(t, rT, SLOT_X0);
+        spill(t, rT, SA(t));
         if (d->is_store) {
             emit16(e, op_read_cr(d->ctrl, d->ctrl_bank, rT));
             swap32(t, rT, rT);
+            commit(t, FIX_NONE, 0);
             emit16(e, OP_MOVL_PREDEC(rT, d->base));
         } else {
+            commit(t, FIX_CR_BASE + d->ctrl, rT);
             emit16(e, OP_MOVL_POSTINC(d->base, rT));
             swap32(t, rT, rT);
             emit16(e, op_write_cr(d->ctrl, d->ctrl_bank, rT));
         }
-        restore(t, rT, SLOT_X0);
+        restore(t, rT, SA(t));
         return;
     }
     if (d->size == 1) { emit16(e, d->op); return; }
     if (!d->is_store) {
+        commit(t, d->size == 2 ? FIX_SWAP16 : FIX_SWAP32, d->data);
         emit16(e, d->op);
         if (d->size == 2) { emit16(e, OP_SWAPB(d->data, d->data)); emit16(e, OP_EXTSW(d->data, d->data)); }
         else swap32(t, d->data, d->data);
         return;
     }
-    /* stores */
+    /* stores: everything before the store itself is undone by the spill
+     * records, so an exception before the commit point restarts cleanly */
     if (!store_data_is_fixed_r0(d)) {
         int rT = pick_scratch(d->touched);
-        spill(t, rT, SLOT_X0);
+        spill(t, rT, SA(t));
         if (d->am == AM_PREDEC && d->data == d->base) {
             /* SH stores the decremented register value */
             emit16(e, OP_MOV_RR(d->data, rT));
@@ -161,42 +181,47 @@ static void tr_mem(tctx *t, const sh_insn *d)
         } else {
             swapN(t, d->size, d->data, rT);
         }
+        commit(t, FIX_NONE, 0);
         emit16(e, store_with_data(d, rT));
-        restore(t, rT, SLOT_X0);
+        restore(t, rT, SA(t));
         return;
     }
     /* data fixed to r0 */
     if (d->am == AM_GBR || d->base != 0) {
-        spill(t, 0, SLOT_X0);
+        spill(t, 0, SA(t));
         swapN(t, d->size, 0, 0);
+        commit(t, FIX_NONE, 0);
         emit16(e, d->op);
-        restore(t, 0, SLOT_X0);
+        restore(t, 0, SA(t));
         return;
     }
     /* base is r0 too: materialize the address in a scratch */
     if (d->movca) {
         int rA = pick_scratch(R(0));
-        spill(t, rA, SLOT_X0);
+        spill(t, rA, SA(t));
         emit16(e, OP_MOV_RR(0, rA));
+        spill(t, 0, SB(t));                 /* r0 is swapped in place: keep it restorable */
         swap32(t, 0, 0);
+        commit(t, FIX_NONE, 0);
         emit16(e, OP_MOVCA(rA));
-        swap32(t, 0, 0);                    /* undo in place */
-        restore(t, rA, SLOT_X0);
+        restore(t, 0, SB(t));
+        restore(t, rA, SA(t));
         return;
     }
     {
         int rA = pick_scratch(R(0));
         int rV = pick_scratch(R(0) | R(rA));
         sh_insn s2;
-        spill(t, rA, SLOT_X0);
+        spill(t, rA, SA(t));
         emit16(e, OP_MOV_RR(0, rA));
         if (d->disp) emit16(e, OP_ADD_IMM(d->disp, rA));
-        spill(t, rV, SLOT_X1);
+        spill(t, rV, SB(t));
         swapN(t, d->size, 0, rV);
         s2 = *d; s2.am = AM_REG; s2.base = rA;
+        commit(t, FIX_NONE, 0);
         emit16(e, store_with_data(&s2, rV));
-        restore(t, rV, SLOT_X1);
-        restore(t, rA, SLOT_X0);
+        restore(t, rV, SB(t));
+        restore(t, rA, SA(t));
     }
 }
 
@@ -302,6 +327,25 @@ static void set_pr(tctx *t, sf_u32 value, sf_u32 avoid)
 static void tr_insn(tctx *t, const sh_insn *d, int in_slot);
 static void begin_meta_kind(tctx *t, int kind, sf_u32 guest_off, sf_u32 target, sf_u32 fallthrough);
 
+/* Target capture and delay slot of an indirect branch. Normally the target
+ * goes to X0 first and the slot is translated with shifted scratch slots.
+ * A slot that needs a helper call owns all five DSP slots, so for it the
+ * target is captured afterwards; that needs the slot not to write the
+ * target register (helpers never write PR). */
+static void indirect_slot(tctx *t, const sh_insn *slot, int reg, int from_pr, sf_u32 add_const,
+                          sf_u32 avoid, sf_u32 target_regs)
+{
+    int helper_slot = slot && (slot->kind == K_FPU || slot->kind == K_FALLBACK);
+    if (helper_slot) {
+        if (slot->defs & target_regs) { t->err = DBT_ERR_UNSUPPORTED; return; }
+        tr_insn(t, slot, 1);
+        target_to_x0(t, reg, from_pr, add_const, avoid);
+        return;
+    }
+    target_to_x0(t, reg, from_pr, add_const, avoid);
+    if (slot) { t->slot_x0 = 1; tr_insn(t, slot, 1); t->slot_x0 = 0; }
+}
+
 static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
 {
     emitter *e = &t->em;
@@ -329,22 +373,19 @@ static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
     case BR_BRAF:
     case BR_BSRF:
         if (d->br == BR_BSRF) set_pr(t, next, avoid | R(d->br_reg));
-        target_to_x0(t, d->br_reg, 0, next, avoid | R(d->br_reg));
-        if (slot) tr_insn(t, slot, 1);
+        indirect_slot(t, slot, d->br_reg, 0, next, avoid | R(d->br_reg), R(d->br_reg));
         begin_meta_kind(t, META_TARGET_X0, goff, 0, 0);
         jump_lookup(t, 0);
         return;
     case BR_JMP:
     case BR_JSR:
         if (d->br == BR_JSR) set_pr(t, next, avoid | R(d->br_reg));
-        target_to_x0(t, d->br_reg, 0, 0, 0);
-        if (slot) tr_insn(t, slot, 1);
+        indirect_slot(t, slot, d->br_reg, 0, 0, 0, R(d->br_reg));
         begin_meta_kind(t, META_TARGET_X0, goff, 0, 0);
         jump_lookup(t, 0);
         return;
     case BR_RTS:
-        target_to_x0(t, -1, 1, 0, avoid);
-        if (slot) tr_insn(t, slot, 1);
+        indirect_slot(t, slot, -1, 1, 0, avoid, 0);
         begin_meta_kind(t, META_TARGET_X0, goff, 0, 0);
         jump_lookup(t, 0);
         return;
@@ -367,37 +408,46 @@ static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
         return;
     case BR_BTS:
     case BR_BFS:
-        if (!slot || !slot->writes_t) {
-            if (slot) tr_insn(t, slot, 1);
-            begin_meta_kind(t, META_COND, goff, target, next);
-            emit16(e, d->br == BR_BTS ? OP_BF(3) : OP_BT(3));
-            jump_direct(t, target, 0);
-            return;
-        } else {
-            /* slot writes T: branch on the old T, leave the slot's T visible.
-             * No boundary: the old T lives only in rA, so an exception after
-             * the slot is not resumable here (cannot happen: no memory ops). */
-            int rA = pick_scratch(avoid);
-            int rB = pick_scratch(avoid | R(rA));
-            spill(t, rA, SLOT_Y0);
-            emit16(e, OP_MOVT(rA));
-            tr_insn(t, slot, 1);
-            spill(t, rB, SLOT_Y1);
-            emit16(e, OP_MOVT(rB));
-            emit16(e, OP_TST_RR(rA, rA));            /* T = (old T == 0) */
-            emit16(e, d->br == BR_BTS ? OP_BF(4) : OP_BT(4));
-            /* not taken */
-            emit16(e, OP_SHLR(rB));                  /* T = slot's T */
-            emit16(e, op_sts_slot(SLOT_Y1, rB));
-            emit16(e, op_sts_slot(SLOT_Y0, rA));
-            emit16(e, OP_BRA(7));                    /* over: shlr, 2 restores, 4-word jump */
-            emit16(e, OP_NOP);
-            /* taken */
-            emit16(e, OP_SHLR(rB));
-            restore(t, rB, SLOT_Y1);
-            restore(t, rA, SLOT_Y0);
-            jump_direct(t, target, 0);
-            return;
+        {
+            /* resume pcs by T value: bt/s goes to target on T=1, bf/s on T=0 */
+            sf_u32 pc_t1 = d->br == BR_BTS ? target : next;
+            sf_u32 pc_t0 = d->br == BR_BTS ? next : target;
+            if (!slot || !slot->writes_t) {
+                if (slot) tr_insn(t, slot, 1);
+                begin_meta_kind(t, META_COND, goff, pc_t1, pc_t0);
+                emit16(e, d->br == BR_BTS ? OP_BF(3) : OP_BT(3));
+                jump_direct(t, target, 0);
+                return;
+            } else {
+                /* slot writes T: branch on the old T (kept in rA), leave the
+                 * slot's T visible. Each path after the split has its own
+                 * resume range since rA is restored inside it. */
+                int rA = pick_scratch(avoid);
+                int rB = pick_scratch(avoid | R(rA));
+                spill(t, rA, SLOT_Y0);
+                emit16(e, OP_MOVT(rA));
+                tr_insn(t, slot, 1);
+                begin_meta_kind(t, META_COND_REG, goff, pc_t1, pc_t0);
+                t->cur->fix_reg = (sf_u8)rA;
+                spill(t, rB, SLOT_Y1);
+                emit16(e, OP_MOVT(rB));
+                emit16(e, OP_TST_RR(rA, rA));            /* T = (old T == 0) */
+                emit16(e, d->br == BR_BTS ? OP_BF(4) : OP_BT(4));
+                /* not taken */
+                begin_meta_kind(t, META_TARGET_CONST, goff, next, 0);
+                emit16(e, OP_SHLR(rB));                  /* T = slot's T */
+                emit16(e, op_sts_slot(SLOT_Y1, rB));
+                emit16(e, op_sts_slot(SLOT_Y0, rA));
+                emit16(e, OP_BRA(7));                    /* over: shlr, 2 restores, 4-word jump */
+                emit16(e, OP_NOP);
+                /* taken */
+                begin_meta_kind(t, META_TARGET_CONST, goff, target, 0);
+                emit16(e, OP_SHLR(rB));
+                restore(t, rB, SLOT_Y1);
+                restore(t, rA, SLOT_Y0);
+                jump_direct(t, target, 0);
+                return;
+            }
         }
     }
 }
@@ -411,26 +461,28 @@ static void tr_priv(tctx *t, const sh_insn *d)
         if (d->priv_mem) {
             int rT = pick_scratch(R(d->base)), rU = pick_scratch(R(d->base) | R(rT));
             if (d->is_store) {                                  /* stc.l vbr,@-rn */
-                spill(t, rT, SLOT_X0);
+                spill(t, rT, SA(t));
                 emit_mov_lit(e, rT, t->env->shadow_vbr_addr, TAG_NONE);
                 emit16(e, OP_MOVL_LOAD(rT, rT));
                 swap32(t, rT, rT);
+                commit(t, FIX_NONE, 0);
                 emit16(e, OP_MOVL_PREDEC(rT, d->base));
-                restore(t, rT, SLOT_X0);
+                restore(t, rT, SA(t));
             } else {                                            /* ldc.l @rm+,vbr */
-                spill(t, rT, SLOT_X0); spill(t, rU, SLOT_X1);
+                spill(t, rT, SA(t)); spill(t, rU, SB(t));
+                commit(t, FIX_CR_BASE + CR_VBR, rT);
                 emit16(e, OP_MOVL_POSTINC(d->base, rT));
                 swap32(t, rT, rT);
                 emit_mov_lit(e, rU, t->env->shadow_vbr_addr, TAG_NONE);
                 emit16(e, OP_MOVL_STORE(rT, rU));
-                restore(t, rU, SLOT_X1); restore(t, rT, SLOT_X0);
+                restore(t, rU, SB(t)); restore(t, rT, SA(t));
             }
         } else if ((d->op & 0xF0FF) == 0x402E) {                /* ldc rm,vbr */
             int rm = (d->op >> 8) & 0xF, rT = pick_scratch(R(rm));
-            spill(t, rT, SLOT_X0);
+            spill(t, rT, SA(t));
             emit_mov_lit(e, rT, t->env->shadow_vbr_addr, TAG_NONE);
             emit16(e, OP_MOVL_STORE(rm, rT));
-            restore(t, rT, SLOT_X0);
+            restore(t, rT, SA(t));
         } else {                                                /* stc vbr,rn */
             int rn = (d->op >> 8) & 0xF;
             emit_mov_lit(e, rn, t->env->shadow_vbr_addr, TAG_NONE);
@@ -442,6 +494,7 @@ static void tr_priv(tctx *t, const sh_insn *d)
     if (d->priv_mem && !d->is_store) {                          /* ldc.l @rm+,sr */
         int rT = pick_scratch(R(d->base));
         spill(t, rT, SLOT_X1);
+        commit(t, FIX_CR_BASE + CR_SR, rT);                     /* after this point: not resumable (BL=1 code) */
         emit16(e, OP_MOVL_POSTINC(d->base, rT));
         swap32(t, rT, rT);
         emit16(e, op_lds_slot(rT, SLOT_X0));                    /* X0 = new SR */
@@ -459,17 +512,17 @@ static void tr_priv(tctx *t, const sh_insn *d)
         int dst = d->priv_mem ? pick_scratch(R(d->base)) : rn;
         int rT = pick_scratch(R(dst) | (d->priv_mem ? R(d->base) : 0));
         int rU = pick_scratch(R(dst) | R(rT) | (d->priv_mem ? R(d->base) : 0));
-        if (d->priv_mem) spill(t, dst, SLOT_Y1);
-        spill(t, rT, SLOT_X0); spill(t, rU, SLOT_X1);
+        if (d->priv_mem) spill(t, dst, SC(t));
+        spill(t, rT, SA(t)); spill(t, rU, SB(t));
         emit16(e, OP_STC_SR(dst));
         emit_mov_lit(e, rT, t->env->shadow_md_addr, TAG_NONE);
         emit16(e, OP_MOVL_LOAD(rT, rT));
         emit_mov_lit(e, rU, ~SR_MD, TAG_NONE);
         emit16(e, 0x2009u | ((sf_u32)dst << 8) | ((sf_u32)rU << 4));   /* and rU,dst */
         emit16(e, 0x200Bu | ((sf_u32)dst << 8) | ((sf_u32)rT << 4));   /* or rT,dst */
-        if (d->priv_mem) { swap32(t, dst, dst); emit16(e, OP_MOVL_PREDEC(dst, d->base)); }
-        restore(t, rU, SLOT_X1); restore(t, rT, SLOT_X0);
-        if (d->priv_mem) restore(t, dst, SLOT_Y1);
+        if (d->priv_mem) { swap32(t, dst, dst); commit(t, FIX_NONE, 0); emit16(e, OP_MOVL_PREDEC(dst, d->base)); }
+        restore(t, rU, SB(t)); restore(t, rT, SA(t));
+        if (d->priv_mem) restore(t, dst, SC(t));
     }
 }
 
@@ -501,6 +554,7 @@ static void begin_meta_kind(tctx *t, int kind, sf_u32 guest_off, sf_u32 target, 
     m->host_off = (sf_u16)emit_pos(&t->em);
     m->guest_off = (sf_u16)guest_off;
     m->kind = (sf_u8)kind;
+    m->commit_rel = 0xFF;
     m->target = target;
     m->fallthrough = fallthrough;
     t->cur = m;
@@ -575,6 +629,7 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
     b->meta[b->nmeta].host_off = (sf_u16)emit_pos(&t.em);
     b->meta[b->nmeta].guest_off = (sf_u16)b->guest_len;
     b->meta[b->nmeta].kind = META_INSN;
+    b->meta[b->nmeta].commit_rel = 0xFF;
     if (!ended || b->end_reason != END_BRANCH) {
         t.cur = &b->meta[b->nmeta];
         jump_direct(&t, gpc, 0);
@@ -586,6 +641,7 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
         int stub_off = emit_pos(&t.em);
         int rS = 1;
         int i;
+        b->links[k].stub_off = stub_off;
         /* record the stub address as the initial value of the link literal */
         for (i = 0; i < t.em.nlits; i++)
             if (t.em.lits[i].tag == TAG_LINK(k)) t.em.lits[i].value = host_base + (sf_u32)stub_off;
@@ -625,9 +681,10 @@ int dbt_block_find(const dbt_block *b, sf_u32 host_off)
 int dbt_block_pending_spills(const dbt_block *b, int idx, sf_u32 host_off, dbt_spill *out, int max)
 {
     int i, n = 0;
-    for (i = 0; i < b->nspills && n < max; i++) {
+    (void)idx;
+    for (i = b->nspills - 1; i >= 0 && n < max; i--) {       /* latest first, outermost last */
         const dbt_spill *s = &b->spills[i];
-        if (s->insn == idx && s->start < host_off && host_off <= s->end)
+        if (s->start < host_off && host_off <= s->end)
             out[n++] = *s;
     }
     return n;

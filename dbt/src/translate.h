@@ -13,7 +13,7 @@
 #define DBT_MAX_LINKS   8       /* direct-branch exits per block */
 #define DBT_BLOCK_WORDS 512     /* host buffer per block (1 KiB) */
 
-enum { DBT_OK = 0, DBT_ERR_FETCH, DBT_ERR_READ, DBT_ERR_OVERFLOW, DBT_ERR_INTERNAL };
+enum { DBT_OK = 0, DBT_ERR_FETCH, DBT_ERR_READ, DBT_ERR_OVERFLOW, DBT_ERR_INTERNAL, DBT_ERR_UNSUPPORTED };
 
 typedef struct {
     /* guest memory (little-endian). Return 0 on success, nonzero on fault. */
@@ -45,15 +45,27 @@ enum { META_INSN = 0,        /* guest_pc + guest_off (restart the instruction) *
        META_TARGET_CONST,    /* a branch whose slot has executed: resume at target */
        META_TARGET_X0,       /* same, target is in the X0 slot */
        META_COND,            /* bt/s, bf/s after the slot: SSR.T ? target : fallthrough */
+       META_COND_REG,        /* same, but the deciding T bit is bit 0 of r[fix_reg] (slot wrote T) */
        META_RTE };           /* guest rte pending: not resumable */
+
+/* Fix-up the runtime applies when an exception lands after the range's
+ * memory operation has executed (host_off + commit_rel < exception offset):
+ * the guest instruction is then complete except for the emitted tail, which
+ * the runtime performs in software before resuming at the following range. */
+enum { FIX_NONE = 0,
+       FIX_SWAP16,           /* r[fix_reg] = sign-extended byte-swapped low half (mov.w load) */
+       FIX_SWAP32,           /* r[fix_reg] = byte-swapped (mov.l load) */
+       FIX_CR_BASE = 0x10 }; /* FIX_CR_BASE + sh_cr: control register = bswap32(r[fix_reg]) */
 
 typedef struct {
     sf_u16 host_off;         /* host byte offset where this range starts */
     sf_u16 guest_off;        /* META_INSN: guest byte offset from block start */
     sf_u8  kind;
-    sf_u8  pad[3];
-    sf_u32 target;           /* META_TARGET_CONST / META_COND */
-    sf_u32 fallthrough;      /* META_COND */
+    sf_u8  commit_rel;       /* host bytes from host_off to the memory op; 0xFF = none */
+    sf_u8  fix_kind;         /* FIX_* */
+    sf_u8  fix_reg;
+    sf_u32 target;           /* META_TARGET_CONST; META_COND*: resume pc when the T value is 1 */
+    sf_u32 fallthrough;      /* META_COND*: resume pc when the T value is 0 */
 } dbt_imeta;
 
 #define DBT_MAX_META   (DBT_MAX_INSNS * 2 + 2)
@@ -69,7 +81,7 @@ typedef struct {
     int    nmeta;            /* entries; meta[nmeta] is a sentinel at guest_len */
     dbt_spill spills[DBT_MAX_BLOCK_SPILLS];
     int    nspills;
-    struct { int lit_off; sf_u32 guest_target; } links[DBT_MAX_LINKS];
+    struct { int lit_off; int stub_off; sf_u32 guest_target; } links[DBT_MAX_LINKS];
     int    nlinks;
     int    end_reason;       /* enum below */
 } dbt_block;
@@ -87,8 +99,10 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
  * the meta index or -1. */
 int dbt_block_find(const dbt_block *b, sf_u32 host_off);
 
-/* Spills that must be undone (gpr <- slot) if an exception hit at host_off
- * inside meta entry `idx`. Returns count, fills up to `max` entries. */
+/* Spills that must be undone (gpr <- slot) if an exception hit at host_off:
+ * those with start < host_off <= end, in undo order (apply in sequence; an
+ * outer spill of the same register comes last and wins). `idx` is unused
+ * (ranges and spills are independent). Returns count, fills up to `max`. */
 int dbt_block_pending_spills(const dbt_block *b, int idx, sf_u32 host_off, dbt_spill *out, int max);
 
 #endif

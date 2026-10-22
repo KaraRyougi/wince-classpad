@@ -94,9 +94,15 @@ jump. `bt/s`/`bf/s`: the delay slot always executes on SH (taken or not), so
 the slot is emitted first; if the slot writes T, T is saved with `movt` and
 tested afterwards.
 
-The delay slot of a rewritten branch is emitted before the jump sequence; if
-the branch target register is modified by the slot (`jmp @r0` with `mov r1,r0`
-in the slot) the target is copied to a scratch first.
+The delay slot of a rewritten branch is emitted before the jump sequence. For
+indirect branches the target is captured into X0 first (so a slot that
+modifies the target register, `jmp @r0` with `mov r1,r0`, still works), and
+the slot is translated with shifted scratch slots (X0->X1, X1->Y1, Y1->A0) so
+its spills cannot clobber the target. A slot that needs a helper call (FPU,
+`mac`) owns all five DSP slots, so for it the target is captured *after* the
+slot; that requires the slot not to write the target register (helpers never
+write PR, so `rts` is always fine). `jsr @r1 ; fmov.s @r1+,fr0` is rejected
+as `DBT_ERR_UNSUPPORTED` (never emitted by compilers).
 
 ## FPU
 
@@ -126,13 +132,44 @@ guest user space with wired TLB entries.
 The real VBR points to translator handlers (general 0x100, TLB miss 0x400,
 interrupt 0x600). On entry:
 
-1. Read SPC (a host address). Find the block containing it and the guest
-   instruction it belongs to. Undo any pending spill for that instruction.
-2. Set SPC = guest PC of that instruction, SSR.MD = shadow MD. EXPEVT/INTEVT/
-   TEA/TRA are real hardware registers that the guest reads with the
-   pre-swapped MMIO macros.
+1. Read SPC (a host address). Find the block containing it and the metadata
+   range it belongs to; compute the guest resume PC (below). Undo every spill
+   still open at that offset (`start < off <= end`, outermost last).
+2. Set SPC = guest resume PC, SSR.MD = shadow MD. EXPEVT/INTEVT/TEA/TRA are
+   real hardware registers that the guest reads with the pre-swapped MMIO
+   accessors (`guest/mmio.h`).
 3. Hypercall (`trapa` with TRA 0xF0-0xFF): handle in C and return.
 4. Jump to the translation of guest VBR + offset.
+
+Resume metadata per range (`dbt_imeta`):
+
+| kind | resume PC |
+|---|---|
+| `META_INSN` | restart the guest instruction, unless the range's memory op has committed (see below) |
+| `META_TARGET_CONST` | a branch whose slot has executed: the constant target |
+| `META_TARGET_X0` | same, target parked in X0 by the branch |
+| `META_COND` | after a `bt/s`/`bf/s` slot: by SSR.T, `target` if T=1 else `fallthrough` |
+| `META_COND_REG` | same, but the slot wrote T, so the pre-slot T is bit 0 of a scratch register (`fix_reg`, read before the spill undo) |
+| `META_RTE` | guest `rte` pending: not resumable (BL=1 code) |
+
+A memory instruction has side effects that must not run twice (`@Rm+`,
+`@-Rn`, a load into its own base register), so each range records a
+*commit point*: the host offset of the memory op. An exception with SPC past
+it means the op has executed and only the emitted tail (byte swaps of the
+loaded value, the `lds/ldc` of a control-register load, the scratch restore)
+is missing. The runtime finishes that tail in software (`fix_kind`:
+`FIX_SWAP16`, `FIX_SWAP32`, `FIX_CR_BASE + cr`, applied to whatever part of
+the tail has not run yet) and resumes at the following range: the next
+instruction, or for a slot the branch boundary. Exceptions after a committed
+`ldc.l @Rm+,sr/ssr/spc/Rn_bank` halt: such code runs with BL=1 and cannot be
+interrupted.
+
+Exceptions in a block's exit stubs (the first execution of each direct
+branch) resume at the link's target, with r1 restored from Y0.
+
+The real `rte` in the stubs has a `nop` slot: SH-4 switches the register
+bank before the slot executes, so an `sts A0,r2` there writes the *guest's*
+r2 (found the hard way with the TMU test).
 
 If SPC is inside translator C code (translation in progress), the exception
 can only be a TLB miss from the code probe; longjmp out and deliver as above.
@@ -182,7 +219,10 @@ via hypercall 0xF1):
   the handler which of r0-r3 are still parked in the DSP slots.
 - Known v1 limits: FPU memory operands and guest code must be in unmapped
   (P1) memory; a TLB miss inside C code halts unless it is the translator's
-  own code probe. `bt/s`/`bf/s` with a T-writing FPU slot is not resumable.
+  own code probe. Guest code running with SR.RB=1 must not take exceptions
+  or make hypercalls (the vectors save r0-r7 through `stc Rn_bank`, i.e.
+  bank 0): true for hardware-faithful handlers, which keep BL=1 while RB=1,
+  but to be checked against the CE kernel's exception entry.
 
 ## Test platform
 
@@ -194,13 +234,21 @@ raw `.g3a` payload at 0x00300000; `dbt/loader` copies the translator image to
 0x8CB00000 and jumps. `make -C dbt run` builds everything and runs it headless;
 `GUEST=exc` / `GUEST=fpu` select the other guests.
 
-Status 2026-10-22: all three guests pass under the emulator.
+Status 2026-10-22: all four guests pass under the emulator.
 
 | Guest | What it covers | Result |
 |---|---|---|
 | `hello` | every access size and addressing mode, literal pool, stack, struct layout | PASS (8 checks) |
 | `exc` | guest VBR, `trapa`, EXPEVT/TRA, SPC rewrite by the handler, `rte`, T bit across exceptions | PASS (6 checks) |
 | `fpu` | raw FPU words through the helper: fpscr reset, fadd/fmul/float/fmov.s, double sub + fcmp/gt | PASS (5 checks, 0x21 helper calls) |
+| `tmu` | TMU0 programmed through pre-swapped MMIO, IMASK/BL and IMR masking, INTEVT, `rte` restoring SR, `sleep` wake-up; register probe across `trapa`; 15 one-construct hot loops (loads, stores of every form, `bt/s` with a T-writing slot, `jsr` with a store in the slot, push/pop, pc-relative) plus a compiled loop, each run with ~3000 interrupts landing at arbitrary host instructions and compared with an interrupt-free run | PASS (34 checks) |
+
+The TMU guest found three resume bugs that the host tests could not: `bf/s`
+boundaries had the T sense inverted, loads were restarted after they had
+executed (now the commit-point metadata), and the `rte` stub restored r2 in
+the delay slot after the bank switch. `make -C dbt GUEST=tmu run` is the
+regression test for anything touching the exception path; build the runtime
+with `-DDBT_TRACE_EXC` to print the last 16 exception landings with the stats.
 
 The guest blob carries file contents only, so guests zero their own `.bss`
 (`guest/start.S`); a CE image does that itself.

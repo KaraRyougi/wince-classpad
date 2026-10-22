@@ -24,9 +24,10 @@ $(BUILD):
 
 # --- guest (little-endian) ---
 GUEST_EXTRA_exc := guest/exc_vectors.S
+GUEST_EXTRA_tmu := guest/tmu_vectors.S guest/tmu_loops.S
 GUEST_EXTRA     := $(GUEST_EXTRA_$(GUEST))
 
-$(BUILD)/$(GUEST).elf: guest/start.S guest/$(GUEST).c $(GUEST_EXTRA) guest/hyper.h guest/guest.ld | $(BUILD)
+$(BUILD)/$(GUEST).elf: guest/start.S guest/$(GUEST).c $(GUEST_EXTRA) guest/hyper.h guest/mmio.h guest/guest.ld | $(BUILD)
 	$(CC) $(GUEST_CFLAGS) -T guest/guest.ld -o $@ guest/start.S guest/$(GUEST).c $(GUEST_EXTRA)
 
 $(BUILD)/$(GUEST).bin: $(BUILD)/$(GUEST).elf

@@ -330,9 +330,10 @@ _dbt_rte_stub:
         mov.l   @(28, r2), r13
         mov.l   @(32, r2), r14
         mov.l   @(36, r2), r15
+        STSX    SLOT_A0, 2             /* r2 last: it was the base pointer */
         STSX    SLOT_Y0, 0
         rte
-        STSX    SLOT_A0, 2             /* r2 restored in the slot (r8-r15 are bank-independent) */
+        nop                            /* never touch r0-r7 in an rte slot: the bank has switched */
         POOL    C
 
 /* ------------------------------------------------------------------ */

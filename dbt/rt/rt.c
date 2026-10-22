@@ -205,6 +205,8 @@ void dbt_invalidate(sf_u32 lo, sf_u32 hi)
 #define HC_PUTHEX 0xF4
 #define HC_STATS  0xF5
 
+static void print_trace(void);
+
 static void print_stats(void)
 {
     dbt_puts("[dbt] blocks="); dbt_puthex(dbt_stat.blocks);
@@ -213,7 +215,10 @@ static void print_stats(void)
     dbt_puts(" lookups_c="); dbt_puthex(dbt_stat.lookups_c);
     dbt_puts(" exceptions="); dbt_puthex(dbt_stat.exceptions);
     dbt_puts(" fpu="); dbt_puthex(dbt_stat.fpu_ops);
+    dbt_puts(" resumes="); dbt_puthex(dbt_stat.resumes);
+    dbt_puts("/"); dbt_puthex(dbt_stat.resumes_committed);
     dbt_puts("\n");
+    print_trace();
 }
 
 static int hypercall(dbt_gctx *ctx, sf_u32 nr)
@@ -241,21 +246,128 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
 /* ------------------------------------------------------------ exceptions */
 
 /* Guest resume pc for an exception at host offset `off` inside block b. */
-static sf_u32 resume_pc(const dbt_block *b, sf_u32 off, const dbt_gctx *ctx, int *idx_out)
+/* Guest pc at the start of meta range idx (idx may be the sentinel). */
+static sf_u32 meta_start_pc(const dbt_block *b, int idx, const dbt_gctx *ctx)
 {
-    int idx = dbt_block_find(b, off);
-    const dbt_imeta *m;
-    *idx_out = idx;
-    if (idx < 0) return b->guest_pc + b->guest_len;          /* exit stub / pool: block boundary */
-    m = &b->meta[idx];
+    const dbt_imeta *m = &b->meta[idx];
     switch (m->kind) {
     case META_INSN:         return b->guest_pc + m->guest_off;
     case META_TARGET_CONST: return m->target;
     case META_TARGET_X0:    return ctx->slots[SLOT_X0];
     case META_COND:         return (ctx->ssr & 1) ? m->target : m->fallthrough;
+    case META_COND_REG:     return (ctx->r[m->fix_reg] & 1) ? m->target : m->fallthrough;   /* before the undo */
     default:
         dbt_halt("exception while a guest rte is pending");
     }
+}
+
+/* Guest pc to resume at for an exception at host offset `off` of block b
+ * (off < code_len). *committed is set when the range's memory operation has
+ * already executed: the guest instruction then completes in software
+ * (apply_resume_state) and execution resumes at the following range. */
+static sf_u32 resume_pc(const dbt_block *b, sf_u32 off, const dbt_gctx *ctx, int *idx_out, int *committed)
+{
+    int idx = dbt_block_find(b, off);
+    const dbt_imeta *m;
+    *idx_out = idx;
+    *committed = 0;
+    if (idx < 0) dbt_halt("resume_pc outside translated code");
+    m = &b->meta[idx];
+    if (m->kind == META_INSN && m->commit_rel != 0xFF && off > (sf_u32)m->host_off + m->commit_rel) {
+        *committed = 1;
+        return meta_start_pc(b, idx + 1, ctx);
+    }
+    return meta_start_pc(b, idx, ctx);
+}
+
+static sf_u32 op_swapb(sf_u32 x) { return (x & 0xFFFF0000u) | ((x & 0xFF) << 8) | ((x >> 8) & 0xFF); }
+static sf_u32 op_swapw(sf_u32 x) { return (x << 16) | (x >> 16); }
+static sf_u32 op_extsw(sf_u32 x) { return (x & 0x8000) ? (x | 0xFFFF0000u) : (x & 0xFFFFu); }
+
+/* Undo the scratch spills still open at `off`, and after a committed memory
+ * op finish the instruction's emitted tail that was interrupted: the byte
+ * swap of the loaded value (swap.b, swap.w, swap.b / swap.b, exts.w) and,
+ * for control-register loads, the ldc/lds itself. `k` tail instructions
+ * have already run, so only the remaining ones are applied. The register is
+ * read before the undo since control-register loads use a scratch. */
+static void apply_resume_state(const dbt_block *b, int idx, sf_u32 off, int committed, dbt_gctx *ctx)
+{
+    const dbt_imeta *m = &b->meta[idx];
+    dbt_spill sp[8];
+    int n, i, fix = committed ? m->fix_kind : FIX_NONE;
+    sf_u32 v = 0, k = 0;
+    if (fix != FIX_NONE) {
+        v = ctx->r[m->fix_reg];
+        k = (off - ((sf_u32)m->host_off + m->commit_rel)) / 2 - 1;
+        if (fix == FIX_SWAP16) {
+            if (k < 1) v = op_swapb(v);
+            if (k < 2) v = op_extsw(v);
+        } else {
+            if (k < 1) v = op_swapb(v);
+            if (k < 2) v = op_swapw(v);
+            if (k < 3) v = op_swapb(v);
+            if (fix >= FIX_CR_BASE && k >= 4) fix = FIX_NONE;   /* the ldc/lds already ran */
+        }
+    }
+    n = dbt_block_pending_spills(b, idx, off, sp, 8);
+    for (i = 0; i < n; i++) ctx->r[sp[i].gpr] = ctx->slots[sp[i].slot];
+    switch (fix) {
+    case FIX_NONE: break;
+    case FIX_SWAP16: case FIX_SWAP32: ctx->r[m->fix_reg] = v; break;
+    case FIX_CR_BASE + CR_MACH: ctx->mach = v; break;
+    case FIX_CR_BASE + CR_MACL: ctx->macl = v; break;
+    case FIX_CR_BASE + CR_PR:   ctx->pr = v; break;
+    case FIX_CR_BASE + CR_GBR:  ctx->gbr = v; break;
+    case FIX_CR_BASE + CR_VBR:  dbt_shadow_vbr = v; break;
+    default:
+        /* ssr/spc/sr/rN_bank/sgr/dbr loads: only reachable with BL=1, where
+         * no interrupt can land after the load */
+        dbt_halt("exception after a committed privileged load");
+    }
+    dbt_stat.resumes += committed ? 0 : 1;
+    dbt_stat.resumes_committed += committed ? 1 : 0;
+}
+
+/* Debug trace of the last exceptions and where they resumed; printed with
+ * the stats when built with -DDBT_TRACE_EXC. */
+#ifdef DBT_TRACE_EXC
+#define TRACE_N 16
+static struct { sf_u32 host, blk, off, kind, committed, resume, vec, where; } g_trace[TRACE_N];
+static sf_u32 g_trace_n;
+static void trace_exc(sf_u32 host, sf_u32 blk, sf_u32 off, sf_u32 kind, sf_u32 committed, sf_u32 resume, sf_u32 vec, sf_u32 where)
+{
+    unsigned i = g_trace_n++ % TRACE_N;
+    g_trace[i].host = host; g_trace[i].blk = blk; g_trace[i].off = off; g_trace[i].kind = kind;
+    g_trace[i].committed = committed; g_trace[i].resume = resume; g_trace[i].vec = vec; g_trace[i].where = where;
+}
+static void print_trace(void)
+{
+    unsigned i, n = g_trace_n < TRACE_N ? g_trace_n : TRACE_N;
+    for (i = 0; i < n; i++) {
+        unsigned k = (g_trace_n - n + i) % TRACE_N;
+        dbt_puts("[dbt] exc vec="); dbt_puthex(g_trace[k].vec);
+        dbt_puts(" where="); dbt_puthex(g_trace[k].where);
+        dbt_puts(" host="); dbt_puthex(g_trace[k].host);
+        dbt_puts(" blk="); dbt_puthex(g_trace[k].blk);
+        dbt_puts(" off="); dbt_puthex(g_trace[k].off);
+        dbt_puts(" kind="); dbt_puthex(g_trace[k].kind);
+        dbt_puts(" commit="); dbt_puthex(g_trace[k].committed);
+        dbt_puts(" resume="); dbt_puthex(g_trace[k].resume);
+        dbt_puts("\n");
+    }
+}
+#else
+#define trace_exc(host, blk, off, kind, committed, resume, vec, where) ((void)0)
+static void print_trace(void) {}
+#endif
+
+/* Which exit stub (link index) contains host offset `off` >= code_len. */
+static int exit_stub_of(const dbt_block *b, sf_u32 off)
+{
+    int k;
+    for (k = b->nlinks - 1; k >= 0; k--)
+        if (off >= (sf_u32)b->links[k].stub_off) return k;
+    return -1;
 }
 
 /* Guest pc for a host address that must be a range start (block entry or
@@ -263,9 +375,9 @@ static sf_u32 resume_pc(const dbt_block *b, sf_u32 off, const dbt_gctx *ctx, int
 static sf_u32 guest_pc_of_host(sf_u32 host, const dbt_gctx *ctx)
 {
     dbt_block *b = block_of_host(host);
-    int idx;
+    int idx, committed;
     if (!b) dbt_halt("stub target not in a block");
-    return resume_pc(b, host - b->host_base, ctx, &idx);
+    return resume_pc(b, host - b->host_base, ctx, &idx, &committed);
 }
 
 #define IN(spc, a, b) ((spc) >= (sf_u32)(a) && (spc) < (sf_u32)(b))
@@ -325,12 +437,15 @@ static int stub_window(dbt_gctx *ctx, sf_u32 *guest_pc)
             if (IN(spc, h[i].start, h[i].masked)) {
                 sf_u32 ret = ctx->slots[SLOT_X1];
                 dbt_block *b = block_of_host(ret - 2);
-                int idx;
+                int idx, committed;
+                sf_u32 off;
                 if (AFTER(spc, h[i].s1)) UNDO(ctx, 0, SLOT_Y0);
                 if (AFTER(spc, h[i].s2)) UNDO(ctx, 1, SLOT_Y1);
                 if (AFTER(spc, h[i].s3)) UNDO(ctx, 2, SLOT_A0);
                 if (!b) dbt_halt("helper return address not in a block");
-                *guest_pc = resume_pc(b, ret - 2 - b->host_base, ctx, &idx);
+                off = ret - 2 - b->host_base;
+                *guest_pc = resume_pc(b, off, ctx, &idx, &committed);
+                apply_resume_state(b, idx, off, committed, ctx);
                 return 1;
             }
         }
@@ -350,7 +465,9 @@ int dbt_exc_c(dbt_gctx *ctx)
         if (nr >= 0xF0) return hypercall(ctx, nr);
     }
 
-    if (!stub_window(ctx, &guest_pc)) {
+    if (stub_window(ctx, &guest_pc)) {
+        trace_exc(ctx->host_spc, 0, 0, 0, 0, guest_pc, ctx->vec_off, 3);
+    } else {
         b = block_of_host(ctx->host_spc);
         if (!b) {
             if (g_translating && ctx->vec_off == 0x400) {
@@ -370,13 +487,20 @@ int dbt_exc_c(dbt_gctx *ctx)
                 dbt_halt("unmapped exception");
             }
         } else {
-            dbt_spill sp[8];
-            int n, i, idx;
             sf_u32 off = ctx->host_spc - b->host_base;
-            guest_pc = resume_pc(b, off, ctx, &idx);
-            if (idx >= 0) {
-                n = dbt_block_pending_spills(b, idx, off, sp, 8);
-                for (i = 0; i < n; i++) ctx->r[sp[i].gpr] = ctx->slots[sp[i].slot];
+            if (off >= (sf_u32)b->code_len) {
+                /* exit stub of link k (runs once per link, before it is patched):
+                 * r1 was saved to Y0 by its first instruction; resume = the link target */
+                int k = exit_stub_of(b, off);
+                if (k < 0) dbt_halt("exception in a block's literal pool");
+                if (off > (sf_u32)b->links[k].stub_off) ctx->r[1] = ctx->slots[SLOT_Y0];
+                guest_pc = b->links[k].guest_target;
+                trace_exc(ctx->host_spc, b->guest_pc, off, 0xEE, 0, guest_pc, ctx->vec_off, 1);
+            } else {
+                int idx, committed;
+                guest_pc = resume_pc(b, off, ctx, &idx, &committed);
+                apply_resume_state(b, idx, off, committed, ctx);
+                trace_exc(ctx->host_spc, b->guest_pc, off, b->meta[idx].kind, (sf_u32)committed, guest_pc, ctx->vec_off, 2);
             }
         }
     }
