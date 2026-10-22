@@ -157,3 +157,36 @@ via hypercall 0xF1):
 4. irq: TMU interrupt delivered to the guest handler.
 5. fpu: single/double arithmetic through the helpers.
 6. perf: instruction-mix benchmark to measure the slowdown.
+
+## Runtime conventions (dbt/rt)
+
+- `dbt_lookup` / `dbt_lookup_link`: X0 = guest target, X1 = link literal
+  address. Direct-mapped hash of 8192 entries (`dbt_hash`, read by the asm
+  fast path); on a miss the stub masks interrupts, saves the guest context
+  into `dbt_ctx_rt` and calls `dbt_resolve`, which translates and patches the
+  link literal (a data write; PC-relative loads go through the operand cache).
+- Helpers (`dbt_fpu_stub`, `dbt_fallback_stub`, `dbt_ldc_sr_stub`): X0 =
+  argument, X1 = return address. They save the full context, mask interrupts,
+  call C, restore and jump back through the shared `dbt_tail_full`.
+- `dbt_rte_stub`: resolves the guest SPC, forces MD and DSP in SSR, keeps the
+  guest MD in `dbt_shadow_md`, then executes the real `rte`.
+- Exceptions: VBR = `dbt_vectors`; handlers save bank-0 registers (via
+  `stc Rn_bank`, since RB=1), the DSP slots, SPC/SSR/EXPEVT/TRA/TEA/INTEVT into
+  `dbt_ctx_exc` and call `dbt_exc_c`. Hypercalls (`trapa` 0xF0-0xFF) return
+  with `rte`; everything else is delivered to the guest handler with
+  SPC = guest resume pc, SSR.MD = shadow MD. Assumption to verify against the
+  CE kernel source: bank-1 registers hold no persistent kernel state.
+- Resume rules: translated code uses the block metadata (restart the
+  instruction, or the branch target after a delay slot). Inside the stubs,
+  window labels (`dbt_lk_s*`, `dbt_hit_*`, `dbt_full_m*`, `dbt_h*_s*`) tell
+  the handler which of r0-r3 are still parked in the DSP slots.
+- Known v1 limits: FPU memory operands and guest code must be in unmapped
+  (P1) memory; a TLB miss inside C code halts unless it is the translator's
+  own code probe. `bt/s`/`bf/s` with a T-writing FPU slot is not resumable.
+
+## Test platform
+
+casio-emu implements only `lds rm, x0` of the DSP transfers; the patch in
+`dbt/emu-patch/add_dsp_transfers.py` adds the other nine. The emulator starts a
+raw `.g3a` payload at 0x00300000; `dbt/loader` copies the translator image to
+0x8CB00000 and jumps. `make -C dbt run` builds everything and runs it headless.
