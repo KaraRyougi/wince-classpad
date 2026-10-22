@@ -23,8 +23,11 @@ $(BUILD):
 	mkdir -p $(BUILD)
 
 # --- guest (little-endian) ---
-$(BUILD)/$(GUEST).elf: guest/start.S guest/$(GUEST).c guest/hyper.h guest/guest.ld | $(BUILD)
-	$(CC) $(GUEST_CFLAGS) -T guest/guest.ld -o $@ guest/start.S guest/$(GUEST).c
+GUEST_EXTRA_exc := guest/exc_vectors.S
+GUEST_EXTRA     := $(GUEST_EXTRA_$(GUEST))
+
+$(BUILD)/$(GUEST).elf: guest/start.S guest/$(GUEST).c $(GUEST_EXTRA) guest/hyper.h guest/guest.ld | $(BUILD)
+	$(CC) $(GUEST_CFLAGS) -T guest/guest.ld -o $@ guest/start.S guest/$(GUEST).c $(GUEST_EXTRA)
 
 $(BUILD)/$(GUEST).bin: $(BUILD)/$(GUEST).elf
 	$(OBJCOPY) -O binary $< $@
