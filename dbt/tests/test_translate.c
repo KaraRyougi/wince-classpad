@@ -115,7 +115,7 @@ int main(void)
       int r = translate(ops, 3, 3);
       expect("alu status", r == DBT_OK);
       expect_seq("alu pass", 0, exp, 3);
-      expect("alu meta", blk.nmeta == 3 && blk.meta[1].host_off == 2 && blk.meta[2].guest_off == 4);
+      expect("alu meta", blk.nmeta == 3 && blk.meta[1].host_off == 2 && blk.meta[2].guest_off == 4 && blk.meta[3].host_off == 6 && blk.meta[3].guest_off == 6);
       /* fall-through: lds r1,x0 ; mov.l lit,r1 ; jmp @r1 ; sts x0,r1 */
       expect("alu tail", hbuf[3] == LDS_X0(1) && (hbuf[4] & 0xFF00) == 0xD100 && hbuf[5] == OP_JMP(1) && hbuf[6] == STS_X0(1));
       expect("alu link", blk.nlinks == 1 && blk.links[0].guest_target == GBASE + 6);
@@ -146,11 +146,11 @@ int main(void)
       translate(ops, 3, 3);
       expect_seq("stores", 0, exp, 18);
       /* spill bookkeeping for the first store: lds at 0, sts at 6 */
-      expect("spill rec", blk.meta[0].nspill == 1 && blk.meta[0].spill[0].gpr == 1 && blk.meta[0].spill[0].start == 0 && blk.meta[0].spill[0].end == 6);
-      { dbt_spill sp[DBT_MAX_SPILLS];
-        expect("pending@store", dbt_block_pending_spills(&blk, 0, 4, sp) == 1 && sp[0].slot == SLOT_X0);
-        expect("pending@lds", dbt_block_pending_spills(&blk, 0, 0, sp) == 0);
-        expect("pending@after", dbt_block_pending_spills(&blk, 0, 8, sp) == 0);
+      expect("spill rec", blk.nspills == 4 && blk.spills[0].insn == 0 && blk.spills[0].gpr == 1 && blk.spills[0].start == 0 && blk.spills[0].end == 6);
+      { dbt_spill sp[4];
+        expect("pending@store", dbt_block_pending_spills(&blk, 0, 4, sp, 4) == 1 && sp[0].slot == SLOT_X0);
+        expect("pending@lds", dbt_block_pending_spills(&blk, 0, 0, sp, 4) == 0);
+        expect("pending@after", dbt_block_pending_spills(&blk, 0, 8, sp, 4) == 0);
         expect("find", dbt_block_find(&blk, 9) == 1 && dbt_block_find(&blk, 0) == 0 && dbt_block_find(&blk, 20) == 2);
       }
     }
@@ -195,7 +195,7 @@ int main(void)
       translate(ops, 2, 4);
       expect_seq("bra", 0, exp, 2);
       expect("bra link", blk.nlinks == 1 && blk.links[0].guest_target == GBASE + 12 && blk.end_reason == END_BRANCH && blk.guest_len == 4);
-      expect("bra meta", blk.nmeta == 1 && blk.meta[1].guest_off == 4);
+      expect("bra meta", blk.nmeta == 2 && blk.meta[1].kind == META_TARGET_CONST && blk.meta[1].target == GBASE + 12 && blk.meta[1].host_off == 2 && blk.meta[2].guest_off == 4);
     }
 
     /* 9. bsr: PR = GBASE+4, slot executes after PR write */
@@ -220,11 +220,12 @@ int main(void)
       sf_u32 exp[] = { LDS_X0(2), 0x6233, LDS_Y0(1) };
       translate(ops, 2, 4);
       expect_seq("jmp clobber", 0, exp, 3);
+      expect("jmp meta", blk.nmeta == 2 && blk.meta[1].kind == META_TARGET_X0 && blk.meta[1].host_off == 4);
     }
 
-    /* 12. jsr @r4 ; nop : PR first, slot, then X0 */
+    /* 12. jsr @r4 ; nop : PR first, then X0, then the slot */
     { sf_u32 ops[] = { 0x440B, 0x0009 };
-      sf_u32 exp[] = { LDS_Y0(1), 0, OP_LDS_PR(1), STS_Y0(1), 0x0009, LDS_X0(4), LDS_Y0(1) };
+      sf_u32 exp[] = { LDS_Y0(1), 0, OP_LDS_PR(1), STS_Y0(1), LDS_X0(4), 0x0009, LDS_Y0(1) };
       translate(ops, 2, 4);
       exp[1] = hbuf[1];
       expect_seq("jsr", 0, exp, 7);
@@ -250,7 +251,14 @@ int main(void)
       /* bf(4) from offset 12 lands on offset 12+4+8 = 24 = taken path */
       expect("bt/s bf target", 12 + 4 + 4 * 2 == 24 && hbuf[12] == OP_SHLR(4));
       /* bra(7) at offset 20 lands at 20+4+14 = 38, right after the 4-word jump at 30..37 */
-      expect("bt/s bra target", 20 + 4 + 7 * 2 == 38 && blk.meta[1].host_off == 38);
+      expect("bt/s bra target", 20 + 4 + 7 * 2 == 38 && blk.meta[1].host_off == 38 && blk.meta[1].kind == META_INSN);
+    }
+
+    /* 14b. bt/s +6 ; nop : slot, COND boundary, inverted conditional, jump */
+    { sf_u32 ops[] = { 0x8D03, 0x0009 };
+      translate(ops, 2, 4);
+      expect("bt/s cond", hbuf[0] == 0x0009 && hbuf[1] == OP_BF(3) && blk.meta[1].kind == META_COND
+             && blk.meta[1].target == GBASE + 4 + 6 && blk.meta[1].fallthrough == GBASE + 4 && blk.meta[1].host_off == 2);
     }
 
     /* 15. FPU: fadd fr1,fr2 -> helper call with opcode in X0, return address in X1 */
@@ -276,6 +284,7 @@ int main(void)
     { sf_u32 ops[] = { 0xC3F1, 0x0009 };
       translate(ops, 2, 4);
       expect("trapa", hbuf[0] == 0xC3F1 && hbuf[1] == LDS_X0(1) && blk.end_reason == END_TRAP && blk.nlinks == 1 && blk.links[0].guest_target == GBASE + 2);
+      expect("trapa sentinel", blk.nmeta == 1 && blk.meta[1].host_off == 2 && blk.meta[1].guest_off == 2 && dbt_block_find(&blk, 4) == 1 && dbt_block_find(&blk, 0) == 0);
     }
 
     /* 18. fetch fault at the second instruction */

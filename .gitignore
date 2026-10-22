@@ -10,3 +10,4 @@ __pycache__/
 .DS_Store
 fpuemu/tests/test_host
 dbt/tests/test_translate
+dbt/build/

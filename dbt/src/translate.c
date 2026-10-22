@@ -31,26 +31,26 @@ static int pick_scratch(sf_u32 avoid)
 
 static void spill(tctx *t, int gpr, int slot)
 {
-    dbt_imeta *m = t->cur;
-    if (m->nspill < DBT_MAX_SPILLS) {
-        m->spill[m->nspill].gpr = (sf_u16)gpr;
-        m->spill[m->nspill].slot = (sf_u16)slot;
-        m->spill[m->nspill].start = (sf_u16)emit_pos(&t->em);
-        m->spill[m->nspill].end = 0xFFFF;
-        m->nspill++;
+    dbt_block *b = t->blk;
+    if (b->nspills < DBT_MAX_BLOCK_SPILLS) {
+        dbt_spill *s = &b->spills[b->nspills++];
+        s->insn = (sf_u8)(t->cur - b->meta);
+        s->gpr = (sf_u8)gpr; s->slot = (sf_u8)slot; s->pad = 0;
+        s->start = (sf_u16)emit_pos(&t->em);
+        s->end = 0xFFFF;
     } else {
-        t->err = DBT_ERR_INTERNAL;
+        t->err = DBT_ERR_OVERFLOW;
     }
     emit16(&t->em, op_lds_slot(gpr, slot));
 }
 
 static void restore(tctx *t, int gpr, int slot)
 {
-    dbt_imeta *m = t->cur;
+    dbt_block *b = t->blk;
     int i;
-    for (i = m->nspill - 1; i >= 0; i--)
-        if (m->spill[i].gpr == gpr && m->spill[i].slot == slot) {
-            m->spill[i].end = (sf_u16)emit_pos(&t->em);
+    for (i = b->nspills - 1; i >= 0; i--)
+        if (b->spills[i].gpr == gpr && b->spills[i].slot == slot && b->spills[i].end == 0xFFFF) {
+            b->spills[i].end = (sf_u16)emit_pos(&t->em);
             break;
         }
     emit16(&t->em, op_sts_slot(slot, gpr));
@@ -300,6 +300,7 @@ static void set_pr(tctx *t, sf_u32 value, sf_u32 avoid)
 }
 
 static void tr_insn(tctx *t, const sh_insn *d, int in_slot);
+static void begin_meta_kind(tctx *t, int kind, sf_u32 guest_off, sf_u32 target, sf_u32 fallthrough);
 
 static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
 {
@@ -307,15 +308,22 @@ static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
     sf_u32 next = t->gpc + 4;                     /* PC+4 semantics */
     sf_u32 avoid = slot ? slot->touched : 0;
     sf_u32 target = t->gpc + 4 + (sf_u32)d->br_disp;
+    sf_u32 goff = t->gpc - t->blk->guest_pc;
 
+    /* Order for every delayed branch: PR write, target capture (to X0),
+     * delay slot, then a resume boundary, then the jump. An exception in the
+     * slot restarts the whole branch (idempotent up to that point); an
+     * exception after the boundary resumes at the target. */
     switch (d->br) {
     case BR_BRA:
         if (slot) tr_insn(t, slot, 1);
+        begin_meta_kind(t, META_TARGET_CONST, goff, target, 0);
         jump_direct(t, target, 0);
         return;
     case BR_BSR:
         set_pr(t, next, avoid);
         if (slot) tr_insn(t, slot, 1);
+        begin_meta_kind(t, META_TARGET_CONST, goff, target, 0);
         jump_direct(t, target, 0);
         return;
     case BR_BRAF:
@@ -323,28 +331,27 @@ static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
         if (d->br == BR_BSRF) set_pr(t, next, avoid | R(d->br_reg));
         target_to_x0(t, d->br_reg, 0, next, avoid | R(d->br_reg));
         if (slot) tr_insn(t, slot, 1);
+        begin_meta_kind(t, META_TARGET_X0, goff, 0, 0);
         jump_lookup(t, 0);
         return;
     case BR_JMP:
     case BR_JSR:
         if (d->br == BR_JSR) set_pr(t, next, avoid | R(d->br_reg));
-        if (slot && (slot->defs & R(d->br_reg))) {
-            target_to_x0(t, d->br_reg, 0, 0, 0);
-            tr_insn(t, slot, 1);
-        } else {
-            if (slot) tr_insn(t, slot, 1);
-            target_to_x0(t, d->br_reg, 0, 0, 0);
-        }
+        target_to_x0(t, d->br_reg, 0, 0, 0);
+        if (slot) tr_insn(t, slot, 1);
+        begin_meta_kind(t, META_TARGET_X0, goff, 0, 0);
         jump_lookup(t, 0);
         return;
     case BR_RTS:
         target_to_x0(t, -1, 1, 0, avoid);
         if (slot) tr_insn(t, slot, 1);
+        begin_meta_kind(t, META_TARGET_X0, goff, 0, 0);
         jump_lookup(t, 0);
         return;
     case BR_RTE: {
         int rT;
         if (slot) tr_insn(t, slot, 1);
+        begin_meta_kind(t, META_RTE, goff, 0, 0);
         rT = pick_scratch(0);
         spill(t, rT, SLOT_Y0);
         emit_mov_lit(e, rT, t->env->rt_rte, TAG_NONE);
@@ -362,11 +369,14 @@ static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
     case BR_BFS:
         if (!slot || !slot->writes_t) {
             if (slot) tr_insn(t, slot, 1);
+            begin_meta_kind(t, META_COND, goff, target, next);
             emit16(e, d->br == BR_BTS ? OP_BF(3) : OP_BT(3));
             jump_direct(t, target, 0);
             return;
         } else {
-            /* slot writes T: branch on the old T, leave the slot's T visible */
+            /* slot writes T: branch on the old T, leave the slot's T visible.
+             * No boundary: the old T lives only in rA, so an exception after
+             * the slot is not resumable here (cannot happen: no memory ops). */
             int rA = pick_scratch(avoid);
             int rB = pick_scratch(avoid | R(rA));
             spill(t, rA, SLOT_Y0);
@@ -481,15 +491,22 @@ static void tr_insn(tctx *t, const sh_insn *d, int in_slot)
     }
 }
 
-static void begin_meta(tctx *t, sf_u32 guest_off)
+static void begin_meta_kind(tctx *t, int kind, sf_u32 guest_off, sf_u32 target, sf_u32 fallthrough)
 {
     dbt_block *b = t->blk;
-    dbt_imeta *m = &b->meta[b->nmeta++];
+    dbt_imeta *m;
+    if (b->nmeta >= DBT_MAX_META - 1) { t->err = DBT_ERR_OVERFLOW; return; }
+    m = &b->meta[b->nmeta++];
     memset(m, 0, sizeof *m);
     m->host_off = (sf_u16)emit_pos(&t->em);
     m->guest_off = (sf_u16)guest_off;
+    m->kind = (sf_u8)kind;
+    m->target = target;
+    m->fallthrough = fallthrough;
     t->cur = m;
 }
+
+static void begin_meta(tctx *t, sf_u32 guest_off) { begin_meta_kind(t, META_INSN, guest_off, 0, 0); }
 
 static int fetch(tctx *t, sf_u32 gpc, sh_insn *d)
 {
@@ -553,16 +570,15 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
 
     b->guest_len = gpc - guest_pc;
     /* fall-through exit: also after trapa / ldc sr / illegal, where execution
-     * resumes at the next guest instruction */
-    if (!ended || b->end_reason != END_BRANCH) {
-        begin_meta(&t, b->guest_len);
-        jump_direct(&t, gpc, 0);
-        b->nmeta--;                       /* that entry is only a sentinel */
-    }
-    /* sentinel */
+     * resumes at the next guest instruction. The jump belongs to the
+     * sentinel range (resume = next guest pc). */
     b->meta[b->nmeta].host_off = (sf_u16)emit_pos(&t.em);
     b->meta[b->nmeta].guest_off = (sf_u16)b->guest_len;
-    b->meta[b->nmeta].nspill = 0;
+    b->meta[b->nmeta].kind = META_INSN;
+    if (!ended || b->end_reason != END_BRANCH) {
+        t.cur = &b->meta[b->nmeta];
+        jump_direct(&t, gpc, 0);
+    }
     b->code_len = emit_pos(&t.em);
 
     /* exit stubs: one per link. Enter with all guest registers intact. */
@@ -597,8 +613,8 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
 
 int dbt_block_find(const dbt_block *b, sf_u32 host_off)
 {
-    int lo = 0, hi = b->nmeta - 1;
-    if (b->nmeta == 0 || host_off >= b->meta[b->nmeta].host_off) return -1;
+    int lo = 0, hi = b->nmeta;          /* include the sentinel range */
+    if (host_off >= (sf_u32)b->code_len) return -1;
     while (lo < hi) {
         int mid = (lo + hi + 1) / 2;
         if (b->meta[mid].host_off <= host_off) lo = mid; else hi = mid - 1;
@@ -606,12 +622,13 @@ int dbt_block_find(const dbt_block *b, sf_u32 host_off)
     return lo;
 }
 
-int dbt_block_pending_spills(const dbt_block *b, int idx, sf_u32 host_off, dbt_spill *out)
+int dbt_block_pending_spills(const dbt_block *b, int idx, sf_u32 host_off, dbt_spill *out, int max)
 {
-    const dbt_imeta *m = &b->meta[idx];
     int i, n = 0;
-    for (i = 0; i < m->nspill; i++)
-        if (m->spill[i].start < host_off && host_off <= m->spill[i].end)
-            out[n++] = m->spill[i];
+    for (i = 0; i < b->nspills && n < max; i++) {
+        const dbt_spill *s = &b->spills[i];
+        if (s->insn == idx && s->start < host_off && host_off <= s->end)
+            out[n++] = *s;
+    }
     return n;
 }

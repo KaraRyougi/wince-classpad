@@ -11,7 +11,6 @@
 
 #define DBT_MAX_INSNS   64      /* guest instructions per block */
 #define DBT_MAX_LINKS   8       /* direct-branch exits per block */
-#define DBT_MAX_SPILLS  4       /* spill records per guest instruction */
 #define DBT_BLOCK_WORDS 512     /* host buffer per block (1 KiB) */
 
 enum { DBT_OK = 0, DBT_ERR_FETCH, DBT_ERR_READ, DBT_ERR_OVERFLOW, DBT_ERR_INTERNAL };
@@ -35,16 +34,30 @@ typedef struct {
 } dbt_env;
 
 typedef struct {
-    sf_u16 gpr, slot;        /* guest register saved in DSP slot */
+    sf_u8  insn;             /* meta index the spill belongs to */
+    sf_u8  gpr, slot;        /* guest register saved in DSP slot */
+    sf_u8  pad;
     sf_u16 start, end;       /* host byte offsets of the lds (start) and sts (end) */
 } dbt_spill;
 
+/* How to compute the guest resume PC for an exception inside this range. */
+enum { META_INSN = 0,        /* guest_pc + guest_off (restart the instruction) */
+       META_TARGET_CONST,    /* a branch whose slot has executed: resume at target */
+       META_TARGET_X0,       /* same, target is in the X0 slot */
+       META_COND,            /* bt/s, bf/s after the slot: SSR.T ? target : fallthrough */
+       META_RTE };           /* guest rte pending: not resumable */
+
 typedef struct {
-    sf_u16 host_off;         /* host byte offset where this guest instruction's code starts */
-    sf_u16 guest_off;        /* guest byte offset from block start (delay slot = its branch) */
-    sf_u16 nspill;
-    dbt_spill spill[DBT_MAX_SPILLS];
+    sf_u16 host_off;         /* host byte offset where this range starts */
+    sf_u16 guest_off;        /* META_INSN: guest byte offset from block start */
+    sf_u8  kind;
+    sf_u8  pad[3];
+    sf_u32 target;           /* META_TARGET_CONST / META_COND */
+    sf_u32 fallthrough;      /* META_COND */
 } dbt_imeta;
+
+#define DBT_MAX_META   (DBT_MAX_INSNS * 2 + 2)
+#define DBT_MAX_BLOCK_SPILLS 64
 
 typedef struct {
     sf_u32 guest_pc;
@@ -52,8 +65,10 @@ typedef struct {
     sf_u32 host_base;        /* host address of buf[0] */
     int    host_len;         /* bytes emitted (code + stubs + pool) */
     int    code_len;         /* bytes of translated code before stubs */
-    dbt_imeta meta[DBT_MAX_INSNS + 2];
-    int    nmeta;            /* entries; the last is a sentinel at guest_len */
+    dbt_imeta meta[DBT_MAX_META];
+    int    nmeta;            /* entries; meta[nmeta] is a sentinel at guest_len */
+    dbt_spill spills[DBT_MAX_BLOCK_SPILLS];
+    int    nspills;
     struct { int lit_off; sf_u32 guest_target; } links[DBT_MAX_LINKS];
     int    nlinks;
     int    end_reason;       /* enum below */
@@ -72,8 +87,8 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
  * the meta index or -1. */
 int dbt_block_find(const dbt_block *b, sf_u32 host_off);
 
-/* Spills that must be undone (sts slot,gpr) if an exception hit at host_off
- * inside instruction `idx`. Returns count, fills up to DBT_MAX_SPILLS. */
-int dbt_block_pending_spills(const dbt_block *b, int idx, sf_u32 host_off, dbt_spill *out);
+/* Spills that must be undone (gpr <- slot) if an exception hit at host_off
+ * inside meta entry `idx`. Returns count, fills up to `max` entries. */
+int dbt_block_pending_spills(const dbt_block *b, int idx, sf_u32 host_off, dbt_spill *out, int max);
 
 #endif
