@@ -68,7 +68,8 @@ needed: casio-emu runs the translator as an ordinary big-endian add-in.
    The `lcd` guest (framebuffer pushed to the R61524 through pre-swapped
    MMIO, screenshot in docs/img) completes the device-side checks of this
    milestone; `apicall` and `mmu` cover the CE API-call fault and TLB-mapped
-   code, the two translator prerequisites for the kernel.
+   code, `aspace` the ASID/remap invalidation: the translator prerequisites
+   for the kernel.
 4. ~~Guest image choice~~: self-built CE 6.0 R3 SH4 image (decided
    2026-10-22; Pocket PC 2000 SH3 ROMs would mean emulating a Jornada 540).
 5. CE image loading: ~~`.bin` records to guest RAM, ROMHDR, entry~~ done

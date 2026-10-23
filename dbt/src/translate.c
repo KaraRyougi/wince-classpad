@@ -286,6 +286,7 @@ static void jump_direct(tctx *t, sf_u32 guest_target, sf_u32 avoid, int cond)
     b->links[k].guest_target = guest_target;
     b->links[k].lit_off = -1;
     b->links[k].jump_off = emit_pos(e);
+    b->links[k].scratch = (sf_u8)rT;
     b->links[k].cond = (sf_u8)cond;
     b->links[k].backward = (sf_u8)(guest_target <= t->gpc);
     b->nlinks++;
@@ -782,6 +783,10 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
         sf_u32 v = host_base + (sf_u32)link_off;
         b->links[k].lit_off = link_off;
         if (l_off >= 0) { emit_patch16(&t.em, l_off, v >> 16); emit_patch16(&t.em, l_off + 2, v & 0xFFFFu); }
+        /* original jump words, for unchaining when the target block dies */
+        b->links[k].w0 = t.em.buf[b->links[k].jump_off / 2];
+        b->links[k].w1 = t.em.buf[b->links[k].jump_off / 2 + 1];
+        b->links[k].skip_w = b->links[k].cond ? t.em.buf[b->links[k].jump_off / 2 - 1] : 0;
     }
     b->host_len = emit_pos(&t.em);
     if (t.em.overflow) return DBT_ERR_OVERFLOW;

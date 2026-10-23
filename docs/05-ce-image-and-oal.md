@@ -137,12 +137,19 @@ Translator-side items the OAL work depends on:
   read there.
 - ~~Guest code in TLB-mapped regions (P0/U0)~~ fetch and data paths done
   (`mmu` guest: code and data through `ldtlb` entries, miss -> handler ->
-  refill -> retry). Still open: blocks are keyed by virtual address only, so
-  when CE reuses a virtual range for other code (process slots, loader
-  unmap/remap) the translations must go: the `trapa #0xF2` hook covers the
-  loader's `OEMCacheRangeFlush`; context switches between processes sharing
-  virtual addresses (slot 0) need a per-process cache tag or a flush on
-  switch. To be designed when the kernel runs.
+  refill -> retry).
+- ~~Virtual address reuse~~ done (`aspace` guest, design in docs/04
+  "Address spaces"): user-space blocks carry ASID and physical page, the
+  fast caches hold only the current ASID's entries, `ldtlb` is intercepted,
+  invalidation is precise (hash, inline caches, chained jumps). The kernel
+  side of the contract, to add where the shared-source kernel switches
+  address spaces and invalidates TLB entries (and in `OEMCacheRangeFlush`):
+  `trapa #0xFA` with r4 = new ASID after writing PTEH, `trapa #0xF9` with
+  r4/r5 = virtual range (r5 = 0: everything) after removing TLB entries or
+  changing a mapping, `trapa #0xF2` with the range for code the loader wrote.
+  Without them the translator still notices switches at `rte`/`ldc sr` and
+  remaps at `ldtlb`, but a block entered from the hash between a TLB
+  invalidation and the refill would run stale code.
 - FPU: the kernel saves and restores FPSCR/FPUL/FR registers on context
   switch with ordinary FPU instructions, all of which go through the helper
   into the single `fpuemu` state, so per-thread FPU state works without OAL
@@ -158,7 +165,7 @@ Translator-side items the OAL work depends on:
    (no hardware needed) to prove the toolchain. Read the kernel's SH4
    exception sources and settle the bank-1 question.
 2. ~~Guest tests for the two translator gaps~~ done 2026-10-22 (`apicall`,
-   `mmu`).
+   `mmu`); address-space handling done (`aspace`).
 3. `PLATFORM\CLASSPAD`: StartUp, OEMInit with TMU0 tick and INTC, hypercall
    debug output, cache flush hook. Headless OS design, RAMIMAGE config.bib.
 4. `make -C dbt NKBIN=NK.bin run`: expect the kernel banner on stdout,

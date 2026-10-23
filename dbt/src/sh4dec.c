@@ -81,7 +81,8 @@ void sh4_decode(sf_u32 op, sh_insn *d)
         case 0x7: d->touched |= R(n) | R(m); return;                            /* mul.l */
         case 0x8:
             if (op == 0x0008 || op == 0x0018) { d->writes_t = 1; return; }       /* clrt sett */
-            if (op == 0x0028 || op == 0x0038 || op == 0x0048 || op == 0x0058) return; /* clrmac ldtlb clrs sets */
+            if (op == 0x0038) { d->kind = K_FALLBACK; return; }                 /* ldtlb: helper (TLB bookkeeping) */
+            if (op == 0x0028 || op == 0x0048 || op == 0x0058) return;            /* clrmac clrs sets */
             d->kind = K_ILLEGAL; return;
         case 0x9:
             if (op == 0x0009) return;                                            /* nop */

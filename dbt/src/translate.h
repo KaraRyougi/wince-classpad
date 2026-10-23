@@ -90,6 +90,8 @@ typedef struct {
         int jump_off;            /* host offset of the 4-word jump sequence (lds rT,X0 ...) */
         sf_u8 cond;              /* the word before jump_off is the inverted bt/bf skip */
         sf_u8 backward;          /* guest target is at or before the branch (loop back edge) */
+        sf_u8 scratch;           /* register the jump sequence spills */
+        sf_u16 w0, w1, skip_w;   /* original words of the sequence (and the skip), to undo chaining */
         sf_u32 guest_target;
     } links[DBT_MAX_LINKS];
     int    nlinks;

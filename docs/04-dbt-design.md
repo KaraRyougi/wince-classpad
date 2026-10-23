@@ -224,7 +224,31 @@ via hypercall 0xF1):
   SH API-call convention (jumps to 0xF000xxxx) needs.
 - Hypercalls: F0 exit, F1 puts, F2 flush translations for a guest range
   (`hc_flush`, for code the guest loaded or modified), F3 putc, F4 puthex,
-  F5 stats, F6 bench, F7 dump host words, F8 synthetic exception (internal).
+  F5 stats, F6 bench, F7 dump host words, F8 synthetic exception (internal),
+  F9 user mappings changed in a range (`hc_tlb_inval`), FA address space
+  switched to an ASID (`hc_asid`), FB read a statistic.
+- Address spaces: blocks are keyed by virtual pc. A block of TLB-mapped
+  code (pc < 0x80000000) also records the ASID it was translated under and
+  the physical address of its first instruction, found by scanning the UTLB
+  arrays (0xF6000000/0xF7000000). The hash and the inline caches only hold
+  entries valid for the current ASID: when PTEH's ASID is seen to change
+  (read at `rte`, `ldc sr`, `ldtlb` and every C lookup, or told by HC_ASID),
+  user blocks of other ASIDs leave the hash and inline caches aimed at
+  user-space targets are reset; the blocks stay and are reused when their
+  ASID returns, or in another ASID when the UTLB says the virtual pc maps to
+  the same physical page (shared DLL code). `ldtlb` is a helper call: a new
+  entry whose physical page differs from what a page's blocks were made from
+  invalidates them. Invalidation is precise: the block's hash slot (empty
+  slots carry gpc = 1, since the asm fast path compares only the pc), inline
+  caches whose cached host address lies in it, and chained direct jumps into
+  it (restored to their original words and exit stub). Dead blocks keep their
+  cache memory until the next full flush.
+  Not covered without the kernel's help: a TLB entry removed by a UTLB array
+  write or MMUCR.TI and the page remapped later is noticed only at the
+  `ldtlb` that installs the new mapping; a translated block for that page
+  that is entered from the hash before then runs the old code. The kernel's
+  TLB-invalidate and address-space-switch paths therefore issue F9/FA
+  (docs/05).
 - Resume rules: translated code uses the block metadata (restart the
   instruction, or the branch target after a delay slot). Inside the stubs,
   window labels (`dbt_lk_s*`, `dbt_hit_*`, `dbt_full_m*`, `dbt_h*_s*`) tell
@@ -357,6 +381,7 @@ Status 2026-10-22: all four guests pass under the emulator.
 | `bench` | translated vs native timing of eight kernels (see "Performance") | runs |
 | `apicall` | `jsr` to 0xF0010000 / 0xF000FFFC / an odd address (the CE API-call convention): instruction address error synthesized by the translator, EXPEVT 0x0E0, SPC = TEA = target, handler redirects to the caller through PR with r4-r7 intact, repeated calls through the inline-cache miss path | PASS (7 checks) |
 | `mmu` | MMUCR.AT on, code and data pages mapped with PTEH/PTEL/`ldtlb`: translated call through a TLB-mapped code page with a data load through another, store through the TLB, TLB miss on a code fetch delivered to the guest's 0x400 handler (EXPEVT 0x040, TEA = SPC = pc), refill and retry, MMU off again | PASS (10 checks) |
+| `aspace` | address spaces: the same virtual page mapped to different code in ASID 1 and 2 (switch noticed at `ldc sr`, or announced with HC_ASID), blocks reused when an ASID returns and across ASIDs for a shared (SH=1) page, a remap announced by HC_TLB_INVAL, a remap noticed at `ldtlb` alone, reloading an identical mapping invalidating nothing, and a chained cross-page `bra` unlinked when its target page is remapped | PASS (14 checks) |
 | `lcd` | draws into a little-endian RGB565 VRAM and pushes 24 frames to the R61524 display controller (16-bit bus at 0xB4000000, RS on Port R) through the pre-swapped MMIO accessors; `make -C dbt GUEST=lcd screenshot` captures the frame | shows the picture (docs/img/lcd-guest.png) |
 | `tmu` | TMU0 programmed through pre-swapped MMIO, IMASK/BL and IMR masking, INTEVT, `rte` restoring SR, `sleep` wake-up; register probe across `trapa`; 15 one-construct hot loops (loads, stores of every form, `bt/s` with a T-writing slot, `jsr` with a store in the slot, push/pop, pc-relative) plus a compiled loop, each run with ~3000 interrupts landing at arbitrary host instructions and compared with an interrupt-free run | PASS (34 checks) |
 

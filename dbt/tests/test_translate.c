@@ -420,6 +420,8 @@ int main(void)
     { sf_u32 ops[] = { 0xA000 };
       translate(ops, 1, 1);
       expect("stub_off", blk.nlinks == 1 && blk.links[0].stub_off == blk.code_len);
+      expect("link words", blk.links[0].scratch == 1 && blk.links[0].w0 == LDS_X0(1) && blk.links[0].w1 == hbuf[blk.links[0].jump_off / 2 + 1]
+             && (blk.links[0].w1 & 0xF000) == 0xD000 && blk.links[0].skip_w == 0);
     }
 
     printf("%d checks, %d failures\n", checks, failures);

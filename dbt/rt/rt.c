@@ -46,6 +46,26 @@ static int       g_translating;             /* guest pc being translated or 0 */
 static sf_u32    g_translating_pc;
 static int guest_pc_fetchable(sf_u32 gpc);
 static void deliver_synthetic(sf_u32 gpc, sf_u32 expevt);
+
+/* ------------------------------------------- address spaces and the TLB */
+/* Blocks are keyed by virtual pc. Code below 0x80000000 is TLB-mapped and
+ * can mean different things in different processes (CE gives each its own
+ * ASID) or after a remap, so such blocks also record the ASID they were made
+ * under and the physical address of their first instruction (from the UTLB).
+ * The hash and the inline caches hold only entries valid in the current
+ * ASID; switches are noticed where the guest must pass through C anyway
+ * (rte, ldc sr, ldtlb) by reading PTEH, or told to us by HC_ASID. Mapping
+ * changes are noticed at ldtlb (new physical page for a page that has
+ * blocks) or told to us by HC_TLB_INVAL / HC_FLUSH. See docs/05. */
+#define REG_PTEH  (*(volatile sf_u32 *)0xFF000000u)
+#define REG_PTEL  (*(volatile sf_u32 *)0xFF000004u)
+#define REG_MMUCR (*(volatile sf_u32 *)0xFF000010u)
+#define IS_USER(pc)  ((pc) < 0x80000000u)
+#define PHYS_UNKNOWN 0xFFFFFFFFu
+#define ASID_ANY     0xFFFFu
+typedef struct { sf_u8 dead, user; sf_u16 asid; sf_u32 phys; } binfo;
+static binfo  g_binfo[MAX_BLOCKS];
+static sf_u32 g_asid;
 static dbt_env   g_env;
 
 /* ---------------------------------------------------------- console */
@@ -106,11 +126,144 @@ static sf_u32 hash_find(sf_u32 gpc)
     return (e->host && e->gpc == gpc) ? e->host : 0;
 }
 
+/* Empty slots carry gpc = 1 (odd: never a pc): the asm fast path compares
+ * only the gpc, so a cleared slot must not keep its old key. */
+static void hash_remove(const dbt_block *b)
+{
+    hent *e = &g_hash[hidx(b->guest_pc)];
+    if (e->host == b->host_base) { e->gpc = 1; e->host = 0; }
+}
+
+/* Physical address of virtual `va` under `asid` according to the UTLB
+ * (array reads at 0xF6000000 / 0xF7000000), PHYS_UNKNOWN if unmapped. */
+static sf_u32 utlb_translate(sf_u32 va, sf_u32 asid)
+{
+    static const sf_u8 shift_of_sz[4] = { 10, 12, 16, 20 };
+    int e;
+    if (!(REG_MMUCR & 1)) return va & 0x1FFFFFFFu;
+    for (e = 0; e < 64; e++) {
+        sf_u32 a = *(volatile sf_u32 *)(0xF6000000u | ((sf_u32)e << 8));
+        sf_u32 d = *(volatile sf_u32 *)(0xF7000000u | ((sf_u32)e << 8));
+        sf_u32 sz = ((d >> 4) & 1) | ((d >> 6) & 2), mask = ~((1u << shift_of_sz[sz]) - 1);
+        if (!(a & 0x100) || !(d & 0x100)) continue;                       /* V */
+        if ((a & 0xFFFFFC00u & mask) != (va & mask)) continue;
+        if (!(d & 2) && (a & 0xFF) != asid) continue;                     /* not shared: ASID must match */
+        return (d & 0x1FFFFC00u & mask) | (va & ~mask);
+    }
+    return PHYS_UNKNOWN;
+}
+
+static void reset_ic(dbt_block *o)
+{
+    volatile sf_u32 *ic = (volatile sf_u32 *)(o->host_base + (sf_u32)o->ic_off);
+    ic[0] = 1; ic[1] = 0;
+}
+
+/* Undo the chaining of link k of block o and point its literal back at the exit stub. */
+static void unchain(dbt_block *o, int k)
+{
+    sf_u16 *w = (sf_u16 *)(o->host_base + (sf_u32)o->links[k].jump_off);
+    w[0] = o->links[k].w0; w[1] = o->links[k].w1;
+    if (o->links[k].cond) w[-1] = o->links[k].skip_w;
+    *(volatile sf_u32 *)(o->host_base + (sf_u32)o->links[k].lit_off) = o->host_base + (sf_u32)o->links[k].stub_off;
+    dbt_sync_code(o->host_base + (sf_u32)o->links[k].jump_off - 2, 8);
+    dbt_stat.unchained++;
+}
+
+/* Make block b unreachable: hash entry, inline caches and chained jumps that
+ * lead into it. Its cache memory stays dead until the next full flush. */
+static void invalidate_block(dbt_block *b)
+{
+    int i, k;
+    sf_u32 lo = b->host_base, hi = b->host_base + (sf_u32)b->host_len;
+    g_binfo[b - g_blocks].dead = 1;
+    hash_remove(b);
+    for (i = 0; i < g_nblocks; i++) {
+        dbt_block *o = &g_blocks[i];
+        if (g_binfo[i].dead) continue;
+        if (o->ic_off >= 0) {
+            sf_u32 h = *(volatile sf_u32 *)(o->host_base + (sf_u32)o->ic_off + 4);
+            if (h >= lo && h < hi) reset_ic(o);
+        }
+        for (k = 0; k < o->nlinks; k++) {
+            sf_u32 v = *(volatile sf_u32 *)(o->host_base + (sf_u32)o->links[k].lit_off);
+            if (v >= lo && v < hi) unchain(o, k);
+        }
+    }
+    dbt_stat.invalidations++;
+}
+
+/* Drop every live block overlapping guest range [lo, hi); user_only skips P1-P3 code. */
+static void invalidate_range(sf_u32 lo, sf_u32 hi, int user_only)
+{
+    int i;
+    for (i = 0; i < g_nblocks; i++) {
+        dbt_block *b = &g_blocks[i];
+        if (g_binfo[i].dead || (user_only && !g_binfo[i].user)) continue;
+        if (b->guest_pc < hi && b->guest_pc + b->guest_len > lo) invalidate_block(b);
+    }
+}
+
+/* The address space changed: user blocks of other ASIDs leave the hash, and
+ * inline caches aimed at user-space targets forget them. Blocks stay for
+ * when their ASID returns (or for reuse through a shared physical page). */
+static void switch_asid(sf_u32 asid)
+{
+    int i;
+    g_asid = asid;
+    dbt_stat.asid_switches++;
+    for (i = 0; i < g_nblocks; i++) {
+        dbt_block *b = &g_blocks[i];
+        if (g_binfo[i].dead) continue;
+        if (g_binfo[i].user && g_binfo[i].asid != asid) hash_remove(b);
+        if (b->ic_off >= 0) {
+            sf_u32 g = *(volatile sf_u32 *)(b->host_base + (sf_u32)b->ic_off);
+            if (g != 1 && IS_USER(g)) reset_ic(b);
+        }
+    }
+}
+
+static void note_asid(void)
+{
+    sf_u32 a = REG_PTEH & 0xFF;
+    if (a != g_asid) switch_asid(a);
+}
+
+/* ldtlb executed by the guest: PTEH/PTEL describe the new entry. A page that
+ * has blocks and now maps to another physical page loses them. */
+static void tlb_hook(void)
+{
+    static const sf_u8 shift_of_sz[4] = { 10, 12, 16, 20 };
+    sf_u32 pteh = REG_PTEH, ptel = REG_PTEL;
+    sf_u32 sz = ((ptel >> 4) & 1) | ((ptel >> 6) & 2), mask = ~((1u << shift_of_sz[sz]) - 1);
+    sf_u32 vpn = pteh & 0xFFFFFC00u & mask, asid = pteh & 0xFF, shared = (ptel >> 1) & 1;
+    int i;
+    dbt_stat.tlb_hooks++;
+    note_asid();
+    for (i = 0; i < g_nblocks; i++) {
+        dbt_block *b = &g_blocks[i];
+        if (g_binfo[i].dead || !g_binfo[i].user) continue;
+        if (b->guest_pc >= vpn + ~mask + 1 || b->guest_pc + b->guest_len <= vpn) continue;
+        if (!shared && g_binfo[i].asid != asid) continue;                     /* another process's view */
+        if (!(ptel & 0x100) || g_binfo[i].phys == PHYS_UNKNOWN ||
+            (g_binfo[i].phys & mask) != (ptel & 0x1FFFFC00u & mask))
+            invalidate_block(b);
+    }
+    __asm__ volatile ("ldtlb" ::: "memory");
+}
+
+/* A live block for gpc usable in the current address space. */
 static dbt_block *find_block_by_gpc(sf_u32 gpc)
 {
     int i;
-    for (i = 0; i < g_nblocks; i++)
-        if (g_blocks[i].guest_pc == gpc) return &g_blocks[i];
+    sf_u32 phys = 0; int have_phys = 0;
+    for (i = 0; i < g_nblocks; i++) {
+        dbt_block *b = &g_blocks[i];
+        if (g_binfo[i].dead || b->guest_pc != gpc) continue;
+        if (!g_binfo[i].user || g_binfo[i].asid == g_asid) return b;
+        if (!have_phys) { phys = utlb_translate(gpc, g_asid); have_phys = 1; }
+        if (phys != PHYS_UNKNOWN && g_binfo[i].phys == phys) return b;        /* same code, shared page */
+    }
     return 0;
 }
 
@@ -118,7 +271,8 @@ static dbt_block *find_block_by_gpc(sf_u32 gpc)
 
 static void cache_flush_all(void)
 {
-    memset(g_hash, 0, sizeof(hent) * HSIZE);
+    sf_u32 i;
+    for (i = 0; i < HSIZE; i++) { g_hash[i].gpc = 1; g_hash[i].host = 0; }
     g_nblocks = 0;
     g_cache_used = 0;
     dbt_stat.flushes++;
@@ -164,6 +318,12 @@ static dbt_block *translate_at(sf_u32 gpc)
         dbt_halt("translation failed");
     }
     g_cache_used += ((sf_u32)b->host_len + 31u) & ~31u;
+    {
+        binfo *bi = &g_binfo[g_nblocks];
+        bi->dead = 0; bi->user = (sf_u8)IS_USER(gpc);
+        bi->asid = bi->user ? (sf_u16)g_asid : (sf_u16)ASID_ANY;
+        bi->phys = bi->user ? utlb_translate(gpc, g_asid) : (gpc & 0x1FFFFFFFu);
+    }
     g_nblocks++;
     dbt_sync_code(host, (sf_u32)b->host_len);
     hash_insert(gpc, host);
@@ -178,7 +338,9 @@ static dbt_block *translate_at(sf_u32 gpc)
 
 static sf_u32 lookup_or_translate(sf_u32 gpc)
 {
-    sf_u32 host = hash_find(gpc);
+    sf_u32 host;
+    note_asid();
+    host = hash_find(gpc);
     if (!host) {
         dbt_block *b = find_block_by_gpc(gpc);     /* evicted from the hash by a collision */
         if (b) { dbt_stat.hash_evicted++; hash_insert(gpc, b->host_base); host = b->host_base; }
@@ -245,13 +407,7 @@ sf_u32 dbt_resolve(sf_u32 gpc, sf_u32 link_lit)
 
 void dbt_invalidate(sf_u32 lo, sf_u32 hi)
 {
-    int i;
-    dbt_stat.invalidations++;
-    /* v1: any overlap flushes everything; a precise version unlinks blocks */
-    for (i = 0; i < g_nblocks; i++) {
-        dbt_block *b = &g_blocks[i];
-        if (b->guest_pc < hi && b->guest_pc + b->guest_len > lo) { cache_flush_all(); return; }
-    }
+    invalidate_range(lo, hi, 0);
 }
 
 /* ------------------------------------------------------------ hypercalls */
@@ -265,6 +421,9 @@ void dbt_invalidate(sf_u32 lo, sf_u32 hi)
 #define HC_BENCH  0xF6
 #define HC_DUMP   0xF7                  /* r4 = host address, r5 = number of 16-bit words to print */
 #define HC_SYNTH  0xF8                  /* translator-internal: deliver a synthetic exception (r4 = guest pc, r5 = EXPEVT) */
+#define HC_TLB_INVAL 0xF9               /* kernel: user mappings in [r4, r4+r5) changed (r5 = 0: all) */
+#define HC_ASID   0xFA                  /* kernel: address space switched to ASID r4 */
+#define HC_GETSTAT 0xFB                 /* r4 = index -> r0 (0 translations, 1 blocks, 2 invalidations, 3 asid switches, 4 ic misses) */
 
 #define REG_EXPEVT (*(volatile sf_u32 *)0xFF000024u)
 #define REG_TEA    (*(volatile sf_u32 *)0xFF00000Cu)
@@ -307,6 +466,10 @@ static void print_stats(void)
     dbt_puts(" ic_miss_c="); dbt_puthex(dbt_stat.ic_misses_c);
     dbt_puts(" probe_faults="); dbt_puthex(dbt_stat.probe_faults);
     dbt_puts(" synth="); dbt_puthex(dbt_stat.synth_exceptions);
+    dbt_puts("\n[dbt] inval="); dbt_puthex(dbt_stat.invalidations);
+    dbt_puts(" unchained="); dbt_puthex(dbt_stat.unchained);
+    dbt_puts(" asid_switches="); dbt_puthex(dbt_stat.asid_switches);
+    dbt_puts(" tlb_hooks="); dbt_puthex(dbt_stat.tlb_hooks);
     dbt_puts(" resumes="); dbt_puthex(dbt_stat.resumes);
     dbt_puts("/"); dbt_puthex(dbt_stat.resumes_committed);
     dbt_puts("\n");
@@ -331,6 +494,23 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
     case HC_FLUSH: dbt_invalidate(ctx->r[4], ctx->r[5]); return RT_ACT_RESUME;
     case HC_STATS: print_stats(); return RT_ACT_RESUME;
     case HC_BENCH: ctx->r[0] = dbt_bench_native(ctx->r[4], ctx->r[5]); return RT_ACT_RESUME;
+    case HC_TLB_INVAL:
+        if (ctx->r[5] == 0) invalidate_range(0, 0x80000000u, 1);
+        else invalidate_range(ctx->r[4], ctx->r[4] + ctx->r[5], 1);
+        return RT_ACT_RESUME;
+    case HC_ASID: switch_asid(ctx->r[4] & 0xFF); return RT_ACT_RESUME;
+    case HC_GETSTAT: {
+        sf_u32 v = 0;
+        switch (ctx->r[4]) {
+        case 0: v = dbt_stat.translations; break;
+        case 1: v = dbt_stat.blocks; break;
+        case 2: v = dbt_stat.invalidations; break;
+        case 3: v = dbt_stat.asid_switches; break;
+        case 4: v = dbt_stat.ic_misses_c; break;
+        }
+        ctx->r[0] = v;
+        return RT_ACT_RESUME;
+    }
     case HC_DUMP: {
         const volatile sf_u16 *p = (const volatile sf_u16 *)(ctx->r[4] & ~1u);
         sf_u32 i;
@@ -652,7 +832,9 @@ deliver:
 
 sf_u32 dbt_rte_c(sf_u32 guest_spc, sf_u32 *ssr)
 {
-    sf_u32 host = dbt_resolve(guest_spc, 0);
+    sf_u32 host;
+    note_asid();                       /* a context switch returns to the new thread through rte */
+    host = dbt_resolve(guest_spc, 0);
     dbt_shadow_md = *ssr & SR_MD;
     *ssr = (*ssr | SR_MD | SR_DSP);
     return host;
@@ -660,6 +842,7 @@ sf_u32 dbt_rte_c(sf_u32 guest_spc, sf_u32 *ssr)
 
 void dbt_ldc_sr_c(dbt_gctx *ctx, sf_u32 newsr)
 {
+    note_asid();
     dbt_shadow_md = newsr & SR_MD;
     ctx->sr = newsr | SR_MD | SR_DSP;
 }
@@ -684,7 +867,9 @@ void dbt_fpu_c(dbt_gctx *ctx, sf_u32 opcode)
 void dbt_fallback_c(dbt_gctx *ctx, sf_u32 opcode)
 {
     int n = (opcode >> 8) & 0xF, m = (opcode >> 4) & 0xF;
-    sf_u64 acc = ((sf_u64)ctx->mach << 32) | ctx->macl;
+    sf_u64 acc;
+    if (opcode == 0x0038) { tlb_hook(); return; }           /* ldtlb */
+    acc = ((sf_u64)ctx->mach << 32) | ctx->macl;
     if ((opcode & 0xF00F) == 0x000F) {                       /* mac.l */
         sf_u32 a = bswap32(*(volatile sf_u32 *)ctx->r[n]), b = bswap32(*(volatile sf_u32 *)ctx->r[m]);
         ctx->r[n] += 4; ctx->r[m] += 4;

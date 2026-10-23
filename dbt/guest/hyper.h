@@ -6,6 +6,23 @@ static inline void hc_puts(const char *s) { register const char *r4 __asm__("r4"
 static inline void hc_putc(int c) { register int r4 __asm__("r4") = c; __asm__ volatile ("trapa #0xF3" :: "r"(r4) : "memory"); }
 static inline void hc_puthex(unsigned v) { register unsigned r4 __asm__("r4") = v; __asm__ volatile ("trapa #0xF4" :: "r"(r4) : "memory"); }
 static inline void hc_stats(void) { __asm__ volatile ("trapa #0xF5" ::: "memory"); }
+/* paravirtual notifications a kernel/OAL would issue */
+static inline void hc_tlb_inval(unsigned addr, unsigned len)   /* user mappings changed; len 0 = all */
+{
+    register unsigned r4 __asm__("r4") = addr; register unsigned r5 __asm__("r5") = len;
+    __asm__ volatile ("trapa #0xF9" :: "r"(r4), "r"(r5) : "memory");
+}
+static inline void hc_asid(unsigned asid)
+{
+    register unsigned r4 __asm__("r4") = asid;
+    __asm__ volatile ("trapa #0xFA" :: "r"(r4) : "memory");
+}
+static inline unsigned hc_getstat(unsigned idx)
+{
+    register unsigned r4 __asm__("r4") = idx; register unsigned r0 __asm__("r0");
+    __asm__ volatile ("trapa #0xFB" : "=r"(r0) : "r"(r4) : "memory");
+    return r0;
+}
 /* guest code in [addr, addr+len) changed: drop its translations */
 static inline void hc_flush(unsigned addr, unsigned len)
 {
