@@ -15,7 +15,7 @@ GUEST_CFLAGS := -ml -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-sta
 RT_SRC := rt/crt0.S rt/stubs.S rt/main.c rt/rt.c rt/bench.c bench/loops.S src/sh4dec.c src/sh4emit.c src/translate.c \
           ../fpuemu/src/fpuemu.c ../fpuemu/src/softfloat.c
 
-.PHONY: all clean run disasm
+.PHONY: all clean run screenshot disasm
 
 IMG := $(BUILD)/dbt-$(GUEST)
 
@@ -57,6 +57,12 @@ $(IMG).g3a: $(IMG)-loader.bin
 
 run: $(IMG).g3a
 	-$(EMU)/run-headless.sh $(abspath $(IMG).g3a) 20
+
+# run headless with the emulator dumping the presented frame (PPM) and convert the
+# last one to $(IMG).png; HLE_FORCE_R61524 presents the LCD controller's pixels
+screenshot: $(IMG).g3a
+	-HLE_FBDUMP=$(abspath $(IMG).ppm) HLE_FORCE_R61524=1 $(EMU)/run-headless.sh $(abspath $(IMG).g3a) 25
+	python3 ../tools/ppm2png.py $(IMG).ppm $(IMG).png
 
 disasm: $(IMG).elf $(BUILD)/$(GUEST).elf
 	$(OBJDUMP) -d $(IMG).elf > $(IMG).dis

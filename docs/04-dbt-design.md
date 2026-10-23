@@ -343,7 +343,19 @@ Status 2026-10-22: all four guests pass under the emulator.
 | `exc` | guest VBR, `trapa`, EXPEVT/TRA, SPC rewrite by the handler, `rte`, T bit across exceptions | PASS (6 checks) |
 | `fpu` | raw FPU words through the helper: fpscr reset, fadd/fmul/float/fmov.s, double sub + fcmp/gt | PASS (5 checks, 0x21 helper calls) |
 | `bench` | translated vs native timing of eight kernels (see "Performance") | runs |
+| `lcd` | draws into a little-endian RGB565 VRAM and pushes 24 frames to the R61524 display controller (16-bit bus at 0xB4000000, RS on Port R) through the pre-swapped MMIO accessors; `make -C dbt GUEST=lcd screenshot` captures the frame | shows the picture (docs/img/lcd-guest.png) |
 | `tmu` | TMU0 programmed through pre-swapped MMIO, IMASK/BL and IMR masking, INTEVT, `rte` restoring SR, `sleep` wake-up; register probe across `trapa`; 15 one-construct hot loops (loads, stores of every form, `bt/s` with a T-writing slot, `jsr` with a store in the slot, push/pop, pc-relative) plus a compiled loop, each run with ~3000 interrupts landing at arbitrary host instructions and compared with an interrupt-free run | PASS (34 checks) |
+
+![lcd guest frame](img/lcd-guest.png)
+
+The `lcd` guest is the first device driven by translated code: register
+select through an 8-bit port bit (no swap), window registers and pixel data
+as 16-bit writes (pre-swapped), 384x216 pixels per frame. One frame push
+costs 0x2ebd6 TMU1 ticks (about 1.7 M host instructions, ~21 per pixel: a
+VRAM load with swap, the pre-swap, the store with its spill, loop control).
+The display layout is the fx-CG50/CG100 panel that casio-emu models; the
+ClassPad's 320x528 panel and its controller are a later concern for the
+display driver.
 
 The TMU guest found three resume bugs that the host tests could not: `bf/s`
 boundaries had the T sense inverted, loads were restarted after they had

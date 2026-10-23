@@ -34,6 +34,7 @@ translator (`dbt/`) runs its three test guests to completion inside casio-emu
 
 ```sh
 make test          # host tests: FPU emulator + translator
-make -C dbt run    # build launcher+translator+guest, run in casio-emu (GUEST=hello|exc|fpu)
+make -C dbt run    # build launcher+translator+guest, run in casio-emu (GUEST=hello|exc|fpu|tmu|bench|lcd)
+make -C dbt GUEST=lcd screenshot   # same, dumping the emulated LCD to dbt/build/dbt-lcd.png
 python3 tools/nkbin.py path/to/NK.bin
 ```
