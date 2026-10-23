@@ -59,10 +59,16 @@ void guest_main(void)
     __asm__ volatile ("ldc %0, sr" :: "r"(0x400010F0u));  /* interrupts masked */
     hc_puts("kernel        translated    native   slowdown\n");
     for (k = 0; k < sizeof kernels / sizeof kernels[0]; k++) {
-        kernels[k].fn(16, buf);                           /* translate everything first */
-        t0 = mmio_r32(TCNT1);
-        kernels[k].fn(ITER, buf);
-        t1 = mmio_r32(TCNT1);
+        volatile unsigned reps = 2;                       /* volatile: an unrolled loop would give each pass its own return site */
+        unsigned rep;
+        /* the first timed pass also translates the block after this call site
+         * (its return address differs from any warm-up call's), so time the
+         * same call site twice and keep the second */
+        for (rep = 0; rep < reps; rep++) {
+            t0 = mmio_r32(TCNT1);
+            kernels[k].fn(ITER, buf);
+            t1 = mmio_r32(TCNT1);
+        }
         tr = t0 - t1;
         nat = hc_bench(k, ITER);
         hc_puts(kernels[k].name); hc_puts("  "); putdec(tr); hc_puts("  "); putdec(nat); hc_puts("  ");

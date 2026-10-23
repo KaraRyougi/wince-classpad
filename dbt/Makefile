@@ -9,7 +9,7 @@ EMU      ?= $(HOME)/Dev/casio-emu
 BUILD    := build
 
 HOST_CFLAGS  := -mb -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables \
-                -Wall -Wextra -Wno-unused-parameter -I rt -I src -I ../fpuemu/src
+                -Wall -Wextra -Wno-unused-parameter -I rt -I src -I ../fpuemu/src $(EXTRA_CFLAGS)
 GUEST_CFLAGS := -ml -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables -Wall
 
 RT_SRC := rt/crt0.S rt/stubs.S rt/main.c rt/rt.c rt/bench.c bench/loops.S src/sh4dec.c src/sh4emit.c src/translate.c \
@@ -17,7 +17,9 @@ RT_SRC := rt/crt0.S rt/stubs.S rt/main.c rt/rt.c rt/bench.c bench/loops.S src/sh
 
 .PHONY: all clean run disasm
 
-all: $(BUILD)/dbt.g3a
+IMG := $(BUILD)/dbt-$(GUEST)
+
+all: $(IMG).g3a
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -35,28 +37,29 @@ $(BUILD)/$(GUEST).bin: $(BUILD)/$(GUEST).elf
 	$(OBJCOPY) -O binary $< $@
 
 # --- translator image (big-endian) ---
-$(BUILD)/dbt.elf: $(RT_SRC) rt/guest_blob.S rt/image.ld rt/rt.h rt/ctx_offsets.h $(BUILD)/$(GUEST).bin
+# image files are named after the guest so that switching GUEST= relinks
+$(IMG).elf: $(RT_SRC) rt/guest_blob.S rt/image.ld rt/rt.h rt/ctx_offsets.h $(BUILD)/$(GUEST).bin
 	$(CC) $(HOST_CFLAGS) -DGUEST='"$(BUILD)/$(GUEST).bin"' -T rt/image.ld -o $@ $(RT_SRC) rt/guest_blob.S -lgcc
 
-$(BUILD)/dbt.bin: $(BUILD)/dbt.elf
+$(IMG).bin: $(IMG).elf
 	$(OBJCOPY) -O binary $< $@
 
 # --- launcher ---
-$(BUILD)/loader.elf: loader/loader.S loader/loader.ld $(BUILD)/dbt.bin
-	$(CC) $(HOST_CFLAGS) -DIMAGE='"$(BUILD)/dbt.bin"' -T loader/loader.ld -o $@ loader/loader.S
+$(IMG)-loader.elf: loader/loader.S loader/loader.ld $(IMG).bin
+	$(CC) $(HOST_CFLAGS) -DIMAGE='"$(IMG).bin"' -T loader/loader.ld -o $@ loader/loader.S
 
-$(BUILD)/loader.bin: $(BUILD)/loader.elf
+$(IMG)-loader.bin: $(IMG)-loader.elf
 	$(OBJCOPY) -O binary $< $@
 
 # casio-emu reads the payload from file offset 0x7000 (g3a header size)
-$(BUILD)/dbt.g3a: $(BUILD)/loader.bin
+$(IMG).g3a: $(IMG)-loader.bin
 	( dd if=/dev/zero bs=28672 count=1 2>/dev/null; cat $< ) > $@
 
-run: $(BUILD)/dbt.g3a
-	-$(EMU)/run-headless.sh $(abspath $(BUILD)/dbt.g3a) 20
+run: $(IMG).g3a
+	-$(EMU)/run-headless.sh $(abspath $(IMG).g3a) 20
 
-disasm: $(BUILD)/dbt.elf $(BUILD)/$(GUEST).elf
-	$(OBJDUMP) -d $(BUILD)/dbt.elf > $(BUILD)/dbt.dis
+disasm: $(IMG).elf $(BUILD)/$(GUEST).elf
+	$(OBJDUMP) -d $(IMG).elf > $(IMG).dis
 	$(OBJDUMP) -d -EL $(BUILD)/$(GUEST).elf > $(BUILD)/$(GUEST).dis
 
 clean:

@@ -92,7 +92,9 @@ void dbt_halt(const char *why) __attribute__((noreturn));
 /* statistics */
 typedef struct {
     sf_u32 blocks, translations, flushes, lookups_c, exceptions, hypercalls, fpu_ops, invalidations;
-    sf_u32 resumes, resumes_committed;   /* exceptions resumed inside a block: restart / after the memory op */
+    sf_u32 resumes, resumes_committed;
+    sf_u32 chained;                      /* direct jumps rewritten into native branches */
+    sf_u32 hash_evicted;                 /* lookups that found the block only in the block table */   /* exceptions resumed inside a block: restart / after the memory op */
 } dbt_stats;
 extern dbt_stats dbt_stat;
 

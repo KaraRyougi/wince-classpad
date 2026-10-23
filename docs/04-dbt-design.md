@@ -235,16 +235,39 @@ charges one TMU tick per four executed instructions regardless of type, so
 these are *instruction-count* ratios; the per-iteration counts below were
 read from the translated blocks and agree with the measurements.
 
-| kernel | per iteration | native ticks | translated ticks | slowdown | host insns / guest insns |
+| kernel | per iteration | native ticks | before chaining | with chaining | host insns / guest insns (chained) |
 |---|---|---|---|---|---|
-| alu | 5 ALU + `dt` + `bf` | 15382 | 27723 | 1.80x | 11 / 7 |
-| mem mixed | 4 longword, 2 word, 2 byte accesses, 2 ALU, loop | 26369 | 81308 | 3.08x | 41 / 12 |
-| mem copy | 2 post-increment loads, 2 stores, pointer wrap, loop | 29391 | 81033 | 2.76x | |
-| stack | push r1, r2, PR; pop them; loop | 19777 | 90096 | 4.56x | 41 / 9 |
-| branch | 3 data-dependent `bt`/`bf` (half taken), loop | 25270 | 47249 | 1.87x | |
-| call jsr | `jsr @r6; nop` to a 3-instruction leaf | 17580 | 156016 | 8.87x | ~65 / 8 |
-| call bsr | `bsr leaf; nop` | 17580 | 105479 | 6.00x | |
-| call frame | `jsr` to a function that pushes/pops r8, r9, PR | 35159 | 235117 | 6.69x | |
+| alu | 5 ALU + `dt` + `bf` | 15382 | 27723 (1.80x) | 15390 (**1.00x**) | 7 / 7 |
+| mem mixed | 4 longword, 2 word, 2 byte accesses, 2 ALU, loop | 26369 | 81308 (3.08x) | 72519 (2.75x) | 37 / 12 |
+| mem copy | 2 post-increment loads, 2 stores, pointer wrap, loop | 29391 | 81033 (2.76x) | 68400 (2.33x) | |
+| stack | push r1, r2, PR; pop them; loop | 19777 | 90096 (4.56x) | 81309 (4.11x) | 37 / 9 |
+| branch | 3 data-dependent `bt`/`bf` (half taken), loop | 25270 | 47249 (1.87x) | 31869 (1.26x) | |
+| call jsr | `jsr @r6; nop` to a 3-instruction leaf | 17580 | 156016 (8.87x) | 156017 (8.87x) | ~65 / 8 |
+| call bsr | `bsr leaf; nop` | 17580 | 105479 (6.00x) | 96690 (5.50x) | |
+| call frame | `jsr` to a function that pushes/pops r8, r9, PR | 35159 | 235117 (6.69x) | 235119 (6.69x) | |
+
+**Branch chaining** (done 2026-10-22, `dbt_chain_direct`): when the runtime
+links a direct jump and the target is within the 12-bit `bra` range, the
+first word of the 4-word jump sequence becomes `bra target` and the second
+a `nop` (form A: a taken branch costs 3 instead of 5). For a conditional
+*back edge* within the 8-bit range the inverted skip word itself becomes the
+real `bt/bf target` and the jump's first word a `bra` over the rest (form B:
+loop branches cost 1, like native). Blocks are allocated in translation
+order, so loop targets are almost always in range (`chained` in the stats
+counts rewrites). Pure ALU loops now run at native speed; what remains is
+memory-op expansion and the indirect-branch path. Two things had to change
+with it: links are always resolved through C (the asm hash-hit shortcut in
+`dbt_lookup_link` patched the literal without chaining; a link is resolved
+once, so the C round trip costs nothing), and the hash became direct-mapped
+with the same index function in C and asm (the C side used to linear-probe,
+which the asm fast path could not see, and consecutive block starts evicted
+each other; an entry missing from the hash is now recovered from the block
+table instead of being retranslated).
+
+Measurement pitfalls worth remembering: a timed region must not contain the
+first execution of the code *after* the call (its block gets translated
+inside the region, ~2900 ticks here), and GCC unrolls a two-iteration
+timing loop, giving each pass its own return site.
 
 Where the cycles go:
 
@@ -265,15 +288,9 @@ On hardware, native code stalls on memory and the translated extra work is
 all register ALU, so memory-heavy ratios should come out a little lower than
 here; the 3-5x code expansion will cost instruction-cache misses instead.
 
-Optimizations, in order of payoff per effort (none done yet):
+Optimizations, in order of payoff per effort:
 
-1. **Branch chaining**: at link time, when the target block is within the
-   `bra` range (+-4 KiB; blocks are allocated in translation order, so loop
-   targets almost always are), overwrite the jump sequence's first word with
-   `bra target` (`nop` after it) and invalidate that cache line. Expected:
-   alu 1.8x -> ~1.15x, every loop back-edge and fall-through 4 instructions
-   cheaper. Taken `bt`/`bf` within +-256 bytes can become a single native
-   conditional branch.
+1. ~~**Branch chaining**~~ done (above).
 2. **Inline caches for indirect branches**: per site, compare the guest
    target with the last seen one (literal) and `jmp` straight to its host
    address, falling back to the lookup stub on a miss; ~7 instructions on a

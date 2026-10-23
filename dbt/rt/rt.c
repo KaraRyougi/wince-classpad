@@ -83,26 +83,32 @@ static int fpu_write32(void *c, sf_u32 a, sf_u32 v) { (void)c; if (a & 3) return
 
 /* ------------------------------------------------------------ hashing */
 
-static inline sf_u32 hidx(sf_u32 gpc) { return (gpc >> 1) & (HSIZE - 1); }
+/* Direct-mapped, one slot per index, overwrite on collision: the asm fast
+ * path in the lookup stubs probes exactly this slot, so the C side must not
+ * probe further (an entry the asm cannot see costs a C call per lookup, and
+ * linear probing over keys 2 bytes apart evicted neighbours constantly).
+ * Folding in the upper half (one swap.w in asm) spreads blocks that are far
+ * apart. A block missing from the hash is still found in the block table
+ * (find_block_by_gpc) instead of being translated again. */
+static inline sf_u32 hidx(sf_u32 gpc) { return ((gpc >> 1) ^ (gpc >> 16)) & (HSIZE - 1); }
 
 static void hash_insert(sf_u32 gpc, sf_u32 host)
 {
-    sf_u32 i = hidx(gpc), n;
-    for (n = 0; n < 8; n++) {                      /* short linear probe, then overwrite */
-        hent *e = &g_hash[(i + n) & (HSIZE - 1)];
-        if (e->host == 0 || e->gpc == gpc) { e->gpc = gpc; e->host = host; return; }
-    }
-    g_hash[i].gpc = gpc; g_hash[i].host = host;
+    hent *e = &g_hash[hidx(gpc)];
+    e->gpc = gpc; e->host = host;
 }
 
 static sf_u32 hash_find(sf_u32 gpc)
 {
-    sf_u32 i = hidx(gpc), n;
-    for (n = 0; n < 8; n++) {
-        hent *e = &g_hash[(i + n) & (HSIZE - 1)];
-        if (e->host == 0) return 0;
-        if (e->gpc == gpc) return e->host;
-    }
+    const hent *e = &g_hash[hidx(gpc)];
+    return (e->host && e->gpc == gpc) ? e->host : 0;
+}
+
+static dbt_block *find_block_by_gpc(sf_u32 gpc)
+{
+    int i;
+    for (i = 0; i < g_nblocks; i++)
+        if (g_blocks[i].guest_pc == gpc) return &g_blocks[i];
     return 0;
 }
 
@@ -157,18 +163,13 @@ static dbt_block *translate_at(sf_u32 gpc)
     g_nblocks++;
     dbt_sync_code(host, (sf_u32)b->host_len);
     hash_insert(gpc, host);
+#ifdef DBT_TRACE_LINK
+    dbt_puts("[dbt] translate gpc="); dbt_puthex(gpc); dbt_puts(" host="); dbt_puthex(host);
+    dbt_puts(" len="); dbt_puthex((sf_u32)b->guest_len); dbt_puts(" end="); dbt_puthex((sf_u32)b->end_reason); dbt_puts("\n");
+#endif
     dbt_stat.translations++;
     dbt_stat.blocks = (sf_u32)g_nblocks;
     return b;
-}
-
-sf_u32 dbt_resolve(sf_u32 gpc, sf_u32 link_lit)
-{
-    sf_u32 host = hash_find(gpc);
-    dbt_stat.lookups_c++;
-    if (!host) host = translate_at(gpc)->host_base;
-    if (link_lit) *(volatile sf_u32 *)link_lit = host;    /* literal read via the operand cache: coherent */
-    return host;
 }
 
 /* Block containing a host address (blocks are sorted by host_base). */
@@ -183,6 +184,43 @@ static dbt_block *block_of_host(sf_u32 host)
         else return b;
     }
     return 0;
+}
+
+/* Link a direct jump: patch its literal and, when the target is in branch
+ * range, rewrite the jump sequence into native branches (chaining). The
+ * block owning the literal may have been flushed by the translation. */
+static void link_direct(sf_u32 link_lit, sf_u32 host)
+{
+    dbt_block *b = block_of_host(link_lit);
+    int k;
+    *(volatile sf_u32 *)link_lit = host;                 /* literal read via the operand cache: coherent */
+    if (!b) return;
+    for (k = 0; k < b->nlinks; k++) {
+        if (b->host_base + (sf_u32)b->links[k].lit_off == link_lit) {
+            sf_u32 jaddr = b->host_base + (sf_u32)b->links[k].jump_off, from;
+            int n = dbt_chain_direct((sf_u16 *)jaddr, jaddr, host, b->links[k].cond, b->links[k].backward, &from);
+            if (n) { dbt_sync_code(from, (sf_u32)n); dbt_stat.chained++; }
+#ifdef DBT_TRACE_LINK
+            dbt_puts("[dbt] link blk="); dbt_puthex(b->guest_pc); dbt_puts(" jump="); dbt_puthex(jaddr);
+            dbt_puts(" -> "); dbt_puthex(host); dbt_puts(" cond="); dbt_puthex(b->links[k].cond);
+            dbt_puts(" back="); dbt_puthex(b->links[k].backward); dbt_puts(" n="); dbt_puthex((sf_u32)n); dbt_puts("\n");
+#endif
+            return;
+        }
+    }
+}
+
+sf_u32 dbt_resolve(sf_u32 gpc, sf_u32 link_lit)
+{
+    sf_u32 host = hash_find(gpc);
+    dbt_stat.lookups_c++;
+    if (!host) {
+        dbt_block *b = find_block_by_gpc(gpc);     /* evicted from the hash by a collision */
+        if (b) { dbt_stat.hash_evicted++; hash_insert(gpc, b->host_base); host = b->host_base; }
+        else host = translate_at(gpc)->host_base;
+    }
+    if (link_lit) link_direct(link_lit, host);
+    return host;
 }
 
 void dbt_invalidate(sf_u32 lo, sf_u32 hi)
@@ -205,6 +243,7 @@ void dbt_invalidate(sf_u32 lo, sf_u32 hi)
 #define HC_PUTHEX 0xF4
 #define HC_STATS  0xF5
 #define HC_BENCH  0xF6
+#define HC_DUMP   0xF7                  /* r4 = host address, r5 = number of 16-bit words to print */
 
 static void print_trace(void);
 
@@ -216,6 +255,8 @@ static void print_stats(void)
     dbt_puts(" lookups_c="); dbt_puthex(dbt_stat.lookups_c);
     dbt_puts(" exceptions="); dbt_puthex(dbt_stat.exceptions);
     dbt_puts(" fpu="); dbt_puthex(dbt_stat.fpu_ops);
+    dbt_puts(" chained="); dbt_puthex(dbt_stat.chained);
+    dbt_puts(" evicted="); dbt_puthex(dbt_stat.hash_evicted);
     dbt_puts(" resumes="); dbt_puthex(dbt_stat.resumes);
     dbt_puts("/"); dbt_puthex(dbt_stat.resumes_committed);
     dbt_puts("\n");
@@ -240,6 +281,16 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
     case HC_FLUSH: dbt_invalidate(ctx->r[4], ctx->r[5]); return RT_ACT_RESUME;
     case HC_STATS: print_stats(); return RT_ACT_RESUME;
     case HC_BENCH: ctx->r[0] = dbt_bench_native(ctx->r[4], ctx->r[5]); return RT_ACT_RESUME;
+    case HC_DUMP: {
+        const volatile sf_u16 *p = (const volatile sf_u16 *)(ctx->r[4] & ~1u);
+        sf_u32 i;
+        for (i = 0; i < ctx->r[5]; i++) {
+            if ((i & 7) == 0) { dbt_puts(i ? "\n[dbt] " : "[dbt] "); dbt_puthex((sf_u32)(p + i)); dbt_puts(":"); }
+            dbt_puts(" "); dbt_puthex(p[i]);
+        }
+        dbt_puts("\n");
+        return RT_ACT_RESUME;
+    }
     }
     dbt_puts("[dbt] unknown hypercall "); dbt_puthex(nr); dbt_puts("\n");
     return RT_ACT_RESUME;

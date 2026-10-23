@@ -6,6 +6,12 @@ static inline void hc_puts(const char *s) { register const char *r4 __asm__("r4"
 static inline void hc_putc(int c) { register int r4 __asm__("r4") = c; __asm__ volatile ("trapa #0xF3" :: "r"(r4) : "memory"); }
 static inline void hc_puthex(unsigned v) { register unsigned r4 __asm__("r4") = v; __asm__ volatile ("trapa #0xF4" :: "r"(r4) : "memory"); }
 static inline void hc_stats(void) { __asm__ volatile ("trapa #0xF5" ::: "memory"); }
+/* print `words` 16-bit host words starting at host address `addr` (debugging) */
+static inline void hc_dump(unsigned addr, unsigned words)
+{
+    register unsigned r4 __asm__("r4") = addr; register unsigned r5 __asm__("r5") = words;
+    __asm__ volatile ("trapa #0xF7" :: "r"(r4), "r"(r5) : "memory");
+}
 /* run benchmark kernel `which` natively for n iterations (0xFFFFFFFF: start TMU1); returns TMU1 ticks */
 static inline unsigned hc_bench(unsigned which, unsigned n)
 {

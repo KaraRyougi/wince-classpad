@@ -272,7 +272,8 @@ static void call_helper(tctx *t, sf_u32 helper, sf_u32 arg_reg, int arg_mode, sf
 /* ------------------------------------------------------------- branches */
 
 /* Jump to a guest target known at translation time, through a link literal. */
-static void jump_direct(tctx *t, sf_u32 guest_target, sf_u32 avoid)
+/* cond: the word just emitted is the inverted bt/bf skip over this jump */
+static void jump_direct(tctx *t, sf_u32 guest_target, sf_u32 avoid, int cond)
 {
     emitter *e = &t->em;
     dbt_block *b = t->blk;
@@ -281,6 +282,9 @@ static void jump_direct(tctx *t, sf_u32 guest_target, sf_u32 avoid)
     if (k >= DBT_MAX_LINKS) { t->err = DBT_ERR_OVERFLOW; return; }
     b->links[k].guest_target = guest_target;
     b->links[k].lit_off = -1;
+    b->links[k].jump_off = emit_pos(e);
+    b->links[k].cond = (sf_u8)cond;
+    b->links[k].backward = (sf_u8)(guest_target <= t->gpc);
     b->nlinks++;
     spill(t, rT, SLOT_X0);
     emit_mov_lit(e, rT, 0, TAG_LINK(k));                     /* host target; initially the exit stub */
@@ -362,13 +366,13 @@ static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
     case BR_BRA:
         if (slot) tr_insn(t, slot, 1);
         begin_meta_kind(t, META_TARGET_CONST, goff, target, 0);
-        jump_direct(t, target, 0);
+        jump_direct(t, target, 0, 0);
         return;
     case BR_BSR:
         set_pr(t, next, avoid);
         if (slot) tr_insn(t, slot, 1);
         begin_meta_kind(t, META_TARGET_CONST, goff, target, 0);
-        jump_direct(t, target, 0);
+        jump_direct(t, target, 0, 0);
         return;
     case BR_BRAF:
     case BR_BSRF:
@@ -404,7 +408,7 @@ static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
     case BR_BF:
         /* inverted conditional over the 4-instruction direct jump */
         emit16(e, d->br == BR_BT ? OP_BF(3) : OP_BT(3));
-        jump_direct(t, target, 0);
+        jump_direct(t, target, 0, 1);
         return;
     case BR_BTS:
     case BR_BFS:
@@ -416,7 +420,7 @@ static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
                 if (slot) tr_insn(t, slot, 1);
                 begin_meta_kind(t, META_COND, goff, pc_t1, pc_t0);
                 emit16(e, d->br == BR_BTS ? OP_BF(3) : OP_BT(3));
-                jump_direct(t, target, 0);
+                jump_direct(t, target, 0, 1);
                 return;
             } else {
                 /* slot writes T: branch on the old T (kept in rA), leave the
@@ -445,7 +449,7 @@ static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
                 emit16(e, OP_SHLR(rB));
                 restore(t, rB, SLOT_Y1);
                 restore(t, rA, SLOT_Y0);
-                jump_direct(t, target, 0);
+                jump_direct(t, target, 0, 0);
                 return;
             }
         }
@@ -632,7 +636,8 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
     b->meta[b->nmeta].commit_rel = 0xFF;
     if (!ended || b->end_reason != END_BRANCH) {
         t.cur = &b->meta[b->nmeta];
-        jump_direct(&t, gpc, 0);
+        t.gpc = gpc - 2;                       /* "branch" pc for the backward flag: never backward */
+        jump_direct(&t, gpc, 0, 0);
     }
     b->code_len = emit_pos(&t.em);
 
@@ -665,6 +670,29 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
     b->host_len = emit_pos(&t.em);
     if (t.em.overflow) return DBT_ERR_OVERFLOW;
     return DBT_OK;
+}
+
+int dbt_chain_direct(sf_u16 *code, sf_u32 host, sf_u32 target, int cond, int backward, sf_u32 *from)
+{
+    sf_i32 d = (sf_i32)(target - (host + 4));
+    if (d & 1) return 0;
+    d >>= 1;
+    if (d < -2048 || d > 2047) return 0;
+    if (cond && backward) {
+        sf_i32 d8 = (sf_i32)(target - (host - 2 + 4)) >> 1;
+        if (d8 >= -128 && d8 <= 127) {
+            /* skip word: flip the sense (bit 9) and point it at the target */
+            code[-1] = (sf_u16)(((code[-1] ^ 0x0200u) & 0xFF00u) | ((sf_u32)d8 & 0xFFu));
+            code[0] = 0xA002;                  /* not taken: bra over the 3 remaining words */
+            code[1] = 0x0009;
+            *from = host - 2;
+            return 6;
+        }
+    }
+    code[0] = (sf_u16)(0xA000u | ((sf_u32)d & 0xFFFu));
+    code[1] = 0x0009;
+    *from = host;
+    return 4;
 }
 
 int dbt_block_find(const dbt_block *b, sf_u32 host_off)

@@ -357,6 +357,35 @@ int main(void)
       }
     }
 
+    /* 26. branch chaining: form A within bra range, out of range, form B back edge */
+    { sf_u16 code[8]; sf_u32 from = 0; int n;
+      memset(code, 0, sizeof code);
+      code[2] = LDS_X0(1); code[3] = 0xD100; code[4] = OP_JMP(1); code[5] = STS_X0(1);
+      n = dbt_chain_direct(&code[2], HBASE + 0x104, HBASE + 0x000, 0, 0, &from);     /* d = (0 - 0x108)/2 = -132 */
+      expect("chain A", n == 4 && from == HBASE + 0x104 && code[2] == (0xA000 | ((-132) & 0xFFF)) && code[3] == 0x0009 && code[4] == OP_JMP(1));
+      code[2] = LDS_X0(1); code[3] = 0xD100;
+      n = dbt_chain_direct(&code[2], HBASE + 0x104, HBASE + 0x104 + 4 + 2 * 2048, 0, 0, &from);
+      expect("chain out of range", n == 0 && code[2] == LDS_X0(1));
+      n = dbt_chain_direct(&code[2], HBASE + 0x104, HBASE + 0x104 + 4 + 2 * 2047, 0, 0, &from);
+      expect("chain A max", n == 4 && code[2] == 0xA7FF);
+      code[1] = OP_BF(3); code[2] = LDS_X0(1); code[3] = 0xD100;                      /* bt target: inverted skip is bf */
+      n = dbt_chain_direct(&code[2], HBASE + 0x104, HBASE + 0x0F0, 1, 1, &from);      /* d8 = (0xF0 - 0x106)/2 = -11 */
+      expect("chain B", n == 6 && from == HBASE + 0x102 && code[1] == (0x8900 | ((-11) & 0xFF)) && code[2] == 0xA002 && code[3] == 0x0009);
+      code[1] = OP_BT(3); code[2] = LDS_X0(1); code[3] = 0xD100;                      /* bf target, too far for disp8: form A */
+      n = dbt_chain_direct(&code[2], HBASE + 0x104, HBASE + 0x104 - 300, 1, 1, &from);
+      expect("chain B too far -> A", n == 4 && code[1] == OP_BT(3) && code[2] == (0xA000 | ((-152) & 0xFFF)));
+    }
+
+    /* 27. link records: bt +4 is conditional and forward; a back edge is backward */
+    { sf_u32 ops[] = { 0x8902, 0x7101 };
+      translate(ops, 2, 2);
+      expect("link cond fwd", blk.links[0].cond == 1 && blk.links[0].backward == 0 && blk.links[0].jump_off == 2);
+    }
+    { sf_u32 ops[] = { 0x7101, 0x8BFD };                                              /* add ; bf -2 (to the add) */
+      translate(ops, 2, 2);
+      expect("link cond back", blk.nlinks >= 1 && blk.links[0].cond == 1 && blk.links[0].backward == 1 && blk.links[0].guest_target == GBASE);
+    }
+
     /* 23. exit stub offsets are recorded */
     { sf_u32 ops[] = { 0xA000 };
       translate(ops, 1, 1);

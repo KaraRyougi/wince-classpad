@@ -154,6 +154,12 @@ _bench_callframe:
         lds.l   @r15+, pr
         TAIL
 
+/* empty: call overhead probe */
+        .global _bench_empty
+_bench_empty:
+        rts
+        mov     #0, r0
+
         .align 2
 .Lleaf:  .long   _bench_leaf
 .Lframe: .long   _bench_frame

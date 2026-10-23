@@ -133,8 +133,14 @@ _dbt_\name:
 \s1:    LDSX    1, SLOT_Y1
 \s2:    LDSX    2, SLOT_A0
 \s3:    STSX    SLOT_X0, 0             /* r0 = gpc */
+        .if \link
+        bra     2f                     /* a link is resolved once: let C patch and chain it */
+        nop
+        .endif
         mov     r0, r1
-        shlr    r1
+        shlr    r1                     /* gpc >> 1 */
+        swap.w  r0, r2                 /* low half = gpc >> 16 */
+        xor     r2, r1                 /* same index as hidx() in rt.c */
         mov.l   .LhmaskA, r2
         and     r2, r1
         shll2   r1
