@@ -29,7 +29,7 @@ _start:
         .align 2
 .Lsrc:  .long _image_start
 .Lend:  .long _image_end
-.Ldst:  .long 0x8CB00000
+.Ldst:  .long IMAGE_BASE               /* from the Makefile layout */
 .Lsize: .long _image_end - _image_start
 
         .section .rodata

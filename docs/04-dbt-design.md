@@ -184,9 +184,8 @@ copies the used entries), the 64 KiB hash and ~60 KiB of code: 1.3 MiB in
 all, so the translator needs about 3.5 MiB with the cache. Guest RAM is told
 to end below it (`MainMemoryEndAddress`). On 16 MiB units (fx-CP400,
 fx-CG100) that leaves about 12 MiB for CE; 8 MiB units run headless only.
-The current emulator layout (docs/05) still gives the translator 3 MiB plus
-the 2 MiB cache and the guest 10 MiB; it will be tightened with the first
-real image.
+The emulator layout (docs/05, defined in `dbt/Makefile`) gives the
+translator 1.5 MiB plus the 2 MiB cache and the guest 11.5 MiB.
 
 ## Test plan
 
@@ -375,7 +374,8 @@ casio-emu implements only `lds rm, x0` of the DSP transfers; the patch in
 casio-emu checkout on 2026-10-22; rerun it after updating the emulator, then
 `node scripts/genDispatch.mjs && cmake --build build`). The emulator starts a
 raw `.g3a` payload at 0x00300000; `dbt/loader` copies the translator image to
-0x8CB00000 and jumps. `make -C dbt run` builds everything and runs it headless;
+`IMAGE_BASE` (0x8CC80000, see the layout in `dbt/Makefile`) and jumps.
+`make -C dbt run` builds everything and runs it headless;
 `GUEST=exc` / `GUEST=fpu` select the other guests.
 
 Status 2026-10-22: all four guests pass under the emulator.

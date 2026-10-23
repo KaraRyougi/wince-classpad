@@ -1,8 +1,9 @@
-/* Translator image: flat binary at IMAGE_BASE (P1 RAM). Loaded by the launcher. */
+/* Translator image: flat binary at IMAGE_BASE (P1 RAM), loaded by the
+ * launcher. IMAGE_BASE and _image_stack_top come from the Makefile
+ * (--defsym), which owns the RAM layout. */
 OUTPUT_FORMAT("elf32-sh", "elf32-sh", "elf32-shl")
 OUTPUT_ARCH(sh)
 ENTRY(_start)
-IMAGE_BASE = 0x8CB00000;
 SECTIONS
 {
     . = IMAGE_BASE;
@@ -19,4 +20,5 @@ SECTIONS
     _image_end = .;
     /DISCARD/ : { *(.comment) *(.note*) *(.eh_frame*) }
 }
-_image_stack_top = 0x8CDF0000;
+/* leave at least 128 KiB between the end of bss and the C stack top */
+ASSERT(_image_end + 0x20000 <= _image_stack_top, "translator image too large for its RAM region (see dbt/Makefile layout)")

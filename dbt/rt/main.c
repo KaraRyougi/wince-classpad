@@ -1,8 +1,9 @@
 /*
  * main.c - translator image entry: find the guest, load it, run it.
- * Memory layout (fx-CG100 / fx-CP400 class, 16 MiB RAM):
- *   0x8C100000 .. 0x8CAFFFFF  guest RAM (test guests linked at 0x8C100000)
- *   0x8CB00000 .. 0x8CDEFFFF  this image (text/data/bss) + stacks
+ * Memory layout (fx-CG100 / fx-CP400 class, 16 MiB RAM) is defined in
+ * dbt/Makefile and passed in as GUEST_RAM_LO/HI, IMAGE_BASE, CACHE_BASE/SIZE:
+ *   0x8C100000 .. 0x8CC7FFFF  guest RAM, 11.5 MiB (test guests linked at 0x8C100000)
+ *   0x8CC80000 .. 0x8CDFFFFF  this image (text/data/bss) + C stack
  *   0x8CE00000 .. 0x8CFFFFFF  code cache
  * Guest sources, in order of preference:
  *   1. a Windows CE .bin image in flash at NK_FLASH (P1 alias of the NOR;
@@ -14,10 +15,13 @@
 #include "rt.h"
 #include "nkbin.h"
 
-#define GUEST_LOAD   0x8C100000u
-#define GUEST_RAM_HI 0x8CB00000u
+#ifndef GUEST_RAM_LO
+#define GUEST_RAM_LO 0x8C100000u
+#define GUEST_RAM_HI 0x8CC80000u
 #define CACHE_BASE   0x8CE00000u
 #define CACHE_SIZE   0x00200000u
+#endif
+#define GUEST_LOAD   GUEST_RAM_LO
 #ifndef NK_FLASH
 #define NK_FLASH     0x81000000u          /* NOR offset 16 MiB */
 #endif

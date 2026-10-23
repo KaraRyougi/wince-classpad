@@ -13,7 +13,7 @@ copies every record byte-for-byte into guest RAM (the guest memory image is
 byte-identical to a little-endian machine, so no swapping), then reads the
 ROMHDR through the `ECEC` marker at image start + 0x40 and prints CPU type,
 physical range, module count, RAM range and kernel flags. Records outside
-the guest window `0x8C100000..0x8CAFFFFF` are rejected; a RAM range that
+the guest window `0x8C100000..0x8CC7FFFF` are rejected; a RAM range that
 leaves the window or a non-SH4 CPU type is reported as a warning.
 
 Where the image comes from (`dbt/rt/main.c`):
@@ -42,16 +42,19 @@ multiple of 4 bytes before handing it to `HLE_OSROM`.
 | range | use | size |
 |---|---|---|
 | 0x8C000000-0x8C0FFFFF | left to the launcher / Casio OS workspace in the emulator | 1 MiB |
-| 0x8C100000-0x8CAFFFFF | guest: CE image (RAMIMAGE) + CE RAM | 10 MiB |
-| 0x8CB00000-0x8CDEFFFF | translator text/data/bss + stacks | ~1.3 MiB (bss 1.2 MiB: 2048 block headers 416 KiB, metadata arena 640 KiB, hash 64 KiB) |
+| 0x8C100000-0x8CC7FFFF | guest: CE image (RAMIMAGE) + CE RAM | 11.5 MiB |
+| 0x8CC80000-0x8CDFFFFF | translator text/data/bss (~1.3 MiB: 2048 block headers 416 KiB, metadata arena 640 KiB, hash 64 KiB) + C stack | 1.5 MiB |
 | 0x8CE00000-0x8CFFFFFF | code cache | 2 MiB |
 
-A headless CE 6.0 kernel image is 2-4 MiB, so RAMIMAGE leaves 6-8 MiB of
-CE RAM: enough to boot to a shell, not for GWES. The block table was
-compacted on 2026-10-22 (fixed per-block arrays became a shared metadata
-arena: bss 2.3 MiB -> 1.2 MiB while the block limit rose from 768 to 2048),
-so the translator region can shrink from 3 MiB to about 1.5 MiB and the
-guest window grow accordingly when the layout is next revised. The other
+The layout is defined once in `dbt/Makefile` (`GUEST_RAM_*`, `IMAGE_BASE`,
+`CACHE_*`) and reaches the C code, the launcher and the linker script from
+there; the linker script asserts that the image leaves 128 KiB for its stack.
+
+A headless CE 6.0 kernel image is 2-4 MiB, so RAMIMAGE leaves 7.5-9.5 MiB
+of CE RAM: enough to boot to a shell, probably not for GWES. The block
+table was compacted on 2026-10-22 (fixed per-block arrays became a shared
+metadata arena: bss 2.3 MiB -> 1.2 MiB while the block limit rose from 768
+to 2048) and the translator region shrunk from 3 MiB to 1.5 MiB. The other
 lever is building the OS as a **ROMIMAGE** executing in place from flash
 (ROMSTART in the `0x81xxxxxx` P1 flash range), which the translator already
 supports since guest code may live anywhere it can fetch from; only the
@@ -173,6 +176,7 @@ Translator-side items the OAL work depends on:
    debug output, cache flush hook. Headless OS design, RAMIMAGE config.bib.
 4. `make -C dbt NKBIN=NK.bin run`: expect the kernel banner on stdout,
    then the first scheduler tick. Fix what breaks.
-5. Memory: ~~compact block metadata~~ (done); move the translator region
-   down and widen the guest window; move to ROMIMAGE in flash.
+5. Memory: ~~compact block metadata; move the translator region down and
+   widen the guest window~~ (done, 11.5 MiB guest window); move to ROMIMAGE
+   in flash.
 6. Display driver and keyboard; GWES image.

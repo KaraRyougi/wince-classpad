@@ -8,9 +8,25 @@ GUEST    ?= hello
 EMU      ?= $(HOME)/Dev/casio-emu
 BUILD    := build
 
+# RAM layout (16 MiB at 0x8C000000), the single place these addresses live:
+#   0x8C000000-0x8C0FFFFF  launcher workspace (casio-emu starts us with sp=0x8C080000)
+#   0x8C100000-0x8CC7FFFF  guest window: 11.5 MiB (test guests linked at 0x8C100000)
+#   0x8CC80000-0x8CDFFFFF  translator image (text+data ~60 KiB, bss 1.2 MiB) and its C stack below the top
+#   0x8CE00000-0x8CFFFFFF  code cache, 2 MiB
+GUEST_RAM_LO := 0x8C100000
+GUEST_RAM_HI := 0x8CC80000
+IMAGE_BASE   := 0x8CC80000
+IMAGE_STACK  := 0x8CE00000
+CACHE_BASE   := 0x8CE00000
+CACHE_SIZE   := 0x00200000
+LAYOUT_DEFS  := -DGUEST_RAM_LO=$(GUEST_RAM_LO)u -DGUEST_RAM_HI=$(GUEST_RAM_HI)u -DIMAGE_BASE=$(IMAGE_BASE) \
+                -DCACHE_BASE=$(CACHE_BASE)u -DCACHE_SIZE=$(CACHE_SIZE)u
+LAYOUT_LD    := -Wl,--defsym,IMAGE_BASE=$(IMAGE_BASE) -Wl,--defsym,_image_stack_top=$(IMAGE_STACK)
+
 HOST_CFLAGS  := -mb -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables \
-                -Wall -Wextra -Wno-unused-parameter -I rt -I src -I ../fpuemu/src $(EXTRA_CFLAGS)
-GUEST_CFLAGS := -ml -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables -Wall
+                -Wall -Wextra -Wno-unused-parameter -I rt -I src -I ../fpuemu/src $(LAYOUT_DEFS) $(EXTRA_CFLAGS)
+GUEST_CFLAGS := -ml -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables -Wall \
+                -DGUEST_RAM_LO=$(GUEST_RAM_LO)u -DGUEST_RAM_HI=$(GUEST_RAM_HI)u
 
 RT_SRC := rt/crt0.S rt/stubs.S rt/main.c rt/rt.c rt/nkbin.c rt/bench.c bench/loops.S src/sh4dec.c src/sh4emit.c src/translate.c \
           ../fpuemu/src/fpuemu.c ../fpuemu/src/softfloat.c
@@ -60,7 +76,7 @@ $(BUILD)/$(GUEST).bin: $(BUILD)/$(GUEST).elf
 # --- translator image (big-endian) ---
 # image files are named after the guest so that switching GUEST= relinks
 $(IMG).elf: $(RT_SRC) rt/guest_blob.S rt/image.ld rt/rt.h rt/nkbin.h rt/ctx_offsets.h $(BUILD)/$(GUEST).bin
-	$(CC) $(HOST_CFLAGS) -DGUEST='"$(BUILD)/$(GUEST).bin"' -T rt/image.ld -o $@ $(RT_SRC) rt/guest_blob.S -lgcc
+	$(CC) $(HOST_CFLAGS) $(LAYOUT_LD) -DGUEST='"$(BUILD)/$(GUEST).bin"' -T rt/image.ld -o $@ $(RT_SRC) rt/guest_blob.S -lgcc
 
 $(IMG).bin: $(IMG).elf
 	$(OBJCOPY) -O binary $< $@

@@ -17,7 +17,7 @@ struct romhdr {                        /* ROMHDR, CE 6.0 layout */
 
 const struct romhdr nk_romhdr = {
     0, 0, 0x8C100000u, (unsigned)bss_start_, 0,
-    (unsigned)bss_end_, (unsigned)bss_end_, 0x8CB00000u, 0, 0,
+    (unsigned)bss_end_, (unsigned)bss_end_, GUEST_RAM_HI, 0, 0,
     0, 0, 0, 0, 0, 0, 0,
     0x01A6, 0,                         /* SH4 */
     0, 0, 0
@@ -46,7 +46,7 @@ void guest_main(void)
     check("ECEC marker at image+0x40", marker[0] == 0x43454345u);    /* "ECEC" little-endian */
     h = (const struct romhdr *)marker[1];
     check("ROMHDR pointer", h == &nk_romhdr);
-    check("ROMHDR fields", h->usCPUType == 0x01A6 && h->physfirst == 0x8C100000u && h->ulRAMEnd == 0x8CB00000u);
+    check("ROMHDR fields", h->usCPUType == 0x01A6 && h->physfirst == GUEST_RAM_LO && h->ulRAMEnd == GUEST_RAM_HI);
     hc_puts("physlast "); hc_puthex(h->physlast); hc_puts(" ramstart "); hc_puthex(h->ulRAMStart); hc_putc('\n');
     hc_stats();
     hc_puts(fails ? "RESULT: FAIL\n" : "RESULT: PASS\n");
