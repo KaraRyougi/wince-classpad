@@ -12,10 +12,22 @@ HOST_CFLAGS  := -mb -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-sta
                 -Wall -Wextra -Wno-unused-parameter -I rt -I src -I ../fpuemu/src $(EXTRA_CFLAGS)
 GUEST_CFLAGS := -ml -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables -Wall
 
-RT_SRC := rt/crt0.S rt/stubs.S rt/main.c rt/rt.c rt/bench.c bench/loops.S src/sh4dec.c src/sh4emit.c src/translate.c \
+RT_SRC := rt/crt0.S rt/stubs.S rt/main.c rt/rt.c rt/nkbin.c rt/bench.c bench/loops.S src/sh4dec.c src/sh4emit.c src/translate.c \
           ../fpuemu/src/fpuemu.c ../fpuemu/src/softfloat.c
 
-.PHONY: all clean run screenshot disasm
+# A Windows CE .bin to run instead of the embedded guest: placed in the emulated
+# NOR flash at NK_FLASH_OFF (P1 address 0x80000000 + offset), where the runtime
+# looks for it first. Example: make NKBIN=path/to/NK.bin run
+NKBIN       ?=
+NK_FLASH_OFF ?= 0x01000000
+# casio-emu copies flash files in 32-bit units, so the image is padded to a multiple of 4 first
+NK_PADDED = $(BUILD)/nk-padded.bin
+NK_ENV = $(if $(NKBIN),HLE_OSROM=$(abspath $(NK_PADDED)) HLE_OSROM_PAD=$(NK_FLASH_OFF),)   # recursive: nkrun sets NKBIN per target
+define NK_PAD
+python3 -c 'import sys;d=open(sys.argv[1],"rb").read();open(sys.argv[2],"wb").write(d+b"\0"*(-len(d)%4))' $(NKBIN) $(NK_PADDED)
+endef
+
+.PHONY: all clean run nkrun screenshot disasm
 
 IMG := $(BUILD)/dbt-$(GUEST)
 
@@ -29,16 +41,22 @@ GUEST_EXTRA_exc := guest/exc_vectors.S
 GUEST_EXTRA_tmu := guest/tmu_vectors.S guest/tmu_loops.S
 GUEST_EXTRA_bench := bench/loops.S
 GUEST_EXTRA     := $(GUEST_EXTRA_$(GUEST))
+GUEST_START_nkimg := guest/nkimg_start.S
+GUEST_START     := $(or $(GUEST_START_$(GUEST)),guest/start.S)
 
-$(BUILD)/$(GUEST).elf: guest/start.S guest/$(GUEST).c $(GUEST_EXTRA) guest/hyper.h guest/mmio.h guest/guest.ld | $(BUILD)
-	$(CC) $(GUEST_CFLAGS) -T guest/guest.ld -o $@ guest/start.S guest/$(GUEST).c $(GUEST_EXTRA)
+$(BUILD)/$(GUEST).elf: $(GUEST_START) guest/$(GUEST).c $(GUEST_EXTRA) guest/hyper.h guest/mmio.h guest/guest.ld | $(BUILD)
+	$(CC) $(GUEST_CFLAGS) -T guest/guest.ld -o $@ $(GUEST_START) guest/$(GUEST).c $(GUEST_EXTRA)
+
+# the guest wrapped as a CE .bin (records + ROMHDR pointer) for the loader test
+$(BUILD)/$(GUEST).nk.bin: $(BUILD)/$(GUEST).bin ../tools/mkbin.py
+	python3 ../tools/mkbin.py $< 0x8C100000 0x8C100000 $@ --chunk 256
 
 $(BUILD)/$(GUEST).bin: $(BUILD)/$(GUEST).elf
 	$(OBJCOPY) -O binary $< $@
 
 # --- translator image (big-endian) ---
 # image files are named after the guest so that switching GUEST= relinks
-$(IMG).elf: $(RT_SRC) rt/guest_blob.S rt/image.ld rt/rt.h rt/ctx_offsets.h $(BUILD)/$(GUEST).bin
+$(IMG).elf: $(RT_SRC) rt/guest_blob.S rt/image.ld rt/rt.h rt/nkbin.h rt/ctx_offsets.h $(BUILD)/$(GUEST).bin
 	$(CC) $(HOST_CFLAGS) -DGUEST='"$(BUILD)/$(GUEST).bin"' -T rt/image.ld -o $@ $(RT_SRC) rt/guest_blob.S -lgcc
 
 $(IMG).bin: $(IMG).elf
@@ -56,7 +74,14 @@ $(IMG).g3a: $(IMG)-loader.bin
 	( dd if=/dev/zero bs=28672 count=1 2>/dev/null; cat $< ) > $@
 
 run: $(IMG).g3a
-	-$(EMU)/run-headless.sh $(abspath $(IMG).g3a) 20
+	$(if $(NKBIN),$(NK_PAD))
+	-$(NK_ENV) $(EMU)/run-headless.sh $(abspath $(IMG).g3a) 20
+
+# run the current guest through the .bin loader (image in emulated flash)
+nkrun: NKBIN = $(BUILD)/$(GUEST).nk.bin
+nkrun: $(IMG).g3a $(BUILD)/$(GUEST).nk.bin
+	$(NK_PAD)
+	-$(NK_ENV) $(EMU)/run-headless.sh $(abspath $(IMG).g3a) 20
 
 # run headless with the emulator dumping the presented frame (PPM) and convert the
 # last one to $(IMG).png; HLE_FORCE_R61524 presents the LCD controller's pixels

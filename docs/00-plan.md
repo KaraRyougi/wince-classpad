@@ -49,7 +49,7 @@ needed: casio-emu runs the translator as an ordinary big-endian add-in.
   stubs, exception vectors, FPU/mac helpers, hypercall console), a `.g3a`
   launcher and three little-endian test guests. As of 2026-10-22 all three
   guests pass in casio-emu (with `dbt/emu-patch` applied to the emulator).
-- Docs 01-04: hardware facts, FPU emulation design, boot/image notes, DBT design.
+- Docs 01-05: hardware facts, FPU emulation design, boot/image notes, DBT design, CE image/OAL plan.
 
 ## Milestones (route D)
 
@@ -68,12 +68,13 @@ needed: casio-emu runs the translator as an ordinary big-endian add-in.
    The `lcd` guest (framebuffer pushed to the R61524 through pre-swapped
    MMIO, screenshot in docs/img) completes the device-side checks of this
    milestone.
-4. Guest image choice (blocked on the user): Pocket PC 2000 SH3 ROM (closed,
-   Jornada 540 hardware to emulate in the OAL layer) vs self-built CE 6.0 R3
-   SH4 image (Platform Builder + VS2005 in a Windows VM, our own OAL).
-5. CE image loading: `.bin` records to guest RAM, ROMHDR, PC/SP/VBR, entry.
-   For CE 6.0: OAL for SH7305 (startup, INTC, TMU tick, debug serial via
-   hypercall first), headless boot to a serial shell inside casio-emu.
+4. ~~Guest image choice~~: self-built CE 6.0 R3 SH4 image (decided
+   2026-10-22; Pocket PC 2000 SH3 ROMs would mean emulating a Jornada 540).
+5. CE image loading: ~~`.bin` records to guest RAM, ROMHDR, entry~~ done
+   (dbt/rt/nkbin.c, image in emulated flash via HLE_OSROM; docs/05). Next:
+   Platform Builder VM, SH7305 OAL (startup, INTC, TMU tick, hypercall debug
+   output, cache-flush hook), headless boot inside casio-emu. Plan and
+   register map in docs/05-ce-image-and-oal.md.
 6. Display driver (flat framebuffer, 320x528 CP400 / 396x224 CG50-class),
    keyboard, touch. GWES up.
 7. Real hardware: run the `.g3a` on an fx-CG50/CP400; fix anything the
