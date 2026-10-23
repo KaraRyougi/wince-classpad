@@ -9,7 +9,8 @@ void *memcpy(void *d, const void *s, dbt_size_t n);
 void *memset(void *d, int c, dbt_size_t n);
 
 #define HSIZE        8192                 /* hash entries, power of two */
-#define MAX_BLOCKS   768                  /* ~2 MiB of metadata; see docs/04 */
+#define MAX_BLOCKS   2048                 /* block headers (~180 B each) + a metadata arena; see docs/04 */
+#define META_ARENA_BYTES (640u * 1024u)   /* meta + spill entries of all live blocks (~250 B per block typical) */
 #define EXPEVT_REG   (*(volatile sf_u32 *)0xFF000024u)
 #define TRA_REG      (*(volatile sf_u32 *)0xFF000020u)
 #define DEBUG_PORT   (*(volatile sf_u8 *)0xFFFFF000u)
@@ -38,6 +39,12 @@ typedef struct { sf_u32 gpc; sf_u32 host; } hent;
 hent dbt_hash[HSIZE] __attribute__((aligned(32)));   /* read by stubs.S */
 #define g_hash dbt_hash
 static dbt_block g_blocks[MAX_BLOCKS];      /* sorted by host_base (bump allocation) */
+static dbt_block g_scratch;                 /* translation target; copied into g_blocks + arena on success */
+static dbt_imeta g_scratch_meta[DBT_MAX_META];
+static dbt_spill g_scratch_spills[DBT_MAX_BLOCK_SPILLS];
+static sf_u8     g_arena[META_ARENA_BYTES] __attribute__((aligned(8)));
+static sf_u32    g_arena_used;
+#define SCRATCH_ARENA_NEED (DBT_MAX_META * sizeof(dbt_imeta) + DBT_MAX_BLOCK_SPILLS * sizeof(dbt_spill))
 static int       g_nblocks;
 static dbt_rt_config g_cfg;
 static sf_u32    g_cache_used;              /* bytes */
@@ -275,6 +282,7 @@ static void cache_flush_all(void)
     for (i = 0; i < HSIZE; i++) { g_hash[i].gpc = 1; g_hash[i].host = 0; }
     g_nblocks = 0;
     g_cache_used = 0;
+    g_arena_used = 0;
     dbt_stat.flushes++;
 }
 
@@ -307,11 +315,21 @@ static dbt_block *translate_at(sf_u32 gpc)
     if (g_nblocks >= MAX_BLOCKS || g_cache_used + DBT_BLOCK_WORDS * 2 > g_cfg.cache_size)
         cache_flush_all();
     if (!guest_pc_fetchable(gpc)) { dbt_stat.synth_exceptions++; deliver_synthetic(gpc, 0x0E0); }
-    b = &g_blocks[g_nblocks];
+    if (g_arena_used + SCRATCH_ARENA_NEED > META_ARENA_BYTES) cache_flush_all();
     host = g_cfg.cache_base + g_cache_used;
+    g_scratch.meta = g_scratch_meta; g_scratch.spills = g_scratch_spills;
     g_translating = 1; g_translating_pc = gpc;
-    r = dbt_translate_block(&g_env, gpc, host, (sf_u16 *)host, DBT_BLOCK_WORDS, b, &fault);
+    r = dbt_translate_block(&g_env, gpc, host, (sf_u16 *)host, DBT_BLOCK_WORDS, &g_scratch, &fault);
     g_translating = 0;
+    b = &g_blocks[g_nblocks];
+    if (r == DBT_OK) {
+        /* commit: block header into the table, used metadata into the arena */
+        sf_u32 nm = (sf_u32)(g_scratch.nmeta + 1) * sizeof(dbt_imeta), ns = (sf_u32)g_scratch.nspills * sizeof(dbt_spill);
+        *b = g_scratch;
+        b->meta = (dbt_imeta *)(g_arena + g_arena_used); memcpy(b->meta, g_scratch_meta, nm); g_arena_used += (nm + 7) & ~7u;
+        b->spills = (dbt_spill *)(g_arena + g_arena_used); memcpy(b->spills, g_scratch_spills, ns); g_arena_used += (ns + 7) & ~7u;
+        dbt_stat.arena_bytes = g_arena_used;
+    }
     if (r != DBT_OK) {
         dbt_puts("[dbt] translate error "); dbt_puthex((sf_u32)r);
         dbt_puts(" at "); dbt_puthex(gpc); dbt_puts(" fault "); dbt_puthex(fault); dbt_puts("\n");
@@ -470,6 +488,7 @@ static void print_stats(void)
     dbt_puts(" unchained="); dbt_puthex(dbt_stat.unchained);
     dbt_puts(" asid_switches="); dbt_puthex(dbt_stat.asid_switches);
     dbt_puts(" tlb_hooks="); dbt_puthex(dbt_stat.tlb_hooks);
+    dbt_puts(" arena="); dbt_puthex(dbt_stat.arena_bytes);
     dbt_puts(" resumes="); dbt_puthex(dbt_stat.resumes);
     dbt_puts("/"); dbt_puthex(dbt_stat.resumes_committed);
     dbt_puts("\n");

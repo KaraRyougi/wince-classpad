@@ -74,23 +74,28 @@ typedef struct {
 #define DBT_MAX_META   (DBT_MAX_INSNS * 2 + 2)
 #define DBT_MAX_BLOCK_SPILLS 64
 
+/* A translated block. `meta` and `spills` point at storage the caller
+ * provides before translation (at least DBT_MAX_META / DBT_MAX_BLOCK_SPILLS
+ * entries); the runtime translates into a scratch block and then copies the
+ * used entries into a compact arena, so the block table stays small. */
 typedef struct {
     sf_u32 guest_pc;
     sf_u32 guest_len;        /* bytes of guest code consumed */
     sf_u32 host_base;        /* host address of buf[0] */
     int    host_len;         /* bytes emitted (code + stubs + pool) */
     int    code_len;         /* bytes of translated code before stubs */
-    dbt_imeta meta[DBT_MAX_META];
-    int    nmeta;            /* entries; meta[nmeta] is a sentinel at guest_len */
-    dbt_spill spills[DBT_MAX_BLOCK_SPILLS];
+    dbt_imeta *meta;         /* nmeta + 1 entries used (the sentinel at guest_len) */
+    int    nmeta;
+    dbt_spill *spills;
     int    nspills;
     struct {
-        int lit_off;             /* host offset of the link literal (patched by the runtime) */
-        int stub_off;            /* host offset of the exit stub */
-        int jump_off;            /* host offset of the 4-word jump sequence (lds rT,X0 ...) */
+        sf_u16 lit_off;          /* host offset of the link literal (patched by the runtime) */
+        sf_u16 stub_off;         /* host offset of the exit stub */
+        sf_u16 jump_off;         /* host offset of the 4-word jump sequence (lds rT,X0 ...) */
         sf_u8 cond;              /* the word before jump_off is the inverted bt/bf skip */
         sf_u8 backward;          /* guest target is at or before the branch (loop back edge) */
         sf_u8 scratch;           /* register the jump sequence spills */
+        sf_u8 pad;
         sf_u16 w0, w1, skip_w;   /* original words of the sequence (and the skip), to undo chaining */
         sf_u32 guest_target;
     } links[DBT_MAX_LINKS];

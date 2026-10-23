@@ -176,10 +176,17 @@ can only be a TLB miss from the code probe; longjmp out and deliver as above.
 
 ## Memory layout on the device
 
-Reserve the top of RAM for the translator: code cache, tables and stack, about
-4 MiB. Guest RAM is told to end below it (`MainMemoryEndAddress`). On 16 MiB
-units (fx-CP400, fx-CG100) that leaves 12 MiB for CE; 8 MiB units run headless
-only.
+Reserve the top of RAM for the translator: code cache (2 MiB), tables and
+stacks. The tables are 2048 block headers (416 KiB), a 640 KiB arena holding
+each block's resume metadata and spill records (about 240 bytes per block in
+practice; the translator writes a fixed-size scratch block and the runtime
+copies the used entries), the 64 KiB hash and ~60 KiB of code: 1.3 MiB in
+all, so the translator needs about 3.5 MiB with the cache. Guest RAM is told
+to end below it (`MainMemoryEndAddress`). On 16 MiB units (fx-CP400,
+fx-CG100) that leaves about 12 MiB for CE; 8 MiB units run headless only.
+The current emulator layout (docs/05) still gives the translator 3 MiB plus
+the 2 MiB cache and the guest 10 MiB; it will be tightened with the first
+real image.
 
 ## Test plan
 

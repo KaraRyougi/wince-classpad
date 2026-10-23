@@ -35,6 +35,8 @@ static void put32(sf_u32 addr, sf_u32 v) { put16(addr, v & 0xFFFF); put16(addr +
 static dbt_env env;
 static sf_u16 hbuf[DBT_BLOCK_WORDS];
 static dbt_block blk;
+static dbt_imeta blk_meta[DBT_MAX_META];
+static dbt_spill blk_spills[DBT_MAX_BLOCK_SPILLS];
 #define HBASE 0x8CC00000u
 
 static int failures = 0, checks = 0;
@@ -53,6 +55,7 @@ static int translate(const sf_u32 *ops, int n, int max_insns)
     memset(gmem, 0, sizeof gmem);
     for (i = 0; i < n; i++) put16(GBASE + i * 2, ops[i]);
     env.max_insns = max_insns;
+    blk.meta = blk_meta; blk.spills = blk_spills;
     return dbt_translate_block(&env, GBASE, HBASE, hbuf, DBT_BLOCK_WORDS, &blk, 0);
 }
 
@@ -315,6 +318,7 @@ int main(void)
       int r; sf_u32 fa = 0;
       memset(gmem, 0, sizeof gmem); put16(GBASE + 4092, ops[0]); put16(GBASE + 4094, ops[0]);
       env.max_insns = 4;
+      blk.meta = blk_meta; blk.spills = blk_spills;
       r = dbt_translate_block(&env, GBASE + 4092, HBASE, hbuf, DBT_BLOCK_WORDS, &blk, &fa);
       expect("fault", r == DBT_ERR_FETCH && fa == GBASE + 4096 && blk.guest_len == 4);
     }

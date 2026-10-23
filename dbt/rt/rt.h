@@ -99,6 +99,7 @@ typedef struct {
     sf_u32 ic_misses_c;                  /* inline-cache misses that also missed the asm hash probe */
     sf_u32 probe_faults;                 /* code-probe faults delivered to the guest (TLB misses, address errors) */
     sf_u32 unchained, asid_switches, tlb_hooks;
+    sf_u32 arena_bytes;                  /* metadata arena in use */
     sf_u32 synth_exceptions;             /* address errors synthesized for unfetchable guest pcs */   /* exceptions resumed inside a block: restart / after the memory op */
 } dbt_stats;
 extern dbt_stats dbt_stat;

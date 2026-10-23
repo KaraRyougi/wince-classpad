@@ -284,8 +284,8 @@ static void jump_direct(tctx *t, sf_u32 guest_target, sf_u32 avoid, int cond)
     int k = b->nlinks;
     if (k >= DBT_MAX_LINKS) { t->err = DBT_ERR_OVERFLOW; return; }
     b->links[k].guest_target = guest_target;
-    b->links[k].lit_off = -1;
-    b->links[k].jump_off = emit_pos(e);
+    b->links[k].lit_off = 0xFFFF;
+    b->links[k].jump_off = (sf_u16)emit_pos(e);
     b->links[k].scratch = (sf_u8)rT;
     b->links[k].cond = (sf_u8)cond;
     b->links[k].backward = (sf_u8)(guest_target <= t->gpc);
@@ -692,7 +692,11 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
     int n = 0, ended = 0, k;
     sf_u32 gpc = guest_pc;
 
-    memset(b, 0, sizeof *b);
+    {
+        dbt_imeta *m = b->meta; dbt_spill *s = b->spills;      /* caller-provided storage survives the reset */
+        memset(b, 0, sizeof *b);
+        b->meta = m; b->spills = s;
+    }
     memset(&t, 0, sizeof t);
     t.env = env; t.blk = b;
     emit_init(&t.em, buf, cap);
@@ -755,7 +759,7 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
         int stub_off = emit_pos(&t.em);
         int rS = 1;
         int i;
-        b->links[k].stub_off = stub_off;
+        b->links[k].stub_off = (sf_u16)stub_off;
         /* record the stub address as the initial value of the link literal */
         for (i = 0; i < t.em.nlits; i++)
             if (t.em.lits[i].tag == TAG_LINK(k)) t.em.lits[i].value = host_base + (sf_u32)stub_off;
@@ -781,7 +785,7 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
         int link_off = emit_lit_offset(&t.em, TAG_LINK(k));
         int l_off = emit_lit_offset(&t.em, TAG_STUB_L(k));
         sf_u32 v = host_base + (sf_u32)link_off;
-        b->links[k].lit_off = link_off;
+        b->links[k].lit_off = (sf_u16)link_off;
         if (l_off >= 0) { emit_patch16(&t.em, l_off, v >> 16); emit_patch16(&t.em, l_off + 2, v & 0xFFFFu); }
         /* original jump words, for unchaining when the target block dies */
         b->links[k].w0 = t.em.buf[b->links[k].jump_off / 2];

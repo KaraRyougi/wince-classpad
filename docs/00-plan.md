@@ -64,7 +64,8 @@ needed: casio-emu runs the translator as an ordinary big-endian add-in.
    "Performance"). With branch chaining, inline caches and cheaper calls
    (all done): ALU 1.0x, branches 1.3x, memory 2.3-2.8x, stack push/pop
    4.1x, calls 2.8-3.8x. Remaining optimization: store spill avoidance.
-   Still to do: code-cache pressure with a larger guest.
+   Block metadata compacted (bss 2.3 -> 1.2 MiB, 2048 blocks). Still to
+   do: code-cache pressure with a larger guest.
    The `lcd` guest (framebuffer pushed to the R61524 through pre-swapped
    MMIO, screenshot in docs/img) completes the device-side checks of this
    milestone; `apicall` and `mmu` cover the CE API-call fault and TLB-mapped
