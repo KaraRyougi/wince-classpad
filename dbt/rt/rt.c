@@ -44,6 +44,8 @@ static sf_u32    g_cache_used;              /* bytes */
 static fpu_state g_fpu;
 static int       g_translating;             /* guest pc being translated or 0 */
 static sf_u32    g_translating_pc;
+static int guest_pc_fetchable(sf_u32 gpc);
+static void deliver_synthetic(sf_u32 gpc, sf_u32 expevt);
 static dbt_env   g_env;
 
 /* ---------------------------------------------------------- console */
@@ -150,6 +152,7 @@ static dbt_block *translate_at(sf_u32 gpc)
     int r;
     if (g_nblocks >= MAX_BLOCKS || g_cache_used + DBT_BLOCK_WORDS * 2 > g_cfg.cache_size)
         cache_flush_all();
+    if (!guest_pc_fetchable(gpc)) { dbt_stat.synth_exceptions++; deliver_synthetic(gpc, 0x0E0); }
     b = &g_blocks[g_nblocks];
     host = g_cfg.cache_base + g_cache_used;
     g_translating = 1; g_translating_pc = gpc;
@@ -261,6 +264,33 @@ void dbt_invalidate(sf_u32 lo, sf_u32 hi)
 #define HC_STATS  0xF5
 #define HC_BENCH  0xF6
 #define HC_DUMP   0xF7                  /* r4 = host address, r5 = number of 16-bit words to print */
+#define HC_SYNTH  0xF8                  /* translator-internal: deliver a synthetic exception (r4 = guest pc, r5 = EXPEVT) */
+
+#define REG_EXPEVT (*(volatile sf_u32 *)0xFF000024u)
+#define REG_TEA    (*(volatile sf_u32 *)0xFF00000Cu)
+
+static int g_exc_depth;                 /* > 0 while dbt_exc_c runs (resolving a guest handler) */
+
+/* A guest pc the CPU could not fetch from: odd, or in P4 (control space,
+ * 0xE0000000 up). Real hardware raises an instruction address error there;
+ * the translator's data-read probe would not (P4 reads return cache/TLB
+ * arrays), so the check is made here. Windows CE's API calls rely on it:
+ * they jump to 0xF000xxxx addresses and the kernel's handler decodes SPC. */
+static int guest_pc_fetchable(sf_u32 gpc) { return !(gpc & 1) && gpc < 0xE0000000u; }
+
+/* Called from the translator (stub context, guest registers in dbt_ctx_rt):
+ * raise the synthetic exception through our own vector. Never returns. */
+static void deliver_synthetic(sf_u32 gpc, sf_u32 expevt)
+{
+    if (g_exc_depth) {
+        dbt_puts("[dbt] guest exception handler at "); dbt_puthex(gpc); dbt_puts(" is not fetchable\n");
+        dbt_halt("guest VBR unusable");
+    }
+    register sf_u32 r4 __asm__("r4") = gpc;
+    register sf_u32 r5 __asm__("r5") = expevt;
+    __asm__ volatile ("trapa #0xF8" :: "r"(r4), "r"(r5) : "memory");
+    for (;;) ;
+}
 
 static void print_trace(void);
 
@@ -275,6 +305,8 @@ static void print_stats(void)
     dbt_puts(" chained="); dbt_puthex(dbt_stat.chained);
     dbt_puts(" evicted="); dbt_puthex(dbt_stat.hash_evicted);
     dbt_puts(" ic_miss_c="); dbt_puthex(dbt_stat.ic_misses_c);
+    dbt_puts(" probe_faults="); dbt_puthex(dbt_stat.probe_faults);
+    dbt_puts(" synth="); dbt_puthex(dbt_stat.synth_exceptions);
     dbt_puts(" resumes="); dbt_puthex(dbt_stat.resumes);
     dbt_puts("/"); dbt_puthex(dbt_stat.resumes_committed);
     dbt_puts("\n");
@@ -531,14 +563,38 @@ static int stub_window(dbt_gctx *ctx, sf_u32 *guest_pc)
     dbt_halt("exception in a non-resumable stub region");
 }
 
+/* The guest registers of an exception raised inside the translator (stub
+ * context): the stub saved them in dbt_ctx_rt before calling C. */
+static void take_stub_context(dbt_gctx *ctx)
+{
+    int i;
+    for (i = 0; i < 16; i++) ctx->r[i] = dbt_ctx_rt.r[i];
+    ctx->sr = dbt_ctx_rt.sr; ctx->pr = dbt_ctx_rt.pr; ctx->gbr = dbt_ctx_rt.gbr;
+    ctx->mach = dbt_ctx_rt.mach; ctx->macl = dbt_ctx_rt.macl;
+    ctx->ssr = dbt_ctx_rt.sr;
+}
+
 int dbt_exc_c(dbt_gctx *ctx)
 {
     dbt_block *b;
     sf_u32 guest_pc, handler;
+    int act;
     dbt_stat.exceptions++;
 
     if (ctx->vec_off == 0x100 && ctx->expevt == 0x160) {
         sf_u32 nr = (ctx->tra >> 2) & 0xFF;
+        if (nr == HC_SYNTH) {
+            /* the translator asks for an exception at guest pc r4 with EXPEVT r5
+             * (stub context: the guest registers are in dbt_ctx_rt) */
+            sf_u32 expevt = ctx->r[5];
+            guest_pc = ctx->r[4];
+            take_stub_context(ctx);
+            REG_EXPEVT = expevt;
+            REG_TEA = guest_pc;
+            ctx->expevt = expevt; ctx->tea = guest_pc;
+            ctx->vec_off = 0x100;
+            goto deliver;
+        }
         if (nr >= 0xF0) return hypercall(ctx, nr);
     }
 
@@ -547,16 +603,15 @@ int dbt_exc_c(dbt_gctx *ctx)
     } else {
         b = block_of_host(ctx->host_spc);
         if (!b) {
-            if (g_translating && ctx->vec_off == 0x400) {
-                /* code probe faulted while translating: the guest state is the
-                 * one saved by the stub that called the translator */
-                int i;
+            if (g_translating) {
+                /* code probe faulted while translating (TLB miss or address
+                 * error, whichever vector): the guest state is the one saved
+                 * by the stub that called the translator; deliver the fault at
+                 * the guest pc being translated */
                 guest_pc = g_translating_pc;
                 g_translating = 0;
-                for (i = 0; i < 16; i++) ctx->r[i] = dbt_ctx_rt.r[i];
-                ctx->sr = dbt_ctx_rt.sr; ctx->pr = dbt_ctx_rt.pr; ctx->gbr = dbt_ctx_rt.gbr;
-                ctx->mach = dbt_ctx_rt.mach; ctx->macl = dbt_ctx_rt.macl;
-                ctx->ssr = dbt_ctx_rt.sr;
+                take_stub_context(ctx);
+                dbt_stat.probe_faults++;
             } else {
                 dbt_puts("[dbt] exception outside translated code: spc="); dbt_puthex(ctx->host_spc);
                 dbt_puts(" expevt="); dbt_puthex(ctx->expevt); dbt_puts(" vec="); dbt_puthex(ctx->vec_off);
@@ -582,13 +637,17 @@ int dbt_exc_c(dbt_gctx *ctx)
         }
     }
 
+deliver:
     /* deliver to the guest handler */
     ctx->new_spc = guest_pc;
     ctx->new_ssr = (ctx->ssr & ~SR_MD) | (dbt_shadow_md & SR_MD);
     dbt_shadow_md = SR_MD;                          /* guest is now in privileged handler mode */
     handler = dbt_shadow_vbr + ctx->vec_off;
+    g_exc_depth++;
     ctx->jump_to = dbt_resolve(handler, 0);
-    return RT_ACT_JUMP;
+    g_exc_depth--;
+    act = RT_ACT_JUMP;
+    return act;
 }
 
 sf_u32 dbt_rte_c(sf_u32 guest_spc, sf_u32 *ssr)

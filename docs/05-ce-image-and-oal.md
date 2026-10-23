@@ -129,19 +129,20 @@ byte-swapped by the guest, bytes are not), since the translator swaps every
 
 Translator-side items the OAL work depends on:
 
-- Deliver TLB misses and address errors from the translator's code probe
-  with the hardware EXPEVT (`0x040`/`0x060` TLB, `0x0E0` address error)
-  and the guest PC: needed for the CE API-call convention and for demand
-  paging. The probe path exists; it needs a guest test.
-- Guest code in TLB-mapped regions (P0/U0): translated code fetches guest
-  instructions at translation time through the live TLB; a miss raises the
-  probe fault to the kernel, which fills the TLB and retries. Data accesses
-  of translated code fault normally. Blocks must be keyed by virtual address
-  **and** invalidated on TLB changes when the mapping is reused for other
-  code (CE's loader unmaps/remaps process slots): the `trapa #0xF2` hook
-  above covers the loader; context switches between processes that share
-  virtual addresses (slot 0) need either a per-process cache tag or a flush
-  on `OEMIdle`-level switch hooks. To be designed when the kernel runs.
+- ~~Deliver TLB misses and address errors from the translator's code probe~~
+  done (`apicall` and `mmu` guests): a probe TLB miss is delivered with the
+  hardware EXPEVT and TEA at the guest pc; an unfetchable pc (odd, or P4
+  such as the API-call addresses 0xF000xxxx) gets a synthesized instruction
+  address error, since real hardware would not fault the translator's data
+  read there.
+- ~~Guest code in TLB-mapped regions (P0/U0)~~ fetch and data paths done
+  (`mmu` guest: code and data through `ldtlb` entries, miss -> handler ->
+  refill -> retry). Still open: blocks are keyed by virtual address only, so
+  when CE reuses a virtual range for other code (process slots, loader
+  unmap/remap) the translations must go: the `trapa #0xF2` hook covers the
+  loader's `OEMCacheRangeFlush`; context switches between processes sharing
+  virtual addresses (slot 0) need a per-process cache tag or a flush on
+  switch. To be designed when the kernel runs.
 - FPU: the kernel saves and restores FPSCR/FPUL/FR registers on context
   switch with ordinary FPU instructions, all of which go through the helper
   into the single `fpuemu` state, so per-thread FPU state works without OAL
@@ -156,9 +157,8 @@ Translator-side items the OAL work depends on:
 1. Install the VM and Platform Builder; build the stock SH4 BSP image once
    (no hardware needed) to prove the toolchain. Read the kernel's SH4
    exception sources and settle the bank-1 question.
-2. Guest tests for the two translator gaps: a jump to an unmapped address
-   (address error delivered to the guest VBR) and a TLB-mapped code page
-   (MMUCR on, one TLB entry, code fetched through it).
+2. ~~Guest tests for the two translator gaps~~ done 2026-10-22 (`apicall`,
+   `mmu`).
 3. `PLATFORM\CLASSPAD`: StartUp, OEMInit with TMU0 tick and INTC, hypercall
    debug output, cache flush hook. Headless OS design, RAMIMAGE config.bib.
 4. `make -C dbt NKBIN=NK.bin run`: expect the kernel banner on stdout,

@@ -213,6 +213,18 @@ via hypercall 0xF1):
   with `rte`; everything else is delivered to the guest handler with
   SPC = guest resume pc, SSR.MD = shadow MD. Assumption to verify against the
   CE kernel source: bank-1 registers hold no persistent kernel state.
+- Faults while translating: a fault raised by the translator's code probe
+  (TLB miss on a mapped page, any vector) is delivered to the guest at the
+  pc being translated, with the guest registers taken from `dbt_ctx_rt`
+  (the stub saved them). A guest pc that no CPU could fetch (odd, or in P4
+  from 0xE0000000, where a data read would *not* fault) never reaches the
+  probe: `translate_at` raises `trapa #0xF8` (HC_SYNTH, r4 = pc, r5 =
+  EXPEVT 0x0E0) and `dbt_exc_c` writes EXPEVT/TEA and delivers an
+  instruction address error through vector 0x100. This is what Windows CE's
+  SH API-call convention (jumps to 0xF000xxxx) needs.
+- Hypercalls: F0 exit, F1 puts, F2 flush translations for a guest range
+  (`hc_flush`, for code the guest loaded or modified), F3 putc, F4 puthex,
+  F5 stats, F6 bench, F7 dump host words, F8 synthetic exception (internal).
 - Resume rules: translated code uses the block metadata (restart the
   instruction, or the branch target after a delay slot). Inside the stubs,
   window labels (`dbt_lk_s*`, `dbt_hit_*`, `dbt_full_m*`, `dbt_h*_s*`) tell
@@ -343,6 +355,8 @@ Status 2026-10-22: all four guests pass under the emulator.
 | `exc` | guest VBR, `trapa`, EXPEVT/TRA, SPC rewrite by the handler, `rte`, T bit across exceptions | PASS (6 checks) |
 | `fpu` | raw FPU words through the helper: fpscr reset, fadd/fmul/float/fmov.s, double sub + fcmp/gt | PASS (5 checks, 0x21 helper calls) |
 | `bench` | translated vs native timing of eight kernels (see "Performance") | runs |
+| `apicall` | `jsr` to 0xF0010000 / 0xF000FFFC / an odd address (the CE API-call convention): instruction address error synthesized by the translator, EXPEVT 0x0E0, SPC = TEA = target, handler redirects to the caller through PR with r4-r7 intact, repeated calls through the inline-cache miss path | PASS (7 checks) |
+| `mmu` | MMUCR.AT on, code and data pages mapped with PTEH/PTEL/`ldtlb`: translated call through a TLB-mapped code page with a data load through another, store through the TLB, TLB miss on a code fetch delivered to the guest's 0x400 handler (EXPEVT 0x040, TEA = SPC = pc), refill and retry, MMU off again | PASS (10 checks) |
 | `lcd` | draws into a little-endian RGB565 VRAM and pushes 24 frames to the R61524 display controller (16-bit bus at 0xB4000000, RS on Port R) through the pre-swapped MMIO accessors; `make -C dbt GUEST=lcd screenshot` captures the frame | shows the picture (docs/img/lcd-guest.png) |
 | `tmu` | TMU0 programmed through pre-swapped MMIO, IMASK/BL and IMR masking, INTEVT, `rte` restoring SR, `sleep` wake-up; register probe across `trapa`; 15 one-construct hot loops (loads, stores of every form, `bt/s` with a T-writing slot, `jsr` with a store in the slot, push/pop, pc-relative) plus a compiled loop, each run with ~3000 interrupts landing at arbitrary host instructions and compared with an interrupt-free run | PASS (34 checks) |
 

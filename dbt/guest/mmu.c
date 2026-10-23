@@ -1,0 +1,110 @@
+/* mmu.c - MMU on under the translator: guest code in a TLB-mapped P0 page is
+ * fetched (by the translator's probe) through the UTLB entry, data accesses
+ * of translated code go through the TLB, and a miss on a page without an
+ * entry reaches the guest's TLB-miss handler (EXPEVT 0x040, TEA), which
+ * refills with ldtlb and retries, exactly the Windows CE flow. */
+#include "hyper.h"
+#include "mmio.h"
+
+#define PTEH   0xFF000000u
+#define PTEL   0xFF000004u
+#define MMUCR  0xFF000010u
+
+#define V_CODE  0x00400000u            /* virtual pages (P0) */
+#define V_DATA  0x00401000u
+#define V_LAZY  0x00402000u            /* mapped only by the miss handler */
+#define P_CODE  0x8C300000u            /* physical pages, through P1 */
+#define P_DATA  0x8C301000u
+#define P_LAZY  0x8C302000u
+#define PTEL_FLAGS 0x16Eu              /* V | PR=11 | C | D | SH, 4 KiB */
+
+extern char guest_vectors[];
+volatile unsigned fault_pr;
+static int fails;
+static volatile unsigned faults, misses, last_vec, last_expevt, last_tea, last_spc;
+
+static void check(const char *name, int ok)
+{
+    hc_puts(ok ? "PASS " : "FAIL "); hc_puts(name); hc_putc('\n');
+    if (!ok) fails++;
+}
+
+static void tlb_map(unsigned v, unsigned p)
+{
+    mmio_w32(PTEH, v & 0xFFFFFC00u);                          /* VPN, ASID 0 */
+    mmio_w32(PTEL, ((p & 0x1FFFFFFFu) & 0xFFFFFC00u) | PTEL_FLAGS);   /* 29-bit physical */
+    __asm__ volatile ("ldtlb" ::: "memory");
+}
+
+unsigned guest_fault(unsigned vec, unsigned spc, unsigned expevt, unsigned tea)
+{
+    faults++;
+    last_vec = vec; last_expevt = expevt; last_tea = tea; last_spc = spc;
+    if ((expevt == 0x040 || expevt == 0x060) && (tea & 0xFFFFF000u) == V_LAZY) {
+        misses++;
+        tlb_map(V_LAZY, P_LAZY);
+        return 0;                                            /* retry the faulting access */
+    }
+    hc_puts("unexpected fault vec "); hc_puthex(vec); hc_puts(" expevt "); hc_puthex(expevt);
+    hc_puts(" tea "); hc_puthex(tea); hc_puts(" spc "); hc_puthex(spc); hc_putc('\n');
+    hc_exit(3);
+    return 0;
+}
+
+/* position-independent leaf, assembled by hand: r0 = r4 + r5 + *(r6)
+ * (the load is a data access through whatever maps r6):
+ * mov r5,r0 ; add r4,r0 ; mov.l @r6,r1 ; rts ; add r1,r0 */
+static const unsigned short fn_code[] = { 0x6053, 0x304C, 0x6162, 0x000B, 0x301C };
+/* lazy page: mov #7,r0 ; rts ; nop */
+static const unsigned short lazy_code[] = { 0xE007, 0x000B, 0x0009 };
+
+static void copy_code(unsigned dst, const unsigned short *src, unsigned n)
+{
+    unsigned i;
+    for (i = 0; i < n; i++) ((volatile unsigned short *)dst)[i] = src[i];
+}
+
+typedef unsigned (*fn2_t)(unsigned, unsigned, const unsigned *);
+typedef unsigned (*fn0_t)(void);
+
+void guest_main(void)
+{
+    unsigned r;
+    hc_puts("mmu test: TLB-mapped code and data pages under the translator\n");
+    __asm__ volatile ("ldc %0, vbr" :: "r"(guest_vectors));
+
+    copy_code(P_CODE, fn_code, 5);
+    copy_code(P_LAZY, lazy_code, 3);
+    *(volatile unsigned *)P_DATA = 100;
+    hc_flush(P_CODE, 0x3000);                                /* the translator may hold nothing for these pages, but be explicit */
+
+    /* MMU on: flush, then AT=1; map the code and data pages */
+    mmio_w32(MMUCR, 0x4);                                    /* TI */
+    mmio_w32(MMUCR, 0x1);                                    /* AT */
+    tlb_map(V_CODE, P_CODE);
+    tlb_map(V_DATA, P_DATA);
+    check("MMUCR.AT reads back", (mmio_r32(MMUCR) & 1) == 1);
+
+    r = ((fn2_t)V_CODE)(2, 3, (const unsigned *)V_DATA);     /* code and data through the TLB */
+    check("call through a TLB-mapped code page", r == 105 && faults == 0);
+    check("data load through a TLB-mapped page", r == 105);
+
+    *(volatile unsigned *)V_DATA = 1000;                     /* data store through the TLB */
+    check("data store through the TLB lands in the physical page", *(volatile unsigned *)P_DATA == 1000);
+    r = ((fn2_t)V_CODE)(5, 5, (const unsigned *)V_DATA);
+    check("second call (block cached by virtual pc)", r == 1010);
+
+    r = ((fn0_t)V_LAZY)();                                   /* no entry: miss -> handler maps -> retry */
+    check("TLB miss on code fetch reached the handler", misses == 1 && last_vec == 4);
+    check("EXPEVT = 0x040, TEA = SPC = faulting pc", last_expevt == 0x040 && last_tea == V_LAZY && last_spc == V_LAZY);
+    check("refill with ldtlb and retry executed the page", r == 7 && faults == 1);
+
+    r = ((fn0_t)V_LAZY)();
+    check("mapped page runs without a new fault", r == 7 && faults == 1);
+
+    mmio_w32(MMUCR, 0x4);                                    /* MMU off again, flush */
+    check("MMU off", (mmio_r32(MMUCR) & 1) == 0);
+    hc_stats();
+    hc_puts(fails ? "RESULT: FAIL\n" : "RESULT: PASS\n");
+    hc_exit(fails);
+}

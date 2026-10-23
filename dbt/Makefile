@@ -40,6 +40,8 @@ $(BUILD):
 GUEST_EXTRA_exc := guest/exc_vectors.S
 GUEST_EXTRA_tmu := guest/tmu_vectors.S guest/tmu_loops.S
 GUEST_EXTRA_bench := bench/loops.S
+GUEST_EXTRA_apicall := guest/fault_vectors.S
+GUEST_EXTRA_mmu := guest/fault_vectors.S
 GUEST_EXTRA     := $(GUEST_EXTRA_$(GUEST))
 GUEST_START_nkimg := guest/nkimg_start.S
 GUEST_START     := $(or $(GUEST_START_$(GUEST)),guest/start.S)
