@@ -197,8 +197,8 @@ via hypercall 0xF1):
 
 ## Runtime conventions (dbt/rt)
 
-- `dbt_lookup` / `dbt_lookup_link`: X0 = guest target, X1 = link literal
-  address. Direct-mapped hash of 8192 entries (`dbt_hash`, read by the asm
+- `dbt_lookup` / `dbt_lookup_link` / `dbt_lookup_ic`: X0 = guest target,
+  X1 = link literal address (link) or inline-cache literal pair (ic). Direct-mapped hash of 8192 entries (`dbt_hash`, read by the asm
   fast path); on a miss the stub masks interrupts, saves the guest context
   into `dbt_ctx_rt` and calls `dbt_resolve`, which translates and patches the
   link literal (a data write; PC-relative loads go through the operand cache).
@@ -235,16 +235,16 @@ charges one TMU tick per four executed instructions regardless of type, so
 these are *instruction-count* ratios; the per-iteration counts below were
 read from the translated blocks and agree with the measurements.
 
-| kernel | per iteration | native ticks | before chaining | with chaining | host insns / guest insns (chained) |
-|---|---|---|---|---|---|
-| alu | 5 ALU + `dt` + `bf` | 15382 | 27723 (1.80x) | 15390 (**1.00x**) | 7 / 7 |
-| mem mixed | 4 longword, 2 word, 2 byte accesses, 2 ALU, loop | 26369 | 81308 (3.08x) | 72519 (2.75x) | 37 / 12 |
-| mem copy | 2 post-increment loads, 2 stores, pointer wrap, loop | 29391 | 81033 (2.76x) | 68400 (2.33x) | |
-| stack | push r1, r2, PR; pop them; loop | 19777 | 90096 (4.56x) | 81309 (4.11x) | 37 / 9 |
-| branch | 3 data-dependent `bt`/`bf` (half taken), loop | 25270 | 47249 (1.87x) | 31869 (1.26x) | |
-| call jsr | `jsr @r6; nop` to a 3-instruction leaf | 17580 | 156016 (8.87x) | 156017 (8.87x) | ~65 / 8 |
-| call bsr | `bsr leaf; nop` | 17580 | 105479 (6.00x) | 96690 (5.50x) | |
-| call frame | `jsr` to a function that pushes/pops r8, r9, PR | 35159 | 235117 (6.69x) | 235119 (6.69x) | |
+| kernel | per iteration | native ticks | baseline | + branch chaining | + inline caches | host insns / guest insns (now) |
+|---|---|---|---|---|---|---|
+| alu | 5 ALU + `dt` + `bf` | 15382 | 27723 (1.80x) | 15390 (**1.00x**) | 15390 (**1.00x**) | 7 / 7 |
+| mem mixed | 4 longword, 2 word, 2 byte accesses, 2 ALU, loop | 26369 | 81308 (3.08x) | 72519 (2.75x) | 72519 (2.75x) | 37 / 12 |
+| mem copy | 2 post-increment loads, 2 stores, pointer wrap, loop | 29391 | 81033 (2.76x) | 68400 (2.33x) | 68399 (2.33x) | |
+| stack | push r1, r2, PR; pop them; loop | 19777 | 90096 (4.56x) | 81309 (4.11x) | 81307 (4.11x) | 37 / 9 |
+| branch | 3 data-dependent `bt`/`bf` (half taken), loop | 25270 | 47249 (1.87x) | 31869 (1.26x) | 33516 (1.33x) | |
+| call jsr | `jsr @r6; nop` to a 3-instruction leaf | 17580 | 156016 (8.87x) | 156017 (8.87x) | 76914 (**4.38x**) | 35 / 8 |
+| call bsr | `bsr leaf; nop` | 17580 | 105479 (6.00x) | 96690 (5.50x) | 57139 (**3.25x**) | |
+| call frame | `jsr` to a function that pushes/pops r8, r9, PR | 35159 | 235117 (6.69x) | 235119 (6.69x) | 156016 (**4.44x**) | |
 
 **Branch chaining** (done 2026-10-22, `dbt_chain_direct`): when the runtime
 links a direct jump and the target is within the 12-bit `bra` range, the
@@ -263,6 +263,21 @@ with the same index function in C and asm (the C side used to linear-probe,
 which the asm fast path could not see, and consecutive block starts evicted
 each other; an entry missing from the hash is now recovered from the block
 table instead of being retranslated).
+
+**Inline caches** (done 2026-10-22, `jump_indirect_ic`): every indirect
+branch site (`jsr`, `jmp`, `rts`, `braf`, `bsrf`) ends with a 10-instruction
+hit path: compare the guest target (parked in X0) with a cached guest pc held
+in a literal, and `jmp` to the cached host address held in the next literal.
+A miss goes to `dbt_lookup_ic` with X1 = address of the literal pair; the stub
+refills both words (data writes, read back through the operand cache) from
+its asm hash probe or, failing that, from C (`dbt_resolve_ic`). Both
+literals start as {1, 0}, so the first execution always misses. A
+`jsr`/`rts` pair now costs about 29 host instructions instead of ~57 (the
+remaining cost: 4 for the PR literal, 1 to park the target, 10 per inline
+cache, and 4 for `rts` to move PR into X0). Blocks grew by 24 bytes, which
+pushes a few conditional back edges out of the 8-bit range (`branch` 1.26x ->
+1.33x); the next step there is a 2-word short form when the site's target
+register is not written by the slot.
 
 Measurement pitfalls worth remembering: a timed region must not contain the
 first execution of the code *after* the call (its block gets translated
@@ -291,11 +306,7 @@ here; the 3-5x code expansion will cost instruction-cache misses instead.
 Optimizations, in order of payoff per effort:
 
 1. ~~**Branch chaining**~~ done (above).
-2. **Inline caches for indirect branches**: per site, compare the guest
-   target with the last seen one (literal) and `jmp` straight to its host
-   address, falling back to the lookup stub on a miss; ~7 instructions on a
-   hit instead of ~29. Calls through registers and most `rts` (same caller
-   in a loop) hit.
+2. ~~**Inline caches for indirect branches**~~ done (above).
 3. **Cheaper PR writes**: `jsr`/`bsr` spend 4 instructions materializing the
    guest return address; a return-address side table indexed by call site
    could remove the literal load from the hot path.

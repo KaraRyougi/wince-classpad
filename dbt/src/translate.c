@@ -8,6 +8,9 @@
 #define TAG_LINK(k)   (100 + (k))   /* branch literal holding the host target (patched when linked) */
 #define TAG_STUB_T(k) (200 + (k))   /* exit stub: guest target */
 #define TAG_STUB_L(k) (300 + (k))   /* exit stub: address of the link literal */
+#define TAG_IC_G      400           /* inline cache: cached guest target (followed by TAG_IC_H in the pool) */
+#define TAG_IC_H      401           /* inline cache: its host address */
+#define TAG_IC_A      402           /* address of the TAG_IC_G literal (X1 for the lookup_ic stub) */
 #define TAG_NONE      (-1)
 
 typedef struct {
@@ -293,14 +296,35 @@ static void jump_direct(tctx *t, sf_u32 guest_target, sf_u32 avoid, int cond)
 }
 
 /* Jump to the guest address already placed in X0. */
-static void jump_lookup(tctx *t, sf_u32 avoid)
+/* Indirect branch with a per-site inline cache. X0 holds the guest target.
+ * Hit (10 instructions): compare it with the cached guest pc and jump to the
+ * cached host address. Miss: dbt_lookup_ic with X1 = address of the literal
+ * pair, which the stub refills. Both literals are data, patched through the
+ * operand cache. The hit-path restores are not recorded: the spill records
+ * end at the miss-path restores, which cover both paths (an undo of a
+ * register already restored is harmless). The whole sequence lies in the
+ * META_TARGET_X0 range, so an exception anywhere in it resumes at X0. */
+static void jump_indirect_ic(tctx *t)
 {
     emitter *e = &t->em;
-    int rT = pick_scratch(avoid);
-    spill(t, rT, SLOT_Y0);
-    emit_mov_lit(e, rT, t->env->rt_lookup, TAG_NONE);
-    emit16(e, OP_JMP(rT));
-    restore(t, rT, SLOT_Y0);
+    int rT = pick_scratch(0), rU = pick_scratch(R(rT));
+    spill(t, rT, SLOT_Y0);                               /* w0 */
+    emit16(e, op_sts_slot(SLOT_X0, rT));                 /* w1 rT = guest target */
+    spill(t, rU, SLOT_Y1);                               /* w2 */
+    emit_mov_lit(e, rU, 1, TAG_IC_G);                    /* w3 cached guest pc (1: odd, never matches) */
+    emit16(e, OP_CMPEQ_RR(rT, rU));                      /* w4 */
+    emit16(e, OP_BF(3));                                 /* w5 miss -> w10 */
+    emit16(e, op_sts_slot(SLOT_Y0, rT));                 /* w6 */
+    emit_mov_lit(e, rU, 0, TAG_IC_H);                    /* w7 cached host address */
+    emit16(e, OP_JMP(rU));                               /* w8 */
+    emit16(e, op_sts_slot(SLOT_Y1, rU));                 /* w9 */
+    /* miss */
+    restore(t, rU, SLOT_Y1);                             /* w10 */
+    emit_mov_lit(e, rT, 0, TAG_IC_A);                    /* w11 patched after the pool is placed */
+    emit16(e, op_lds_slot(rT, SLOT_X1));                 /* w12 */
+    emit_mov_lit(e, rT, t->env->rt_lookup_ic, TAG_NONE); /* w13 */
+    emit16(e, OP_JMP(rT));                               /* w14 */
+    restore(t, rT, SLOT_Y0);                             /* w15 */
 }
 
 /* X0 = Rn (or PR when reg < 0), without disturbing guest registers. */
@@ -379,19 +403,19 @@ static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
         if (d->br == BR_BSRF) set_pr(t, next, avoid | R(d->br_reg));
         indirect_slot(t, slot, d->br_reg, 0, next, avoid | R(d->br_reg), R(d->br_reg));
         begin_meta_kind(t, META_TARGET_X0, goff, 0, 0);
-        jump_lookup(t, 0);
+        jump_indirect_ic(t);
         return;
     case BR_JMP:
     case BR_JSR:
         if (d->br == BR_JSR) set_pr(t, next, avoid | R(d->br_reg));
         indirect_slot(t, slot, d->br_reg, 0, 0, 0, R(d->br_reg));
         begin_meta_kind(t, META_TARGET_X0, goff, 0, 0);
-        jump_lookup(t, 0);
+        jump_indirect_ic(t);
         return;
     case BR_RTS:
         indirect_slot(t, slot, -1, 1, 0, avoid, 0);
         begin_meta_kind(t, META_TARGET_X0, goff, 0, 0);
-        jump_lookup(t, 0);
+        jump_indirect_ic(t);
         return;
     case BR_RTE: {
         int rT;
@@ -587,7 +611,7 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
     memset(&t, 0, sizeof t);
     t.env = env; t.blk = b;
     emit_init(&t.em, buf, cap);
-    b->guest_pc = guest_pc; b->host_base = host_base; b->end_reason = END_FULL;
+    b->guest_pc = guest_pc; b->host_base = host_base; b->end_reason = END_FULL; b->ic_off = -1;
 
     while (!ended && n < max && !t.err) {
         sh_insn d, s;
@@ -660,6 +684,14 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
         emit16(&t.em, op_sts_slot(SLOT_Y0, rS));
     }
     emit_flush_lits(&t.em);
+    {
+        int g_off = emit_lit_offset(&t.em, TAG_IC_G), a_off = emit_lit_offset(&t.em, TAG_IC_A);
+        if (g_off >= 0 && a_off >= 0) {
+            sf_u32 v = host_base + (sf_u32)g_off;
+            b->ic_off = g_off;
+            emit_patch16(&t.em, a_off, v >> 16); emit_patch16(&t.em, a_off + 2, v & 0xFFFFu);
+        }
+    }
     for (k = 0; k < b->nlinks; k++) {
         int link_off = emit_lit_offset(&t.em, TAG_LINK(k));
         int l_off = emit_lit_offset(&t.em, TAG_STUB_L(k));

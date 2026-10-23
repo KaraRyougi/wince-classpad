@@ -44,6 +44,7 @@
 .Lstack_rt\sfx:     .long _dbt_stack_rt_top
 .Lstack_exc\sfx:    .long _dbt_stack_exc_top
 .Lresolve\sfx:      .long _dbt_resolve
+.Lresolve_ic\sfx:   .long _dbt_resolve_ic
 .Lexc_c\sfx:        .long _dbt_exc_c
 .Lrte_c\sfx:        .long _dbt_rte_c
 .Lfpu_c\sfx:        .long _dbt_fpu_c
@@ -125,8 +126,9 @@ _dbt_sync_code:
 
 /* ------------------------------------------------------------------ */
 /* Lookup stubs. In: X0 = guest target pc, X1 = link literal address (link
- * variant). r0,r1,r2 are saved to Y0,Y1,A0 (window: resume = X0). */
-        .macro LOOKUP name, link, s1, s2, s3
+ * variant) or inline-cache literal pair (ic variant). r0,r1,r2 are saved to
+ * Y0,Y1,A0 (window: resume = X0). */
+        .macro LOOKUP name, link, ic, cfunc, s1, s2, s3
         .global _dbt_\name
 _dbt_\name:
         LDSX    0, SLOT_Y0
@@ -155,6 +157,11 @@ _dbt_\name:
         STSX    SLOT_X1, 2
         mov.l   r1, @r2                /* patch the link literal */
         .endif
+        .if \ic
+        STSX    SLOT_X1, 2
+        mov.l   r0, @r2                /* refill the inline cache: guest pc, host */
+        mov.l   r1, @(4, r2)
+        .endif
         bra     _dbt_tail_hit
         nop
 2:      /* miss: r0 = gpc (also in X0) */
@@ -164,22 +171,23 @@ _dbt_\name:
         ldc     r2, sr                 /* interrupts masked from here on */
         SAVE_CTX_RT A
         STSX    SLOT_X0, 4             /* arg0 = gpc */
-        .if \link
-        STSX    SLOT_X1, 5             /* arg1 = link literal address */
+        .if \link | \ic
+        STSX    SLOT_X1, 5             /* arg1 = link literal / inline cache address */
         .else
         mov     #0, r5
         .endif
         mov.l   .Lstack_rtA, r15
-        mov.l   .LresolveA, r0
+        mov.l   \cfunc, r0
         jsr     @r0
         nop
         bra     _dbt_tail_full_prep    /* r0 = host target */
         nop
         .endm
 
-        LOOKUP  lookup, 0, _dbt_lk_s1, _dbt_lk_s2, _dbt_lk_s3
-        LOOKUP  lookup_link, 1, _dbt_lkl_s1, _dbt_lkl_s2, _dbt_lkl_s3
-        .global _dbt_lk_s1, _dbt_lk_s2, _dbt_lk_s3, _dbt_lkl_s1, _dbt_lkl_s2, _dbt_lkl_s3
+        LOOKUP  lookup, 0, 0, .LresolveA, _dbt_lk_s1, _dbt_lk_s2, _dbt_lk_s3
+        LOOKUP  lookup_link, 1, 0, .LresolveA, _dbt_lkl_s1, _dbt_lkl_s2, _dbt_lkl_s3
+        LOOKUP  lookup_ic, 0, 1, .Lresolve_icA, _dbt_lki_s1, _dbt_lki_s2, _dbt_lki_s3
+        .global _dbt_lk_s1, _dbt_lk_s2, _dbt_lk_s3, _dbt_lkl_s1, _dbt_lkl_s2, _dbt_lkl_s3, _dbt_lki_s1, _dbt_lki_s2, _dbt_lki_s3
         .global _dbt_lk_region_end
 _dbt_lk_region_end:
 

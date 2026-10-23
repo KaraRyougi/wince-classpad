@@ -132,6 +132,7 @@ void dbt_rt_init(const dbt_rt_config *cfg)
     g_env.fetch16 = g_fetch16; g_env.read16le = g_read16le; g_env.read32le = g_read32le;
     g_env.rt_lookup_link = (sf_u32)&dbt_lookup_link;
     g_env.rt_lookup = (sf_u32)&dbt_lookup;
+    g_env.rt_lookup_ic = (sf_u32)&dbt_lookup_ic;
     g_env.rt_rte = (sf_u32)&dbt_rte_stub;
     g_env.rt_fpu = (sf_u32)&dbt_fpu_stub;
     g_env.rt_fallback = (sf_u32)&dbt_fallback_stub;
@@ -170,6 +171,27 @@ static dbt_block *translate_at(sf_u32 gpc)
     dbt_stat.translations++;
     dbt_stat.blocks = (sf_u32)g_nblocks;
     return b;
+}
+
+static sf_u32 lookup_or_translate(sf_u32 gpc)
+{
+    sf_u32 host = hash_find(gpc);
+    if (!host) {
+        dbt_block *b = find_block_by_gpc(gpc);     /* evicted from the hash by a collision */
+        if (b) { dbt_stat.hash_evicted++; hash_insert(gpc, b->host_base); host = b->host_base; }
+        else host = translate_at(gpc)->host_base;
+    }
+    return host;
+}
+
+sf_u32 dbt_resolve_ic(sf_u32 gpc, sf_u32 ic_addr)
+{
+    sf_u32 host = lookup_or_translate(gpc);
+    volatile sf_u32 *ic = (volatile sf_u32 *)ic_addr;
+    dbt_stat.lookups_c++;
+    dbt_stat.ic_misses_c++;
+    ic[0] = gpc; ic[1] = host;                           /* data: read by mov.l @(disp,PC) through the operand cache */
+    return host;
 }
 
 /* Block containing a host address (blocks are sorted by host_base). */
@@ -212,13 +234,8 @@ static void link_direct(sf_u32 link_lit, sf_u32 host)
 
 sf_u32 dbt_resolve(sf_u32 gpc, sf_u32 link_lit)
 {
-    sf_u32 host = hash_find(gpc);
+    sf_u32 host = lookup_or_translate(gpc);
     dbt_stat.lookups_c++;
-    if (!host) {
-        dbt_block *b = find_block_by_gpc(gpc);     /* evicted from the hash by a collision */
-        if (b) { dbt_stat.hash_evicted++; hash_insert(gpc, b->host_base); host = b->host_base; }
-        else host = translate_at(gpc)->host_base;
-    }
     if (link_lit) link_direct(link_lit, host);
     return host;
 }
@@ -257,6 +274,7 @@ static void print_stats(void)
     dbt_puts(" fpu="); dbt_puthex(dbt_stat.fpu_ops);
     dbt_puts(" chained="); dbt_puthex(dbt_stat.chained);
     dbt_puts(" evicted="); dbt_puthex(dbt_stat.hash_evicted);
+    dbt_puts(" ic_miss_c="); dbt_puthex(dbt_stat.ic_misses_c);
     dbt_puts(" resumes="); dbt_puthex(dbt_stat.resumes);
     dbt_puts("/"); dbt_puthex(dbt_stat.resumes_committed);
     dbt_puts("\n");
@@ -450,10 +468,14 @@ static int stub_window(dbt_gctx *ctx, sf_u32 *guest_pc)
             if (AFTER(spc, dbt_lk_s1)) UNDO(ctx, 0, SLOT_Y0);
             if (AFTER(spc, dbt_lk_s2)) UNDO(ctx, 1, SLOT_Y1);
             if (AFTER(spc, dbt_lk_s3)) UNDO(ctx, 2, SLOT_A0);
-        } else {
+        } else if (IN(spc, dbt_lookup_link, dbt_lookup_ic)) {
             if (AFTER(spc, dbt_lkl_s1)) UNDO(ctx, 0, SLOT_Y0);
             if (AFTER(spc, dbt_lkl_s2)) UNDO(ctx, 1, SLOT_Y1);
             if (AFTER(spc, dbt_lkl_s3)) UNDO(ctx, 2, SLOT_A0);
+        } else {
+            if (AFTER(spc, dbt_lki_s1)) UNDO(ctx, 0, SLOT_Y0);
+            if (AFTER(spc, dbt_lki_s2)) UNDO(ctx, 1, SLOT_Y1);
+            if (AFTER(spc, dbt_lki_s3)) UNDO(ctx, 2, SLOT_A0);
         }
         *guest_pc = ctx->slots[SLOT_X0];
         return 1;

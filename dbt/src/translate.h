@@ -24,6 +24,7 @@ typedef struct {
     /* host addresses of runtime entry points and translator state */
     sf_u32 rt_lookup_link;   /* X0 = guest target, X1 = address of the link literal */
     sf_u32 rt_lookup;        /* X0 = guest target */
+    sf_u32 rt_lookup_ic;     /* X0 = guest target, X1 = address of the site's inline-cache literal pair */
     sf_u32 rt_rte;           /* guest rte: SPC is the guest PC */
     sf_u32 rt_fpu;           /* X0 = opcode, X1 = return address */
     sf_u32 rt_fallback;      /* X0 = opcode, X1 = return address */
@@ -90,6 +91,7 @@ typedef struct {
         sf_u32 guest_target;
     } links[DBT_MAX_LINKS];
     int    nlinks;
+    int    ic_off;           /* host offset of the inline cache {guest pc, host} literal pair, or -1 */
     int    end_reason;       /* enum below */
 } dbt_block;
 

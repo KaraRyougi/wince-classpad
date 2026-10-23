@@ -46,6 +46,7 @@ void   dbt_rt_init(const dbt_rt_config *cfg);
 /* Find or translate the block at guest pc; returns its host address. If
  * link_lit is nonzero the literal at that address is patched to the result. */
 sf_u32 dbt_resolve(sf_u32 gpc, sf_u32 link_lit);
+sf_u32 dbt_resolve_ic(sf_u32 gpc, sf_u32 ic_addr);     /* inline-cache miss: refill {gpc, host} at ic_addr */
 /* Exception from translated code; fills ctx->jump_to/new_spc/new_ssr. */
 int    dbt_exc_c(dbt_gctx *ctx);
 /* Helpers called from the stubs with the guest context: FPU instruction,
@@ -68,9 +69,9 @@ extern char dbt_vectors[];                          /* real VBR value */
 #include "ctx_offsets.h"
 void dbt_enter(sf_u32 host_entry) __attribute__((noreturn));
 void dbt_sync_code(sf_u32 addr, sf_u32 len);        /* ocbwb + icbi over the range */
-extern char dbt_lookup[], dbt_lookup_link[], dbt_rte_stub[], dbt_fpu_stub[], dbt_fallback_stub[], dbt_ldc_sr_stub[];
+extern char dbt_lookup[], dbt_lookup_link[], dbt_lookup_ic[], dbt_rte_stub[], dbt_fpu_stub[], dbt_fallback_stub[], dbt_ldc_sr_stub[];
 /* window labels for exception recovery inside the stubs (see stubs.S) */
-extern char dbt_lk_s1[], dbt_lk_s2[], dbt_lk_s3[], dbt_lkl_s1[], dbt_lkl_s2[], dbt_lkl_s3[], dbt_lk_region_end[];
+extern char dbt_lk_s1[], dbt_lk_s2[], dbt_lk_s3[], dbt_lkl_s1[], dbt_lkl_s2[], dbt_lkl_s3[], dbt_lki_s1[], dbt_lki_s2[], dbt_lki_s3[], dbt_lk_region_end[];
 extern char dbt_hit_a[], dbt_hit_b[], dbt_hit_c[], dbt_hit_end[];
 extern char dbt_full_m1[], dbt_full_m2[], dbt_full_m3[], dbt_full_m4[], dbt_full_end[];
 extern char dbt_hfpu_s1[], dbt_hfpu_s2[], dbt_hfpu_s3[], dbt_hfpu_masked[];
@@ -94,7 +95,8 @@ typedef struct {
     sf_u32 blocks, translations, flushes, lookups_c, exceptions, hypercalls, fpu_ops, invalidations;
     sf_u32 resumes, resumes_committed;
     sf_u32 chained;                      /* direct jumps rewritten into native branches */
-    sf_u32 hash_evicted;                 /* lookups that found the block only in the block table */   /* exceptions resumed inside a block: restart / after the memory op */
+    sf_u32 hash_evicted;                 /* lookups that found the block only in the block table */
+    sf_u32 ic_misses_c;                  /* inline-cache misses that also missed the asm hash probe */   /* exceptions resumed inside a block: restart / after the memory op */
 } dbt_stats;
 extern dbt_stats dbt_stat;
 

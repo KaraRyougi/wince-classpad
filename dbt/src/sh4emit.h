@@ -55,6 +55,7 @@ int  emit_lits_bytes(const emitter *e);
 #define OP_TST_RR(m,n)     (0x2008u | ((n) << 8) | ((m) << 4))
 #define OP_SHLR(n)         (0x4001u | ((n) << 8))
 #define OP_JMP(n)          (0x402Bu | ((n) << 8))
+#define OP_CMPEQ_RR(m,n)   (0x3000u | ((n) << 8) | ((m) << 4))
 #define OP_JSR(n)          (0x400Bu | ((n) << 8))
 #define OP_BRA(d)          (0xA000u | ((d) & 0xFFF))
 #define OP_BT(d)           (0x8900u | ((d) & 0xFF))

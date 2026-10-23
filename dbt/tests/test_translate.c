@@ -100,7 +100,7 @@ int main(void)
 {
     memset(&env, 0, sizeof env);
     env.fetch16 = fetch16; env.read16le = read16le; env.read32le = read32le;
-    env.rt_lookup_link = 0x8CF00000; env.rt_lookup = 0x8CF00100; env.rt_rte = 0x8CF00200;
+    env.rt_lookup_link = 0x8CF00000; env.rt_lookup = 0x8CF00100; env.rt_rte = 0x8CF00200; env.rt_lookup_ic = 0x8CF00600;
     env.rt_fpu = 0x8CF00300; env.rt_fallback = 0x8CF00400; env.rt_ldc_sr = 0x8CF00500;
     env.shadow_vbr_addr = 0x8CF01000; env.shadow_md_addr = 0x8CF01004;
 
@@ -212,7 +212,16 @@ int main(void)
       sf_u32 exp[] = { LDS_Y0(1), OP_STS_PR(1), LDS_X0(1), STS_Y0(1), 0x0009, LDS_Y0(1) };
       translate(ops, 2, 4);
       expect_seq("rts", 0, exp, 6);
-      expect("rts lookup", lit_of_movl(12) == env.rt_lookup && hbuf[7] == OP_JMP(1) && hbuf[8] == STS_Y0(1));
+      /* inline cache after the slot: w5.. = lds r1,y0; sts x0,r1; lds r2,y1; mov.l g,r2; cmp/eq r1,r2; bf +3;
+       * sts y0,r1; mov.l h,r2; jmp @r2; sts y1,r2; miss: sts y1,r2; mov.l a,r1; lds r1,x1; mov.l lookup_ic,r1; jmp @r1; sts y0,r1 */
+      expect("rts ic hit path", hbuf[6] == STS_X0(1) && hbuf[7] == op_lds_slot(2, SLOT_Y1) && hbuf[9] == OP_CMPEQ_RR(1, 2)
+             && hbuf[10] == OP_BF(3) && hbuf[11] == STS_Y0(1) && hbuf[13] == OP_JMP(2) && hbuf[14] == op_sts_slot(SLOT_Y1, 2));
+      expect("rts ic miss path", hbuf[15] == op_sts_slot(SLOT_Y1, 2) && hbuf[17] == LDS_X1(1) && lit_of_movl(36) == env.rt_lookup_ic
+             && hbuf[19] == OP_JMP(1) && hbuf[20] == STS_Y0(1));
+      expect("rts ic literals", blk.ic_off > 0 && lit_of_movl(16) == 1 && lit_of_movl(24) == 0
+             && lit_of_movl(32) == HBASE + (sf_u32)blk.ic_off && hbuf[blk.ic_off / 2 + 1] == 1 && hbuf[blk.ic_off / 2 + 2] == 0);
+      { dbt_spill sp[4]; int n = dbt_block_pending_spills(&blk, 1, 26, sp, 4);    /* at the jmp of the hit path */
+        expect("rts ic pending", n == 2 && blk.meta[1].kind == META_TARGET_X0); }
     }
 
     /* 11. jmp @r2 with slot that redefines r2: target captured first */
