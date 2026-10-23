@@ -235,16 +235,16 @@ charges one TMU tick per four executed instructions regardless of type, so
 these are *instruction-count* ratios; the per-iteration counts below were
 read from the translated blocks and agree with the measurements.
 
-| kernel | per iteration | native ticks | baseline | + branch chaining | + inline caches | host insns / guest insns (now) |
-|---|---|---|---|---|---|---|
-| alu | 5 ALU + `dt` + `bf` | 15382 | 27723 (1.80x) | 15390 (**1.00x**) | 15390 (**1.00x**) | 7 / 7 |
-| mem mixed | 4 longword, 2 word, 2 byte accesses, 2 ALU, loop | 26369 | 81308 (3.08x) | 72519 (2.75x) | 72519 (2.75x) | 37 / 12 |
-| mem copy | 2 post-increment loads, 2 stores, pointer wrap, loop | 29391 | 81033 (2.76x) | 68400 (2.33x) | 68399 (2.33x) | |
-| stack | push r1, r2, PR; pop them; loop | 19777 | 90096 (4.56x) | 81309 (4.11x) | 81307 (4.11x) | 37 / 9 |
-| branch | 3 data-dependent `bt`/`bf` (half taken), loop | 25270 | 47249 (1.87x) | 31869 (1.26x) | 33516 (1.33x) | |
-| call jsr | `jsr @r6; nop` to a 3-instruction leaf | 17580 | 156016 (8.87x) | 156017 (8.87x) | 76914 (**4.38x**) | 35 / 8 |
-| call bsr | `bsr leaf; nop` | 17580 | 105479 (6.00x) | 96690 (5.50x) | 57139 (**3.25x**) | |
-| call frame | `jsr` to a function that pushes/pops r8, r9, PR | 35159 | 235117 (6.69x) | 235119 (6.69x) | 156016 (**4.44x**) | |
+| kernel | per iteration | native ticks | baseline | + branch chaining | + inline caches | + cheaper calls | host insns / guest insns (now) |
+|---|---|---|---|---|---|---|---|
+| alu | 5 ALU + `dt` + `bf` | 15382 | 27723 (1.80x) | 15390 (**1.00x**) | 15390 | 15388 (**1.00x**) | 7 / 7 |
+| mem mixed | 4 longword, 2 word, 2 byte accesses, 2 ALU, loop | 26369 | 81308 (3.08x) | 72519 (2.75x) | 72519 | 72518 (2.75x) | 37 / 12 |
+| mem copy | 2 post-increment loads, 2 stores, pointer wrap, loop | 29391 | 81033 (2.76x) | 68400 (2.33x) | 68399 | 68398 (2.33x) | |
+| stack | push r1, r2, PR; pop them; loop | 19777 | 90096 (4.56x) | 81309 (4.11x) | 81307 | 81307 (4.11x) | 37 / 9 |
+| branch | 3 data-dependent `bt`/`bf` (half taken), loop | 25270 | 47249 (1.87x) | 31869 (1.26x) | 33516 | 33515 (1.33x) | |
+| call jsr | `jsr @r6; nop` to a 3-instruction leaf | 17580 | 156016 (8.87x) | 156017 (8.87x) | 76914 (4.38x) | 54941 (**3.13x**) | 25 / 8 |
+| call bsr | `bsr leaf; nop` | 17580 | 105479 (6.00x) | 96690 (5.50x) | 57139 (3.25x) | 48349 (**2.75x**) | |
+| call frame | `jsr` to a function that pushes/pops r8, r9, PR | 35159 | 235117 (6.69x) | 235119 (6.69x) | 156016 (4.44x) | 134042 (**3.81x**) | |
 
 **Branch chaining** (done 2026-10-22, `dbt_chain_direct`): when the runtime
 links a direct jump and the target is within the 12-bit `bra` range, the
@@ -279,6 +279,20 @@ pushes a few conditional back edges out of the 8-bit range (`branch` 1.26x ->
 1.33x); the next step there is a 2-word short form when the site's target
 register is not written by the slot.
 
+**Cheaper calls** (done 2026-10-22): when the delay slot does not write
+the target register, `jsr`/`jmp` no longer park the target in X0; the
+inline cache compares the register itself (`META_TARGET_REG` resumes from
+it), with one scratch: `mov.l g,rT; cmp/eq rN,rT; bf; mov.l h,rT; jmp @rT;
+sts Y0,rT` (6). For `jsr` the scratch is the one `set_pr` used, left
+spilled across the slot (not across a helper slot: helpers own Y0), so the
+PR write costs 3 instead of 4 and the cache needs no spill of its own.
+`rts` runs its slot first and reads PR straight into the scratch
+(`META_TARGET_PR`), 10 instructions, no X0 round trip. The old X0-parking
+form remains for `braf`/`bsrf` and for slots that write the target register
+or PR. A `jsr`/`rts` pair is now 3 + 6 + 10 = 19 host instructions
+(was 57 before inline caches); the slot's own scratch may even be the target
+register, since it is restored before the compare.
+
 Measurement pitfalls worth remembering: a timed region must not contain the
 first execution of the code *after* the call (its block gets translated
 inside the region, ~2900 ticks here), and GCC unrolls a two-iteration
@@ -307,9 +321,7 @@ Optimizations, in order of payoff per effort:
 
 1. ~~**Branch chaining**~~ done (above).
 2. ~~**Inline caches for indirect branches**~~ done (above).
-3. **Cheaper PR writes**: `jsr`/`bsr` spend 4 instructions materializing the
-   guest return address; a return-address side table indexed by call site
-   could remove the literal load from the hot path.
+3. ~~**Cheaper PR writes**~~ done (above); `bsr` still pays 4 + the direct jump.
 4. **Spill avoidance for stores** when a dead register is provably available
    (needs liveness across blocks; only after the above).
 

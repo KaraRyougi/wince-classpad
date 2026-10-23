@@ -296,6 +296,59 @@ static void jump_direct(tctx *t, sf_u32 guest_target, sf_u32 avoid, int cond)
 }
 
 /* Jump to the guest address already placed in X0. */
+/* Shared miss tail of the inline caches: X0 must hold the guest target.
+ * rT is a scratch already spilled to Y0 (its record is closed here). */
+static void ic_miss_tail(tctx *t, int rT)
+{
+    emitter *e = &t->em;
+    emit_mov_lit(e, rT, 0, TAG_IC_A);                    /* patched after the pool is placed */
+    emit16(e, op_lds_slot(rT, SLOT_X1));
+    emit_mov_lit(e, rT, t->env->rt_lookup_ic, TAG_NONE);
+    emit16(e, OP_JMP(rT));
+    restore(t, rT, SLOT_Y0);
+}
+
+/* Inline cache comparing guest register `reg` directly (not written between
+ * the branch and here); one scratch, which set_pr may have left spilled in
+ * Y0 (rT_kept) or which is spilled here. Hit: 6 instructions (7 with the
+ * spill). */
+static void jump_indirect_ic_reg(tctx *t, int reg, int rT_kept)
+{
+    emitter *e = &t->em;
+    int rT = rT_kept >= 0 ? rT_kept : pick_scratch(R(reg));
+    if (rT_kept < 0) spill(t, rT, SLOT_Y0);
+    emit_mov_lit(e, rT, 1, TAG_IC_G);
+    emit16(e, OP_CMPEQ_RR(reg, rT));
+    emit16(e, OP_BF(2));
+    emit_mov_lit(e, rT, 0, TAG_IC_H);
+    emit16(e, OP_JMP(rT));
+    emit16(e, op_sts_slot(SLOT_Y0, rT));
+    /* miss */
+    emit16(e, op_lds_slot(reg, SLOT_X0));                /* park the target for the stub */
+    ic_miss_tail(t, rT);
+}
+
+/* Inline cache for rts: the target is PR, read into a scratch. Hit: 10. */
+static void jump_indirect_ic_pr(tctx *t)
+{
+    emitter *e = &t->em;
+    int rT = pick_scratch(0), rU = pick_scratch(R(rT));
+    spill(t, rT, SLOT_Y0);
+    emit16(e, OP_STS_PR(rT));
+    spill(t, rU, SLOT_Y1);
+    emit_mov_lit(e, rU, 1, TAG_IC_G);
+    emit16(e, OP_CMPEQ_RR(rT, rU));
+    emit16(e, OP_BF(3));
+    emit16(e, op_sts_slot(SLOT_Y0, rT));
+    emit_mov_lit(e, rU, 0, TAG_IC_H);
+    emit16(e, OP_JMP(rU));
+    emit16(e, op_sts_slot(SLOT_Y1, rU));
+    /* miss */
+    restore(t, rU, SLOT_Y1);
+    emit16(e, op_lds_slot(rT, SLOT_X0));
+    ic_miss_tail(t, rT);
+}
+
 /* Indirect branch with a per-site inline cache. X0 holds the guest target.
  * Hit (10 instructions): compare it with the cached guest pc and jump to the
  * cached host address. Miss: dbt_lookup_ic with X1 = address of the literal
@@ -342,14 +395,26 @@ static void target_to_x0(tctx *t, int reg, int from_pr, sf_u32 add_const, sf_u32
     }
 }
 
-static void set_pr(tctx *t, sf_u32 value, sf_u32 avoid)
+/* PR = guest return address. With keep, the scratch stays spilled in Y0 for
+ * the caller to reuse (and restore); returns it. */
+static int set_pr(tctx *t, sf_u32 value, sf_u32 avoid, int keep)
 {
     emitter *e = &t->em;
     int rT = pick_scratch(avoid);
     spill(t, rT, SLOT_Y0);
     emit_mov_imm(e, rT, value);
     emit16(e, OP_LDS_PR(rT));
-    restore(t, rT, SLOT_Y0);
+    if (!keep) restore(t, rT, SLOT_Y0);
+    return rT;
+}
+
+static int is_helper(const sh_insn *s) { return s && (s->kind == K_FPU || s->kind == K_FALLBACK); }
+static int slot_writes_pr(const sh_insn *s)
+{
+    if (!s) return 0;
+    if (s->kind == K_PASS && (s->op & 0xF0FFu) == 0x402Au) return 1;           /* lds rm,pr */
+    if (s->kind == K_MEM && s->ctrl == CR_PR && !s->is_store) return 1;        /* lds.l @rm+,pr */
+    return 0;
 }
 
 static void tr_insn(tctx *t, const sh_insn *d, int in_slot);
@@ -393,29 +458,48 @@ static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
         jump_direct(t, target, 0, 0);
         return;
     case BR_BSR:
-        set_pr(t, next, avoid);
+        set_pr(t, next, avoid, 0);
         if (slot) tr_insn(t, slot, 1);
         begin_meta_kind(t, META_TARGET_CONST, goff, target, 0);
         jump_direct(t, target, 0, 0);
         return;
     case BR_BRAF:
     case BR_BSRF:
-        if (d->br == BR_BSRF) set_pr(t, next, avoid | R(d->br_reg));
+        if (d->br == BR_BSRF) set_pr(t, next, avoid | R(d->br_reg), 0);
         indirect_slot(t, slot, d->br_reg, 0, next, avoid | R(d->br_reg), R(d->br_reg));
         begin_meta_kind(t, META_TARGET_X0, goff, 0, 0);
         jump_indirect_ic(t);
         return;
     case BR_JMP:
     case BR_JSR:
-        if (d->br == BR_JSR) set_pr(t, next, avoid | R(d->br_reg));
-        indirect_slot(t, slot, d->br_reg, 0, 0, 0, R(d->br_reg));
-        begin_meta_kind(t, META_TARGET_X0, goff, 0, 0);
-        jump_indirect_ic(t);
+        if (slot && (slot->defs & R(d->br_reg))) {
+            /* slot writes the target register: park the target in X0 first */
+            if (d->br == BR_JSR) set_pr(t, next, avoid | R(d->br_reg), 0);
+            indirect_slot(t, slot, d->br_reg, 0, 0, 0, R(d->br_reg));
+            begin_meta_kind(t, META_TARGET_X0, goff, 0, 0);
+            jump_indirect_ic(t);
+        } else {
+            /* fast form: the inline cache compares the register itself. The
+             * PR scratch stays spilled across the slot unless the slot is a
+             * helper call (helpers own Y0). */
+            int rT = -1;
+            if (d->br == BR_JSR) rT = set_pr(t, next, avoid | R(d->br_reg), !is_helper(slot));
+            if (slot) tr_insn(t, slot, 1);
+            begin_meta_kind(t, META_TARGET_REG, goff, 0, 0);
+            t->cur->fix_reg = (sf_u8)d->br_reg;
+            jump_indirect_ic_reg(t, d->br_reg, rT);
+        }
         return;
     case BR_RTS:
-        indirect_slot(t, slot, -1, 1, 0, avoid, 0);
-        begin_meta_kind(t, META_TARGET_X0, goff, 0, 0);
-        jump_indirect_ic(t);
+        if (slot_writes_pr(slot)) {
+            indirect_slot(t, slot, -1, 1, 0, avoid, 0);
+            begin_meta_kind(t, META_TARGET_X0, goff, 0, 0);
+            jump_indirect_ic(t);
+        } else {
+            if (slot) tr_insn(t, slot, 1);
+            begin_meta_kind(t, META_TARGET_PR, goff, 0, 0);
+            jump_indirect_ic_pr(t);
+        }
         return;
     case BR_RTE: {
         int rT;

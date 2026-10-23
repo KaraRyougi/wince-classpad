@@ -45,6 +45,8 @@ typedef struct {
 enum { META_INSN = 0,        /* guest_pc + guest_off (restart the instruction) */
        META_TARGET_CONST,    /* a branch whose slot has executed: resume at target */
        META_TARGET_X0,       /* same, target is in the X0 slot */
+       META_TARGET_REG,      /* same, target is guest register fix_reg (not written in the range) */
+       META_TARGET_PR,       /* same, target is the guest PR (rts) */
        META_COND,            /* bt/s, bf/s after the slot: SSR.T ? target : fallthrough */
        META_COND_REG,        /* same, but the deciding T bit is bit 0 of r[fix_reg] (slot wrote T) */
        META_RTE };           /* guest rte pending: not resumable */

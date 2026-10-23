@@ -61,10 +61,10 @@ needed: casio-emu runs the translator as an ordinary big-endian add-in.
    store/load/branch-heavy loops). Next: a guest that writes the LCD
    framebuffer.
 3. ~~Measure: translated vs native slowdown.~~ Done 2026-10-22 (docs/04
-   "Performance"). With branch chaining and inline caches (both done): ALU
-   1.0x, branches 1.3x, memory 2.3-2.8x, stack push/pop 4.1x, calls
-   3.3-4.4x. Remaining optimizations: cheaper PR writes, store spill
-   avoidance. Still to do: code-cache pressure with a larger guest.
+   "Performance"). With branch chaining, inline caches and cheaper calls
+   (all done): ALU 1.0x, branches 1.3x, memory 2.3-2.8x, stack push/pop
+   4.1x, calls 2.8-3.8x. Remaining optimization: store spill avoidance.
+   Still to do: code-cache pressure with a larger guest.
 4. Guest image choice (blocked on the user): Pocket PC 2000 SH3 ROM (closed,
    Jornada 540 hardware to emulate in the OAL layer) vs self-built CE 6.0 R3
    SH4 image (Platform Builder + VS2005 in a Windows VM, our own OAL).

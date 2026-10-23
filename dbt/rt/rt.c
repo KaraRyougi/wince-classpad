@@ -325,6 +325,8 @@ static sf_u32 meta_start_pc(const dbt_block *b, int idx, const dbt_gctx *ctx)
     case META_INSN:         return b->guest_pc + m->guest_off;
     case META_TARGET_CONST: return m->target;
     case META_TARGET_X0:    return ctx->slots[SLOT_X0];
+    case META_TARGET_REG:   return ctx->r[m->fix_reg];         /* register not written in the range, never spilled */
+    case META_TARGET_PR:    return ctx->pr;
     case META_COND:         return (ctx->ssr & 1) ? m->target : m->fallthrough;
     case META_COND_REG:     return (ctx->r[m->fix_reg] & 1) ? m->target : m->fallthrough;   /* before the undo */
     default:

@@ -207,21 +207,20 @@ int main(void)
       expect("bsr pr", lit_of_movl(2) == GBASE + 4);
     }
 
-    /* 10. rts ; nop  -> target to X0 before the slot, then lookup */
+    /* 10. rts ; nop -> slot, then the PR inline cache: lds r1,y0; sts pr,r1; lds r2,y1; mov.l g,r2;
+     * cmp/eq r1,r2; bf +3; sts y0,r1; mov.l h,r2; jmp @r2; sts y1,r2; miss: sts y1,r2; lds r1,x0;
+     * mov.l a,r1; lds r1,x1; mov.l lookup_ic,r1; jmp @r1; sts y0,r1 */
     { sf_u32 ops[] = { 0x000B, 0x0009 };
-      sf_u32 exp[] = { LDS_Y0(1), OP_STS_PR(1), LDS_X0(1), STS_Y0(1), 0x0009, LDS_Y0(1) };
+      sf_u32 exp[] = { 0x0009, LDS_Y0(1), OP_STS_PR(1), op_lds_slot(2, SLOT_Y1), 0, OP_CMPEQ_RR(1, 2), OP_BF(3), STS_Y0(1), 0,
+                       OP_JMP(2), op_sts_slot(SLOT_Y1, 2), op_sts_slot(SLOT_Y1, 2), LDS_X0(1), 0, LDS_X1(1), 0, OP_JMP(1), STS_Y0(1) };
       translate(ops, 2, 4);
-      expect_seq("rts", 0, exp, 6);
-      /* inline cache after the slot: w5.. = lds r1,y0; sts x0,r1; lds r2,y1; mov.l g,r2; cmp/eq r1,r2; bf +3;
-       * sts y0,r1; mov.l h,r2; jmp @r2; sts y1,r2; miss: sts y1,r2; mov.l a,r1; lds r1,x1; mov.l lookup_ic,r1; jmp @r1; sts y0,r1 */
-      expect("rts ic hit path", hbuf[6] == STS_X0(1) && hbuf[7] == op_lds_slot(2, SLOT_Y1) && hbuf[9] == OP_CMPEQ_RR(1, 2)
-             && hbuf[10] == OP_BF(3) && hbuf[11] == STS_Y0(1) && hbuf[13] == OP_JMP(2) && hbuf[14] == op_sts_slot(SLOT_Y1, 2));
-      expect("rts ic miss path", hbuf[15] == op_sts_slot(SLOT_Y1, 2) && hbuf[17] == LDS_X1(1) && lit_of_movl(36) == env.rt_lookup_ic
-             && hbuf[19] == OP_JMP(1) && hbuf[20] == STS_Y0(1));
-      expect("rts ic literals", blk.ic_off > 0 && lit_of_movl(16) == 1 && lit_of_movl(24) == 0
-             && lit_of_movl(32) == HBASE + (sf_u32)blk.ic_off && hbuf[blk.ic_off / 2 + 1] == 1 && hbuf[blk.ic_off / 2 + 2] == 0);
-      { dbt_spill sp[4]; int n = dbt_block_pending_spills(&blk, 1, 26, sp, 4);    /* at the jmp of the hit path */
-        expect("rts ic pending", n == 2 && blk.meta[1].kind == META_TARGET_X0); }
+      exp[4] = hbuf[4]; exp[8] = hbuf[8]; exp[13] = hbuf[13]; exp[15] = hbuf[15];
+      expect_seq("rts", 0, exp, 18);
+      expect("rts meta", blk.meta[1].kind == META_TARGET_PR && blk.meta[1].host_off == 2);
+      expect("rts ic literals", blk.ic_off > 0 && lit_of_movl(8) == 1 && lit_of_movl(16) == 0 && lit_of_movl(26) == HBASE + (sf_u32)blk.ic_off
+             && lit_of_movl(30) == env.rt_lookup_ic && hbuf[blk.ic_off / 2 + 1] == 1 && hbuf[blk.ic_off / 2 + 2] == 0);
+      { dbt_spill sp[4]; int n = dbt_block_pending_spills(&blk, 1, 18, sp, 4);    /* at the jmp of the hit path */
+        expect("rts ic pending", n == 2); }
     }
 
     /* 11. jmp @r2 with slot that redefines r2: target captured first */
@@ -232,13 +231,27 @@ int main(void)
       expect("jmp meta", blk.nmeta == 2 && blk.meta[1].kind == META_TARGET_X0 && blk.meta[1].host_off == 4);
     }
 
-    /* 12. jsr @r4 ; nop : PR first, then X0, then the slot */
+    /* 12. jsr @r4 ; nop : PR (scratch kept), slot, inline cache comparing r4 directly */
     { sf_u32 ops[] = { 0x440B, 0x0009 };
-      sf_u32 exp[] = { LDS_Y0(1), 0, OP_LDS_PR(1), STS_Y0(1), LDS_X0(4), 0x0009, LDS_Y0(1) };
+      /* lds r1,y0; mov.l ret,r1; lds r1,pr; nop; mov.l g,r1; cmp/eq r4,r1; bf +2; mov.l h,r1; jmp @r1; sts y0,r1;
+       * miss: lds r4,x0; mov.l a,r1; lds r1,x1; mov.l lookup_ic,r1; jmp @r1; sts y0,r1 */
+      sf_u32 exp[] = { LDS_Y0(1), 0, OP_LDS_PR(1), 0x0009, 0, OP_CMPEQ_RR(4, 1), OP_BF(2), 0, OP_JMP(1), STS_Y0(1),
+                       LDS_X0(4), 0, LDS_X1(1), 0, OP_JMP(1), STS_Y0(1) };
       translate(ops, 2, 4);
-      exp[1] = hbuf[1];
-      expect_seq("jsr", 0, exp, 7);
-      expect("jsr pr", lit_of_movl(2) == GBASE + 4);
+      exp[1] = hbuf[1]; exp[4] = hbuf[4]; exp[7] = hbuf[7]; exp[11] = hbuf[11]; exp[13] = hbuf[13];
+      expect_seq("jsr", 0, exp, 16);
+      expect("jsr pr", lit_of_movl(2) == GBASE + 4 && lit_of_movl(8) == 1 && lit_of_movl(14) == 0 && lit_of_movl(26) == env.rt_lookup_ic);
+      expect("jsr meta", blk.meta[1].kind == META_TARGET_REG && blk.meta[1].fix_reg == 4 && blk.meta[1].host_off == 8);
+      /* r1 (PR scratch) is spilled from 0 to its miss-path restore at 30 */
+      expect("jsr kept scratch", blk.nspills == 1 && blk.spills[0].gpr == 1 && blk.spills[0].slot == SLOT_Y0 && blk.spills[0].start == 0 && blk.spills[0].end == 30);
+    }
+    /* 12b. jmp @r3 ; nop : no PR, 7-instruction hit path */
+    { sf_u32 ops[] = { 0x432B, 0x0009 };
+      translate(ops, 2, 4);
+      /* nop; lds r1,y0; mov.l g,r1; cmp/eq r3,r1; bf +2; mov.l h,r1; jmp @r1; sts y0,r1; miss: lds r3,x0; ... */
+      expect("jmp fast", hbuf[0] == 0x0009 && hbuf[1] == LDS_Y0(1) && hbuf[3] == OP_CMPEQ_RR(3, 1) && hbuf[4] == OP_BF(2)
+             && hbuf[6] == OP_JMP(1) && hbuf[7] == STS_Y0(1) && hbuf[8] == LDS_X0(3) && hbuf[10] == LDS_X1(1)
+             && hbuf[12] == OP_JMP(1) && hbuf[13] == STS_Y0(1) && blk.meta[1].kind == META_TARGET_REG && blk.meta[1].fix_reg == 3);
     }
 
     /* 13. bt +4 (no slot): bf over the jump, block continues */
@@ -317,16 +330,24 @@ int main(void)
       expect("sentinel no commit", blk.meta[4].commit_rel == 0xFF && blk.meta[4].kind == META_INSN);
     }
 
-    /* 20. jsr @r1 ; mov.l r4,@-r15 : the slot store must not touch X0 (the target) */
+    /* 20. jsr @r1 ; mov.l @r15+,r1 : the slot writes the target register, so the
+     * target is parked in X0 first and the slot's scratch slots shift */
+    { sf_u32 ops[] = { 0x410B, 0x61F6 };
+      translate(ops, 2, 2);
+      /* set_pr (4 words: scratch r2 since r1 is the target), lds r1,x0, then the load (commit, swaps) */
+      expect("jsr slot target first", hbuf[4] == LDS_X0(1) && hbuf[5] == 0x61F6);
+      expect("jsr slot commit", blk.meta[0].commit_rel == 10 && blk.meta[0].fix_kind == FIX_SWAP32 && blk.meta[0].fix_reg == 1
+             && blk.meta[1].kind == META_TARGET_X0 && blk.meta[1].host_off == 18);
+    }
+    /* 20b. jsr @r1 ; mov.l r4,@-r15 : slot does not write r1: fast form, slot keeps the normal spill slots,
+     * and the PR scratch (r2) stays spilled in Y0 across the slot */
     { sf_u32 ops[] = { 0x410B, 0x2F46 };
       translate(ops, 2, 2);
-      /* set_pr (4 words), lds r1,x0, then the store with its scratch in X1 */
-      expect("jsr slot target first", hbuf[4] == LDS_X0(1));
-      expect("jsr slot spill shifted", hbuf[5] == LDS_X1(1) && hbuf[9] == 0x2F16 && hbuf[10] == STS_X1(1));
-      expect("jsr slot commit", blk.meta[0].commit_rel == 18 && blk.meta[1].kind == META_TARGET_X0 && blk.meta[1].host_off == 22);
-      { dbt_spill sp[4];
-        expect("jsr slot pending@store", dbt_block_pending_spills(&blk, 0, 20, sp, 4) == 1 && sp[0].slot == SLOT_X1 && sp[0].gpr == 1);
-      }
+      /* the store's scratch is r1, the target register itself: legal, it is restored before the compare */
+      expect("jsr fast slot store", hbuf[0] == LDS_Y0(2) && hbuf[2] == OP_LDS_PR(2) && hbuf[3] == LDS_X0(1) && hbuf[7] == 0x2F16 && hbuf[8] == STS_X0(1)
+             && blk.meta[1].kind == META_TARGET_REG && blk.meta[1].fix_reg == 1 && blk.meta[1].host_off == 18);
+      { dbt_spill sp[4]; int n = dbt_block_pending_spills(&blk, 0, 14, sp, 4);   /* at the store: r1 (X0) and r2 (Y0) open, latest first */
+        expect("jsr fast pending", n == 2 && sp[0].gpr == 1 && sp[0].slot == SLOT_X0 && sp[1].gpr == 2 && sp[1].slot == SLOT_Y0); }
     }
 
     /* 21. rts ; fmov.s @r4+,fr0 : helper call first, target capture afterwards */
@@ -337,8 +358,8 @@ int main(void)
           if (jmp_at < 0 && (hbuf[i] & 0xF0FF) == 0x402B) jmp_at = i;          /* jmp @rT (helper) */
           if (stspr_at < 0 && (hbuf[i] & 0xF0FF) == 0x002A) stspr_at = i;      /* sts pr,rT */
       }
-      expect("rts helper slot order", jmp_at >= 0 && stspr_at > jmp_at && hbuf[stspr_at + 1] == LDS_X0((hbuf[stspr_at] >> 8) & 0xF));
-      expect("rts helper slot no commit", blk.meta[0].commit_rel == 0xFF && blk.meta[1].kind == META_TARGET_X0);
+      expect("rts helper slot order", jmp_at >= 0 && stspr_at > jmp_at && hbuf[stspr_at + 1] == op_lds_slot(2, SLOT_Y1));
+      expect("rts helper slot no commit", blk.meta[0].commit_rel == 0xFF && blk.meta[1].kind == META_TARGET_PR);
     }
 
     /* 22. jsr @r1 ; fmov.s @r1+,fr0 : helper slot writing the target register is rejected */
