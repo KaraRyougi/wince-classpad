@@ -11,3 +11,6 @@ __pycache__/
 fpuemu/tests/test_host
 dbt/tests/test_translate
 dbt/build/
+notes/ce/*
+!notes/ce/*.md
+!notes/ce/*.txt

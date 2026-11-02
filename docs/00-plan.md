@@ -49,7 +49,7 @@ needed: casio-emu runs the translator as an ordinary big-endian add-in.
   stubs, exception vectors, FPU/mac helpers, hypercall console), a `.g3a`
   launcher and three little-endian test guests. As of 2026-10-22 all three
   guests pass in casio-emu (with `dbt/emu-patch` applied to the emulator).
-- Docs 01-05: hardware facts, FPU emulation design, boot/image notes, DBT design, CE image/OAL plan.
+- Docs 01-06: hardware facts, FPU emulation design, boot/image notes, DBT design, CE image/OAL plan, Platform Builder post-install steps.
 
 ## Milestones (route D)
 
