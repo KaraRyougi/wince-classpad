@@ -39,6 +39,10 @@ typedef struct {
      * code that reaches device registers directly, i.e. the CE kernel.dll;
      * our own code uses pre-swapped accessors instead. 0,0 = off. */
     sf_u32 dev_lo, dev_hi;
+    /* Execution trace (-DDBT_TRACE_EXEC): every block starts by appending
+     * its guest pc to a 64 KiB ring. exec_ctl = address of the byte index
+     * (16-bit wrap), exec_ring = the ring. 0 = off. */
+    sf_u32 exec_ctl, exec_ring;
 } dbt_env;
 
 typedef struct {

@@ -709,6 +709,28 @@ static void tr_priv(tctx *t, const sh_insn *d)
     }
 }
 
+/* --------------------------------------------------------- exec trace */
+
+/* Block entry record for the execution trace: ring[idx] = guest pc,
+ * idx = (idx + 4) & 0xFFFF. Part of the first instruction's range, so an
+ * exception inside just repeats the record. 13 instructions. */
+static void trace_prologue(tctx *t)
+{
+    emitter *e = &t->em;
+    int rT = pick_scratch(0), rU = pick_scratch(R(rT));
+    spill(t, rT, SA(t)); spill(t, rU, SB(t));
+    emit_mov_lit(e, rT, t->env->exec_ctl, TAG_NONE);
+    emit16(e, OP_MOVL_LOAD(rT, rU));
+    emit16(e, OP_ADD_IMM(4, rU));
+    emit16(e, OP_EXTUW(rU, rU));
+    emit16(e, OP_MOVL_STORE(rU, rT));
+    emit_mov_lit(e, rT, t->env->exec_ring, TAG_NONE);
+    emit16(e, OP_ADD_RR(rU, rT));
+    emit_mov_lit(e, rU, t->blk->guest_pc, TAG_NONE);
+    emit16(e, OP_MOVL_STORE(rU, rT));
+    restore(t, rU, SB(t)); restore(t, rT, SA(t));
+}
+
 /* ------------------------------------------------------------- dispatcher */
 
 static void tr_insn(tctx *t, const sh_insn *d, int in_slot)
@@ -779,6 +801,7 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
         t.gpc = gpc;
         if (!fetch(&t, gpc, &d)) break;
         begin_meta(&t, gpc - guest_pc);
+        if (n == 0 && env->exec_ring) trace_prologue(&t);
         n++;
         if (d.kind == K_BRANCH) {
             const sh_insn *slot = 0;

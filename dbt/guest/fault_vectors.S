@@ -18,10 +18,16 @@ _guest_vectors:
 1:      sts.l   pr, @-r15
         sts.l   mach, @-r15
         sts.l   macl, @-r15
+        stc.l   spc, @-r15             /* so the handler may clear BL (and print) */
+        stc.l   ssr, @-r15
         sts     pr, r1
         mov.l   .Lfault_pr, r2
         mov.l   r1, @r2
         stc     spc, r5
+        stc     sr, r1
+        mov.l   .Lnotbl, r2
+        and     r2, r1
+        ldc     r1, sr                 /* BL=0: hypercalls allowed in the handler */
         mov.l   .Lexpevt, r6
         mov.l   @r6, r6
         swap.b  r6, r6                 /* post-swap the MMIO reads */
@@ -35,9 +41,16 @@ _guest_vectors:
         mov.l   .Lhandler, r1
         jsr     @r1
         nop
-        tst     r0, r0
+        mov     r0, r3
+        stc     sr, r1
+        mov.l   .Lbl, r2
+        or      r2, r1
+        ldc     r1, sr                 /* BL=1 again before touching SPC/SSR */
+        ldc.l   @r15+, ssr
+        ldc.l   @r15+, spc
+        tst     r3, r3
         bt      2f
-        ldc     r0, spc
+        ldc     r3, spc
 2:      lds.l   @r15+, macl
         lds.l   @r15+, mach
         lds.l   @r15+, pr
@@ -48,3 +61,5 @@ _guest_vectors:
 .Ltea:      .long 0xFF00000C
 .Lhandler:  .long _guest_fault
 .Lfault_pr: .long _fault_pr
+.Lnotbl:    .long 0xEFFFFFFF
+.Lbl:       .long 0x10000000

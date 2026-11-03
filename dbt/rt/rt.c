@@ -327,11 +327,51 @@ void dbt_dbgring_drain(void)
     g_dbgring[1] = bswap32(g_dbgring_rd);
 }
 
+/* ------------------------------------------------------------ exec trace
+ * -DDBT_TRACE_EXEC: translated blocks record their guest pc in a ring (see
+ * trace_prologue in translate.c); the last entries are printed when the
+ * guest's debug output contains DBT_WATCH (default "DEBUGCHK"), at a halt,
+ * and on request. Guest pcs only; tools/cesym.py maps them to symbols. */
+#ifdef DBT_TRACE_EXEC
+#ifndef DBT_WATCH
+#define DBT_WATCH "DEBUGCHK"
+#endif
+static sf_u32 g_exec_ctl;                                   /* byte index into the ring */
+static sf_u8 g_exec_ring[65536] __attribute__((aligned(4)));
+static const char g_watch[] = DBT_WATCH;
+static unsigned g_watch_pos;
+
+void dbt_exec_dump(unsigned n)
+{
+    unsigned i, idx = g_exec_ctl;
+    dbt_puts("[dbt] exec trace, oldest first ("); dbt_puthex(n); dbt_puts(" entries):\n");
+    for (i = n; i > 0; i--) {
+        sf_u32 at = (idx - 4u * i) & 0xFFFFu;
+        sf_u32 pc = *(volatile sf_u32 *)(g_exec_ring + at);
+        dbt_puts("[dbt] exec "); dbt_puthex(pc); dbt_puts("\n");
+    }
+}
+
+static void watch_char(int c)
+{
+    if ((char)c == g_watch[g_watch_pos]) {
+        if (!g_watch[++g_watch_pos]) {
+            g_watch_pos = 0;
+            dbt_puts("\n[dbt] watch string seen\n");
+            dbt_exec_dump(512);
+        }
+    } else g_watch_pos = ((char)c == g_watch[0]) ? 1 : 0;
+}
+#endif
+
 void dbt_rt_init(const dbt_rt_config *cfg)
 {
     g_cfg = *cfg;
     memset(&dbt_stat, 0, sizeof dbt_stat);
     dbgring_init();
+#ifdef DBT_TRACE_EXEC
+    g_env.exec_ctl = (sf_u32)&g_exec_ctl; g_env.exec_ring = (sf_u32)g_exec_ring;
+#endif
     cache_flush_all();
     fpuemu_reset(&g_fpu);
     memset(&g_env, 0, sizeof g_env);
