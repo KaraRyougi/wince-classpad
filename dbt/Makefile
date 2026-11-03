@@ -50,7 +50,7 @@ define NK_PAD
 python3 -c 'import sys;d=open(sys.argv[1],"rb").read();open(sys.argv[2],"wb").write(d+b"\0"*(-len(d)%4))' $(NKBIN) $(NK_PADDED)
 endef
 
-.PHONY: all clean run nkrun screenshot disasm
+.PHONY: all clean run nkrun nkshot screenshot disasm
 
 IMG := $(BUILD)/dbt-$(GUEST)
 
@@ -121,6 +121,12 @@ nkrun: $(IMG).g3a $(BUILD)/$(GUEST).nk.bin
 
 # run headless with the emulator dumping the presented frame (PPM) and convert the
 # last one to $(IMG).png; HLE_FORCE_R61524 presents the LCD controller's pixels
+# nkshot: the same for a CE image (NKBIN=..., RUN_SECS=n) -> build/nk.png
+nkshot: $(IMG).g3a
+	$(if $(NKBIN),$(NK_PAD))
+	-$(EMU_ENV) $(NK_ENV) HLE_FBDUMP=$(abspath $(BUILD)/nk.ppm) HLE_FORCE_R61524=1 $(EMU)/run-headless.sh $(abspath $(IMG).g3a) $(RUN_SECS)
+	python3 ../tools/ppm2png.py $(BUILD)/nk.ppm $(BUILD)/nk.png
+
 screenshot: $(IMG).g3a
 	-$(EMU_ENV) HLE_FBDUMP=$(abspath $(IMG).ppm) HLE_FORCE_R61524=1 $(EMU)/run-headless.sh $(abspath $(IMG).g3a) 25
 	python3 ../tools/ppm2png.py $(IMG).ppm $(IMG).png

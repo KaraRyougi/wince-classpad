@@ -232,4 +232,8 @@ What the kernel sources settled (2026-11-02, notes/ce/kernel-sh-notes.md):
 5. Memory: ~~compact block metadata; move the translator region down and
    widen the guest window~~ (done, 11.5 MiB guest window); move to ROMIMAGE
    in flash.
-6. Display driver and keyboard; GWES image.
+6. Display driver (written 2026-11-03: `bsp/classpad/SRC/DRIVERS/DISPLAY`,
+   GPE with a RAM frame buffer and a push thread to the R61524; a hello
+   window app; registry and bib entries; `make nkshot` for a screenshot of
+   a CE image) - needs a GWES OS design built in the VM, untested until
+   then. Then keyboard and touch.

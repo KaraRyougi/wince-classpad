@@ -1,2 +1,4 @@
 DIRS=\
-    oal
+    oal \
+    drivers \
+    apps

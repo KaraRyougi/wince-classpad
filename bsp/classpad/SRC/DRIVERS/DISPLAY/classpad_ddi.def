@@ -1,0 +1,6 @@
+LIBRARY classpad_ddi
+
+EXPORTS
+    DisplayInit
+    DrvEnableDriver
+    DrvGetMasks

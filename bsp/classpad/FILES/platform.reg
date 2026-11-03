@@ -6,3 +6,18 @@
    "Type"=dword:4
 
 ; Device drivers are added here as they are written (display, keyboard, touch).
+
+; Display: the GPE driver pushes a RAM frame buffer to the R61524 (SRC\DRIVERS\DISPLAY)
+; @CESYSGEN IF CE_MODULES_DISPLAY
+[HKEY_LOCAL_MACHINE\System\GDI\Drivers]
+    "Display"="classpad_ddi.dll"
+
+[HKEY_LOCAL_MACHINE\Drivers\Display\ClassPad]
+    "Width"=dword:180
+    "Height"=dword:D8
+
+; the first window, after GWES (Launch30)
+[HKEY_LOCAL_MACHINE\init]
+    "Launch60"="classpad_hello.exe"
+    "Depend60"=hex:1e,00
+; @CESYSGEN ENDIF CE_MODULES_DISPLAY

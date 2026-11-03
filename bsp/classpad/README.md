@@ -39,6 +39,27 @@ and "CLASSPAD OAL: first idle" (OEMIdle's first call: every boot thread is
 blocked). The Debug image prints the kernel's and filesys' messages as
 well, at about the same boot time under the translator.
 
+## Display: GWES image
+
+`SRC\DRIVERS\DISPLAY` is a GPE display driver (`classpad_ddi.dll`): GDI draws
+into a RAM frame buffer, a thread pushes the dirty rows to the R61524 through
+its 16-bit data port (the `lcd` guest's protocol; geometry in
+`SRC\INC\classpad_lcd.h`, 384x216 for the emulated fx-CG100 panel).
+`SRC\APPS\HELLO` is the first window (colour bars, frame, counter), launched
+from HKLM\init after GWES. Both are built with the BSP and go into the image
+only when GWES is in the OS design (`CE_MODULES_DISPLAY`).
+
+To get them: in the Catalog Items View add, under Core OS > CEBASE > Shell
+and User Interface > Graphics, Windowing and Events, "Minimal GDI
+Configuration", "Minimal GWES Configuration", "Minimal Input Configuration"
+and "Minimal Window Manager Configuration" (plus a font, Core OS > CEBASE >
+Fonts > Tahoma, so DrawText has something to draw with). Then Build >
+Advanced Build Commands > Sysgen (the catalog changed), Build Current BSP
+and Subprojects, Copy Files to Release Directory, Make Run-Time Image. On
+the Mac `make -C dbt NKBIN=/abs/NK.bin RUN_SECS=300 nkshot` runs the image
+with the emulator dumping the last meaningful frame to `dbt/build/nk.png`;
+the console shows "CLASSPAD DDI: ..." and "CLASSPAD HELLO: ..." on the way.
+
 ## What the files are
 
 - `SRC\OAL\OALLIB\startup.src`: `StartUp` (image entry: SR, VBR, jump to
