@@ -125,7 +125,7 @@ byte-swapped by the guest, bytes are not), since the translator swaps every
 |---|---|---|
 | `StartUp` (image entry) | sets SR, clears BSS, jumps to `KernelStart` | same; SR writes go through the translator's `ldc sr` helper, VBR to the shadow VBR. Must not rely on reset-time MMU state: start with MMUCR=0, flush TLB |
 | System timer (1 ms tick) | TMU0 at `0xFFD80000` | TMU0 at `0xA4490004` (TSTR), `0xA4490008` TCOR0, `0xA449000C` TCNT0, `0xA4490010` TCR0; input Pphi/4; Pphi ~29.49 MHz -> TCOR0 = 7372. Interrupt INTEVT `0x400`, IPRA bits 15:12, unmask IMR4 bit 4 (`IMCR4 = 0x10` at `0xA40800D0`). Verified by the `tmu` guest. |
-| INTC (IRQ -> SYSINTR) | IPR at `0xFFD00004`, INTEVT codes | IPR0..IPR11 at `0xA4080000`+2n, IMR0..12 at `0xA4080080`+4n, IMCR at `0xA40800C0`+4n (gint `intc.h`); `OEMInterruptEnable/Disable/Done` toggle the IMR bits; INTEVT at `0xFF000028`. The kernel's interrupt handler reads INTEVT and dispatches through the OAL's `ISR` table. |
+| INTC (IRQ -> SYSINTR) | IPR at `0xFFD00004`, INTEVT codes | IPRA..IPRL at `0xA4080000`+4n (16-bit; the first OAL draft had +2n, which only TMU0 in IPRA survived), IMR0..12 at `0xA4080080`+4n, IMCR at `0xA40800C0`+4n (gint `intc.h`); `OEMInterruptEnable/Disable/Done` toggle the IMR bits; INTEVT at `0xFF000028`. The kernel's interrupt handler reads INTEVT and dispatches through the OAL's `ISR` table. |
 | `OEMIdle` | `sleep` | `sleep` works under the translator (tmu guest) |
 | RTC (`OEMGetRealTime`) | SH7750 RTC at `0xFFC80000` | SH7305 RTC at `0xA413FEC0` (gint `rtc.h`), BCD registers; emulator models it |
 | Cache (`OEMCacheRangeFlush`) | SH4 `ocbwb`/`ocbp`/`icbi` | same instructions pass through, **plus** hypercall `trapa #0xF2` (flush range) so the translator drops translated blocks for code the kernel just loaded or modified. Without this, a DLL loaded over the address of an earlier one runs stale translations. |
@@ -134,7 +134,7 @@ byte-swapped by the guest, bytes are not), since the translator swaps every
 | `OEMIoControl` | board info, device ID, UUID | minimal: `IOCTL_HAL_GET_DEVICE_INFO` with a fixed name, `IOCTL_HAL_INIT_RTC` |
 | Memory map | `OEMAddressTable` (ARM/MIPS style) not used on SH4; RAM from config.bib | `MainMemoryEndAddress` from config.bib; no extension DRAM |
 | Display | none headless | later: the display driver pushes a 16-bit frame buffer to the R61524 (`lcd` guest shows the protocol); ClassPad's 320x528 panel to be investigated |
-| Keyboard, touch | none headless | later: SH7305 KEYSC / ADC; emulator models the key matrix |
+| Keyboard, touch | none headless | written 2026-11-03: `SRC\DRIVERS\KEYBD` (Layout Manager + KEYSC matrix PDD, `kbdmouse.dll`) and `SRC\DRIVERS\TOUCH` (touch MDD + the fx-CP400 sensor on IIC0, `touch.dll`); the panel is an I2C sensor in casio-emu, not an ADC input. Details in `bsp/classpad/README.md` |
 
 Translator-side items the OAL work depends on:
 
@@ -240,5 +240,29 @@ What the kernel sources settled (2026-11-02, notes/ce/kernel-sh-notes.md):
    `Driver_t`: the kernel refused the driver's 65 KB data copy for low
    memory, the RAM file system having half of the 9 MiB RAM (block trace
    in `notes/ce/stock-run.txt`); `config.bib` now gives it 12.5%
-   (`FSRAMPERCENT=20202020`), to be verified with a remade image. Keyboard
-   and touch are being written in their own session.
+   (`FSRAMPERCENT=20202020`), to be verified with a remade image.
+7. Keyboard and touch (written 2026-11-03, not yet compiled):
+   `SRC\DRIVERS\KEYBD` is the Layout Manager MDD with a PDD that programs
+   the SH7305 KEYSC like the fx-CG100 OS does, requests a SYSINTR for its
+   interrupt (INTEVT 0xBE0 is vector 95, beyond the common OAL's 64-entry
+   IRQ map, so the OAL hooks the vector and the driver uses logical IRQ 48)
+   and diffs the six KIUDATA words in an IST woken by the interrupt and a
+   20 ms poll (the emulator drops an edge raised while the source is
+   masked). Scan code = 8 * row + column; two device layouts (fx-CG100 and
+   fx-CP400 keypads, registry `Matrix`). `SRC\DRIVERS\TOUCH` is the touch
+   MDD with a DDSI layer for the fx-CP400 panel as casio-emu models it: a
+   sensor on IIC0 (address 0x40, command 0x84 returns x, y, contact), the
+   contact line on Port R bit 5 and INTEVT 0x700 on the down edge; samples
+   while pressed come from the MDD's IST timeout; `CalibrationData` in
+   platform.reg is computed from the emulator's stylus mapping for 320x528.
+   The touch driver only touches the bus when a panel is present (registry
+   `Panel`, else a display with 528 rows), because the fx-CG100 profile
+   does not emulate IIC0. casio-emu cannot run the translator image on its
+   ClassPad profile (that profile only cold-boots the real OS from a 64 MiB
+   NOR image, `src/gui/sdl/runtime_paths.c`), so the keyboard is verified
+   on the fx-CG100 with the emulator's key injection
+   (`HLE_CB_KEYSWEEP`, `bsp/classpad/README.md`) and the touch driver stays
+   unverified until the ClassPad profile can start an add-in or the real
+   device runs. `hello.c` logs key and touch events on screen and on the
+   console. The OS design needs "Touch Screen (Stylus)" (SYSGEN_TOUCH) for
+   touch.dll; the keyboard MDD comes with Minimal Input.

@@ -1,13 +1,21 @@
 ;-------------------------------------------------------------------------------
 ; CLASSPAD platform.bib: the display driver and the hello window when GWES is
-; in the OS design; KEYSC keyboard and touch come later.
+; in the OS design, the KEYSC keyboard with the keyboard MDD, the touch
+; driver with the touch (pointer) component.
 ;-------------------------------------------------------------------------------
 MODULES
+;;  Name            Path                                            Memory Type
+;;  --------------- ----------------------------------------------- -----------
 ; @CESYSGEN IF CE_MODULES_DISPLAY
    classpad_ddi.dll     $(_FLATRELEASEDIR)\classpad_ddi.dll     NK  SHK
    classpad_hello.exe   $(_FLATRELEASEDIR)\classpad_hello.exe   NK  S
 ; @CESYSGEN ENDIF CE_MODULES_DISPLAY
-;;  Name            Path                                            Memory Type
-;;  --------------- ----------------------------------------------- -----------
+; @CESYSGEN IF CE_MODULES_KEYBD
+   kbdmouse.dll         $(_FLATRELEASEDIR)\classpad_kbd.dll     NK  SHK
+; @CESYSGEN ENDIF CE_MODULES_KEYBD
+; @CESYSGEN IF CE_MODULES_POINTER
+   k.touch.dll          $(_FLATRELEASEDIR)\classpad_touch.dll   NK  SHK
+   touch.dll            $(_FLATRELEASEDIR)\classpad_touch.dll   NK  SH
+; @CESYSGEN ENDIF CE_MODULES_POINTER
 
 FILES

@@ -1,0 +1,22 @@
+!if 0
+kbdmouse.dll (built as classpad_kbd.dll) - the ClassPad keyboard driver:
+Layout Manager MDD (layoutmanager.lib) + the US input language + a PDD that
+scans the SH7305 KEYSC matrix (kbd_pdd.cpp) and the device layouts that map
+its scan codes to virtual keys (kbd_layout.cpp).
+!endif
+TARGETNAME=classpad_kbd
+TARGETTYPE=DYNLINK
+RELEASETYPE=PLATFORM
+WINCEOEM=1
+SYNCHRONIZE_DRAIN=1
+DEFFILE=classpad_kbd.def
+DLLENTRY=_DllMainCRTStartup
+INCLUDES=$(INCLUDES);$(_TARGETPLATROOT)\src\inc
+TARGETLIBS= \
+    $(_COMMONSDKROOT)\lib\$(_CPUINDPATH)\coredll.lib
+SOURCELIBS= \
+    $(_COMMONOAKROOT)\lib\$(_CPUINDPATH)\layoutmanager.lib \
+    $(_COMMONOAKROOT)\lib\$(_CPUINDPATH)\inputlang_0409.lib
+SOURCES= \
+    kbd_pdd.cpp \
+    kbd_layout.cpp

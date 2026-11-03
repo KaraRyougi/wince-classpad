@@ -1,0 +1,23 @@
+!if 0
+touch.dll (built as classpad_touch.dll) - the ClassPad touch panel driver:
+the common touch MDD and calibration (tchmdd.lib, tch_cal.lib) plus the DDSI
+layer that reads the fx-CP400 sensor on IIC0 (classpad_touch.cpp). The
+exports come from the public touch.def, like the DeviceEmulator BSP.
+!endif
+TARGETNAME=classpad_touch
+TARGETTYPE=DYNLINK
+RELEASETYPE=PLATFORM
+WINCEOEM=1
+SYNCHRONIZE_DRAIN=1
+DLLENTRY=_DllMainCRTStartup
+TARGETDEFNAME=touch
+DEFFILE=$(_PROJECTROOT)\cesysgen\oak\inc\$(TARGETDEFNAME).def
+PREPROCESSDEFFILE=1
+INCLUDES=$(INCLUDES);$(_TARGETPLATROOT)\src\inc
+SOURCELIBS= \
+    $(_COMMONOAKROOT)\lib\$(_CPUINDPATH)\tch_cal.lib \
+    $(_COMMONOAKROOT)\lib\$(_CPUINDPATH)\tchmdd.lib
+TARGETLIBS= \
+    $(_COMMONSDKROOT)\lib\$(_CPUINDPATH)\coredll.lib
+SOURCES= \
+    classpad_touch.cpp

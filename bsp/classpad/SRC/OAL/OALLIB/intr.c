@@ -1,9 +1,12 @@
 //------------------------------------------------------------------------------
 //  intr.c - SH7305 interrupt controller for the common OAL interrupt module
 //
-//  IRQ numbers are (INTEVT - 0x200) / 0x20, which is also the kernel's ISR
-//  table index (HookInterrupt). The INTC has per-source priority fields
-//  (IPRx) and per-source mask bits (IMRx, cleared through IMCRx).
+//  Vectors are (INTEVT - 0x200) / 0x20, which is also the kernel's ISR table
+//  index (HookInterrupt). The INTC has per-source priority fields (IPRx) and
+//  per-source mask bits (IMRx, cleared through IMCRx). The common OAL maps
+//  IRQ <-> SYSINTR through 64-entry tables, so a source with a vector of 64
+//  or more (KEYSC, 95) has a logical IRQ number below 64 (intr_cfg.h): the
+//  ISR is hooked at the vector and translates the logical number.
 //------------------------------------------------------------------------------
 #include <bsp.h>
 
@@ -11,13 +14,15 @@
 #define IntrPrio g_pNKGlobal->IntrPrio
 #endif
 
-// IRQ -> IMR register index and bit (TMU only for now; KEYSC, RTC, USB later)
+// logical IRQ -> IMR register index and bit
 typedef struct { UINT32 irq; UINT32 imr; UINT8 bit; } CLASSPAD_IRQ_MASK;
 
 static const CLASSPAD_IRQ_MASK g_irqMask[] = {
-    { EXCEPTIONCODETOIRQ(0x400), 4, INTC_IMR4_TMU0 },
-    { EXCEPTIONCODETOIRQ(0x420), 4, INTC_IMR4_TMU1 },
-    { EXCEPTIONCODETOIRQ(0x440), 4, INTC_IMR4_TMU2 },
+    { IRQ_TMU0_TUNI0, 4, INTC_IMR4_TMU0 },
+    { IRQ_TMU1_TUNI1, 4, INTC_IMR4_TMU1 },
+    { IRQ_TMU2_TUNI2, 4, INTC_IMR4_TMU2 },
+    { IRQ_KEYSC,      5, INTC_IMR5_KEYSC },
+    { IRQ_TOUCH_PEN,  3, INTC_IMR3_TOUCH },
 };
 
 static const CLASSPAD_IRQ_MASK *FindMask(UINT32 irq)
@@ -41,19 +46,51 @@ BOOL HookAndSetPriority(int hwIntNumber, FARPROC pfnHandler, BYTE intrPrio)
 }
 
 //------------------------------------------------------------------------------
+//  Device ISRs: level sources stay masked until the IST's InterruptDone
+//  (OALIntrDoneIrqs) and the kernel gets the SYSINTR the driver requested.
+//
+static UINT32 DeviceIntrHandler(UINT32 imr, UINT8 bit, UINT32 irq)
+{
+    UINT32 sysIntr;
+    MMIO_W8(INTC_IMR(imr), bit);
+    sysIntr = OALIntrTranslateIrq(irq);
+    return (sysIntr == SYSINTR_UNDEFINED) ? SYSINTR_NOP : sysIntr;
+}
+
+static UINT32 KeyscIntrHandler(void)
+{
+    return DeviceIntrHandler(5, INTC_IMR5_KEYSC, IRQ_KEYSC);
+}
+
+static UINT32 TouchIntrHandler(void)
+{
+    return DeviceIntrHandler(3, INTC_IMR3_TOUCH, IRQ_TOUCH_PEN);
+}
+
+//------------------------------------------------------------------------------
 BOOL OALIntrInit()
 {
     OALMSG(OAL_INTR && OAL_FUNC, (L"+OALIntrInit()\r\n"));
 
     OALIntrMapInit();
 
-    // Mask the timer sources until the timer code enables them, then give
-    // TMU0 its priority. The kernel masks SR.IMASK to the same level while
-    // the ISR runs (IntrPrio).
+    // Mask every source the OAL knows until its driver enables it, then
+    // give each its priority. The kernel masks SR.IMASK to the same level
+    // while the ISR runs (IntrPrio), so IPR and IntrPrio must agree.
     MMIO_W8(INTC_IMR(4), INTC_IMR4_TMU0 | INTC_IMR4_TMU1 | INTC_IMR4_TMU2);
+    MMIO_W8(INTC_IMR(5), INTC_IMR5_KEYSC);
+    MMIO_W8(INTC_IMR(3), INTC_IMR3_TOUCH);
     MMIO_W16(INTC_IPRA, (MMIO_R16(INTC_IPRA) & 0x0FFF) | (IRQ_TMU0_PRIORITY << 12));
+    MMIO_W16(INTC_IPRF, (MMIO_R16(INTC_IPRF) & 0x0FFF) | (IRQ_KEYSC_PRIORITY << 12));
+    MMIO_W16(INTC_IPRB, (MMIO_R16(INTC_IPRB) & 0xFF0F) | (IRQ_TOUCH_PRIORITY << 4));
 
     if (!HookAndSetPriority(IRQ_TMU0_TUNI0, (FARPROC)OALTimerIntrHandler, IRQ_TMU0_PRIORITY)) {
+        return FALSE;
+    }
+    if (!HookAndSetPriority(VEC_KEYSC, (FARPROC)KeyscIntrHandler, IRQ_KEYSC_PRIORITY)) {
+        return FALSE;
+    }
+    if (!HookAndSetPriority(IRQ_TOUCH_PEN, (FARPROC)TouchIntrHandler, IRQ_TOUCH_PRIORITY)) {
         return FALSE;
     }
 

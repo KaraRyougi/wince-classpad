@@ -5,8 +5,6 @@
    "Name"="Casio ClassPad (SH7305)"
    "Type"=dword:4
 
-; Device drivers are added here as they are written (display, keyboard, touch).
-
 ; Display: the GPE driver pushes a RAM frame buffer to the R61524 (SRC\DRIVERS\DISPLAY)
 ; @CESYSGEN IF CE_MODULES_DISPLAY
 [HKEY_LOCAL_MACHINE\System\GDI\Drivers]
@@ -21,3 +19,43 @@
     "Launch60"="classpad_hello.exe"
     "Depend60"=hex:1e,00
 ; @CESYSGEN ENDIF CE_MODULES_DISPLAY
+
+; Keyboard: Layout Manager + KEYSC matrix PDD in kbdmouse.dll (SRC\DRIVERS\KEYBD).
+; "Matrix" selects the key table: 0 = fx-CG100 keypad (what casio-emu runs
+; the translator on), 1 = fx-CP400 keypad. "PollMs" is the matrix poll
+; between interrupts, "Priority256" the IST priority.
+; @CESYSGEN IF CE_MODULES_KEYBD
+[HKEY_LOCAL_MACHINE\HARDWARE\DEVICEMAP\KEYBD]
+    "DriverName"="kbdmouse.dll"
+    "Matrix"=dword:0
+    "PollMs"=dword:14
+    "Priority256"=dword:91
+
+; the device layout of the "ClassPad" PDD and the US layout live in the same DLL
+[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Layouts\00000409]
+    "Layout File"="kbdmouse.dll"
+    "Layout Text"="US"
+    "ClassPad"="kbdmouse.dll"
+
+[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Layouts\e0010409]
+    "Keyboard Layout"="00000409"
+
+[HKEY_CURRENT_USER\Keyboard Layout\Preload]
+    @="00000409"
+
+[HKEY_CURRENT_USER\Keyboard Layout\Preload\1]
+    @="00000409"
+; @CESYSGEN ENDIF CE_MODULES_KEYBD
+
+; Touch: touch MDD + the IIC0 sensor DDSI in touch.dll (SRC\DRIVERS\TOUCH).
+; "Panel": 1 = fx-CP400 sensor present, 0 = none; absent = decided by the
+; display height (528 rows = fx-CP400). CalibrationData: the raw sensor
+; values of the MDD's five calibration points (centre, then the four
+; corners inset by a tenth) for the 320x528 screen, from casio-emu's stylus
+; mapping raw = 0x20B + x*0x9B6/256, 0xF4 + y*0x66F/256 (classpad_touch.h).
+; @CESYSGEN IF CE_MODULES_POINTER
+[HKEY_LOCAL_MACHINE\HARDWARE\DEVICEMAP\TOUCH]
+    "DriverName"="touch.dll"
+    "MaxCalError"=dword:7
+    "CalibrationData"="2076,1942 833,578 833,3306 3319,3306 3319,578 "
+; @CESYSGEN ENDIF CE_MODULES_POINTER

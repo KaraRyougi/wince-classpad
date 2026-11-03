@@ -4,8 +4,8 @@ Headless kernel-only BSP for the SH7305 calculators (fx-CP400, fx-CG50,
 fx-CG100) running under the little-endian translator in `dbt/`. Everything
 the kernel needs: image entry, 1 ms tick on TMU0, INTC glue, cache and TLB
 maintenance with the translator notifications, a debug console through the
-translator, a software RTC, the IOCTL table. No display, keyboard, serial or
-network yet.
+translator, a software RTC, the IOCTL table. Display, keyboard and touch drivers
+are written (sections below); no serial or network yet.
 
 ## Install into the Platform Builder VM
 
@@ -60,6 +60,55 @@ the Mac `make -C dbt NKBIN=/abs/NK.bin RUN_SECS=300 nkshot` runs the image
 with the emulator dumping the last meaningful frame to `dbt/build/nk.png`;
 the console shows "CLASSPAD DDI: ..." and "CLASSPAD HELLO: ..." on the way.
 
+## Keyboard and touch
+
+`SRC\DRIVERS\KEYBD` builds `kbdmouse.dll` (file name `classpad_kbd.dll`):
+the Layout Manager MDD from `layoutmanager.lib`, the US input language, a
+PDD that scans the SH7305 KEYSC (`kbd_pdd.cpp`: the register sequence of
+the fx-CG100 OS, an IST on the KEYSC interrupt plus a 20 ms poll, one key
+event per changed bit of the six KIUDATA words, scan code = 8 * row +
+column) and two device layouts (`kbd_layout.cpp`: the fx-CG100 keypad and
+the fx-CP400 keypad, chosen by `HKLM\HARDWARE\DEVICEMAP\KEYBD` "Matrix",
+0 or 1). The hardware facts are in `SRC\INC\classpad_keysc.h`. Nothing
+beyond "Minimal Input Configuration" is needed in the catalog
+(`CE_MODULES_KEYBD` is set with it).
+
+`SRC\DRIVERS\TOUCH` builds `touch.dll` (`classpad_touch.dll`): the touch
+MDD and calibration from `tchmdd.lib`/`tch_cal.lib` with a DDSI layer for
+the fx-CP400 panel as casio-emu models it (`SRC\INC\classpad_touch.h`): a
+sensor on IIC0, the contact line on Port R bit 5, INTEVT 0x700 when the
+stylus lands, samples while pressed from the MDD's IST timeout. The
+registry holds a `CalibrationData` computed from the emulator's stylus
+mapping, so no calibration screen is needed. The driver decides at start
+whether a panel exists ("Panel" in `HKLM\HARDWARE\DEVICEMAP\TOUCH`, else
+a 528-row display) and otherwise never touches the bus, which the fx-CG100
+emulator profile does not implement. The catalog needs Core OS > CEBASE >
+Shell and User Interface > User Interface > "Touch Screen (Stylus)"
+(SYSGEN_TOUCH) and a Sysgen afterwards; without it `touch.dll` is left out
+of the image (`CE_MODULES_POINTER`).
+
+Both drivers print "CLASSPAD KEYBD: ..." / "CLASSPAD TOUCH: ..." when they
+start and for the first events; `classpad_hello.exe` logs every key and
+touch event on the screen and as "CLASSPAD HELLO: key down vk=.. sc=..".
+
+Verification in casio-emu (fx-CG100 profile): the emulator injects keys
+through `setKeydown` codes (row = code % 10, column = code / 10 - 1; the
+digit 7 is 74, 4 is 73, 1 is 72, EXE 31, OK 48) at `updateTimers` ticks,
+about 9000 ticks per second on an M-series Mac, a Release boot reaching
+GWES after 150-200 s:
+
+    HLE_CB_KEYSWEEP=72,74 HLE_CB_KEY_AT=1800000 HLE_CB_KEY_EVERY=90000 \
+        make -C dbt NKBIN=/abs/NK.bin RUN_SECS=420 nkshot
+
+presses the keys 1, 4 and 7 (the sweep walks the codes 72, 73, 74) one
+after the other, 10 s apart, each printing `[INJECT] code=N` on the
+emulator side and the driver's `scan` / hello's `key down` lines on the
+console; `dbt/build/nk.png` shows the event log. The tick count is only a
+guide: pick `HLE_CB_KEY_AT` from the `[INJECT]` time stamps of a first run. Touch cannot
+be exercised this way: casio-emu's ClassPad profile only cold-boots the
+real OS from a 64 MiB NOR image and refuses an add-in, so the touch driver
+is written against the emulator's model but has not run yet.
+
 ## What the files are
 
 - `SRC\OAL\OALLIB\startup.src`: `StartUp` (image entry: SR, VBR, jump to
@@ -68,7 +117,10 @@ the console shows "CLASSPAD DDI: ..." and "CLASSPAD HELLO: ..." on the way.
   no hypercalls allowed here).
 - `timer.c`: TMU0 fixed 1 ms tick, `OEMIdle`, `OALStall`.
 - `intr.c`: IRQ numbering (INTEVT - 0x200) / 0x20, IPR/IMR programming,
-  hooks `OALTimerIntrHandler` on IRQ 16.
+  hooks `OALTimerIntrHandler` on IRQ 16, the KEYSC ISR on vector 95
+  (logical IRQ 48 for the SYSINTR map, which has 64 entries) and the touch
+  contact ISR on IRQ 40; device IRQs are masked in the ISR and unmasked by
+  InterruptDone.
 - `cache.c` + `cacheops.src`: `OEMCacheRangeFlush` with `ocbwb`/`ocbp`/`icbi`
   loops, MMUCR.TI, and the translator hypercalls F2 (code changed) and F9
   (TLB changed).
@@ -77,7 +129,9 @@ the console shows "CLASSPAD DDI: ..." and "CLASSPAD HELLO: ..." on the way.
 - `ioctl.c`, `rtc.c`, `power.c`, `args.c`: IOCTL table and platform strings,
   software clock, stubs.
 - `SRC\INC\classpad_mmio.h`: pre-swapped 16/32-bit register access (the
-  translator swaps every 16/32-bit memory access; see `docs/04`).
+  translator swaps every 16/32-bit memory access; see `docs/04`), used by
+  the OAL and the drivers alike; `classpad_keysc.h`, `classpad_touch.h`:
+  the KEYSC and touch sensor register maps.
 - `FILES\config.bib`: NK at 0x8C101000 (autosized), RAM up to 0x8CC7F000, the
   last page of the window reserved for the debug ring.
 

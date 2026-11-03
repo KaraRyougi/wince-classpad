@@ -1,2 +1,4 @@
 DIRS=\
-    display
+    display \
+    keybd \
+    touch
