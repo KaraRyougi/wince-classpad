@@ -78,23 +78,38 @@ void guest_main(void)
         check("bank 1 intact after the address error", bank1_intact());
     }
 
+    /* the forms the trampoline uses: ldc.l @rm+,spc / ssr (no bank switch involved) */
+    {
+        static unsigned mem[2] = { 0x8C1BEEF4u, 0x400010F2u };
+        unsigned a, b, p = (unsigned)mem;
+        __asm__ volatile ("ldc.l @%2+, spc\n\tldc.l @%2+, ssr\n\tstc spc, %0\n\tstc ssr, %1"
+                          : "=r"(a), "=r"(b), "+r"(p) :: "memory");
+        check("ldc.l @rm+,spc/ssr load and post-increment", a == 0x8C1BEEF4u && b == 0x400010F2u && p == (unsigned)mem + 8);
+    }
+
     /* ldc sr that switches banks (the kernel's PR_B1_BK / PR_B0_IE loads):
      * the old bank keeps its r0-r7, the new bank shows its own values, and
      * coming back finds everything as it was */
     {
-        static unsigned res[8];
+        static unsigned res[12];
+        register unsigned *resp __asm__("r8") = res;      /* r8: the same register in both banks */
         __asm__ volatile (
             "mov #0x21, r0\n\tmov #0x22, r1\n\tmov #0x23, r2\n\tmov #0x24, r3\n\tmov #0x26, r6\n\t"
             "stc sr, r9\n\tmov.l 1f, r10\n\tor r9, r10\n\t"
+            "mov.l 3f, r11\n\tldc r11, spc\n\tmov.l 4f, r11\n\tldc r11, ssr\n\t"   /* the kernel saves these after its switch */
+            "stc spc, r11\n\tmov.l r11, @(40, %0)\n\tstc ssr, r11\n\tmov.l r11, @(44, %0)\n\t"
             "ldc r10, sr\n\t"             /* RB=1, BL=1 */
             "mov r4, r11\n\tmov r5, r12\n\tmov r7, r13\n\t"
+            "stc spc, r9\n\tmov.l r9, @(32, %0)\n\tstc ssr, r9\n\tmov.l r9, @(36, %0)\n\t"
+            "mov.l 5f, r9\n\t"
             "ldc r9, sr\n\t"              /* back to bank 0 */
             "mov.l r0, @(0, %0)\n\tmov.l r1, @(4, %0)\n\tmov.l r2, @(8, %0)\n\tmov.l r3, @(12, %0)\n\tmov.l r6, @(16, %0)\n\t"
             "mov.l r11, @(20, %0)\n\tmov.l r12, @(24, %0)\n\tmov.l r13, @(28, %0)\n\t"
-            "bra 2f\n\tnop\n\t.align 2\n1:\t.long 0x30000000\n2:\n\t"
-            :: "r"(res) : "r0", "r1", "r2", "r3", "r6", "r9", "r10", "r11", "r12", "r13", "memory");
+            "bra 2f\n\tnop\n\t.align 2\n1:\t.long 0x30000000\n3:\t.long 0x8C1BEEF0\n4:\t.long 0x400010F1\n5:\t.long 0x400010F0\n2:\n\t"
+            :: "r"(resp) : "r0", "r1", "r2", "r3", "r6", "r9", "r10", "r11", "r12", "r13", "memory");
         check("ldc sr into bank 1 shows the parked r4/r5/r7", res[5] == MAGIC4 && res[6] == MAGIC5 && res[7] == MAGIC7);
         check("ldc sr back to bank 0 finds r0-r3/r6 intact", res[0] == 0x21 && res[1] == 0x22 && res[2] == 0x23 && res[3] == 0x24 && res[4] == 0x26);
+        check("SPC/SSR survive the bank switch (read in bank 1)", res[8] == 0x8C1BEEF0u && res[9] == 0x400010F1u);
         check("bank 1 intact after the bank switches", bank1_intact());
     }
 

@@ -37,6 +37,11 @@ typedef struct {
      * last: the CE kernel keeps pCurThread and SH3CTL_BASE in r4/r5/r7_bank1
      * across all code, so the translator may not use bank 1 as scratch. */
     sf_u32 b1[8];
+    /* a guest `ldc rm, sr` that switches register banks returns through rte
+     * into dbt_bank_tramp, which reloads the guest's SPC/SSR from here (the
+     * kernel's interrupt entry saves them after its bank switch) and jumps
+     * to sw_target */
+    sf_u32 sw_spc, sw_ssr, sw_target;
 } dbt_gctx;
 
 enum { RT_ACT_RESUME = 0, RT_ACT_JUMP = 1, RT_ACT_HALT = 2 };
@@ -82,6 +87,8 @@ extern char dbt_lookup[], dbt_lookup_link[], dbt_lookup_ic[], dbt_rte_stub[], db
 extern char dbt_lk_s1[], dbt_lk_s2[], dbt_lk_s3[], dbt_lkl_s1[], dbt_lkl_s2[], dbt_lkl_s3[], dbt_lki_s1[], dbt_lki_s2[], dbt_lki_s3[], dbt_lk_region_end[];
 extern char dbt_hit_a[], dbt_hit_b[], dbt_hit_c[], dbt_hit_end[];
 extern char dbt_full_m1[], dbt_full_m2[], dbt_full_m3[], dbt_full_m4[], dbt_full_end[];
+extern char dbt_bank_tramp[], dbt_bt_s1[], dbt_bt_end[];
+extern char dbt_rte_tramp[], dbt_rt_s1[], dbt_rt_s2[], dbt_rt_s3[], dbt_rt_masked[], dbt_rte_tramp_end[];
 extern char dbt_hfpu_s1[], dbt_hfpu_s2[], dbt_hfpu_s3[], dbt_hfpu_masked[];
 extern char dbt_hfb_s1[], dbt_hfb_s2[], dbt_hfb_s3[], dbt_hfb_masked[];
 extern char dbt_hsr_s1[], dbt_hsr_s2[], dbt_hsr_s3[], dbt_hsr_masked[];

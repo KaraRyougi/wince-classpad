@@ -102,6 +102,34 @@ void guest_main(void)
     r = ((fn0_t)V_LAZY)();
     check("mapped page runs without a new fault", r == 7 && faults == 1);
 
+    /* rte into a mapped page that is neither in the TLB nor translated,
+     * with BL=1 at the rte (the kernel's thread dispatch does this): the
+     * target must be probed after the rte, in the new context, so that the
+     * TLB miss reaches the handler instead of resetting the CPU */
+    mmio_w32(MMUCR, mmio_r32(MMUCR) | 0x4);                  /* TI: drop the entries, keep AT */
+    {
+        unsigned inv0 = hc_getstat(2), tr0 = hc_getstat(0);
+        hc_flush(V_LAZY, 0x1000);
+        hc_puts("flush: inval+"); hc_puthex(hc_getstat(2) - inv0); hc_puts(" mmucr "); hc_puthex(mmio_r32(MMUCR)); hc_putc('\n');
+        (void)tr0;
+    }
+    {
+        unsigned r0v = 0, m0 = misses, f0 = faults, sr_after, target = V_LAZY, tr0 = hc_getstat(0);
+        __asm__ volatile (
+            "mova 1f, r0\n\tlds r0, pr\n\t"                    /* the page's rts comes back to 1: */
+            "stc sr, r2\n\tmov.l 2f, r3\n\tor r3, r2\n\tldc r2, sr\n\t"   /* BL=1 */
+            "ldc %2, spc\n\t"
+            "not r3, r3\n\tand r3, r2\n\tldc r2, ssr\n\t"      /* SSR: BL=0 */
+            "rte\n\tnop\n\t"
+            ".align 2\n2:\t.long 0x10000000\n"
+            "1:\tmov r0, %0\n\tstc sr, %1\n\t"           /* 4-aligned after the literal */
+            : "=r"(r0v), "=r"(sr_after) : "r"(target) : "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "pr", "memory");
+        hc_puts("rte test: r0 "); hc_puthex(r0v); hc_puts(" misses+"); hc_puthex(misses - m0); hc_puts(" faults+"); hc_puthex(faults - f0);
+        hc_puts(" sr "); hc_puthex(sr_after); hc_puts(" translations+"); hc_puthex(hc_getstat(0) - tr0); hc_putc('\n');
+        check("rte with BL=1 into untranslated mapped code: miss handled after the rte",
+              r0v == 7 && misses == m0 + 1 && faults == f0 + 1 && (sr_after & 0x10000000u) == 0);
+    }
+
     mmio_w32(MMUCR, 0x4);                                    /* MMU off again, flush */
     check("MMU off", (mmio_r32(MMUCR) & 1) == 0);
     hc_stats();

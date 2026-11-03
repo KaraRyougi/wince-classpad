@@ -361,6 +361,15 @@ static dbt_block *translate_at(sf_u32 gpc)
     if (g_arena_used + SCRATCH_ARENA_NEED > META_ARENA_BYTES) cache_flush_all();
     host = g_cfg.cache_base + g_cache_used;
     g_scratch.meta = g_scratch_meta; g_scratch.spills = g_scratch_spills;
+    if (IS_USER(gpc) || gpc >= 0xC0000000u) {
+        /* TLB-mapped code: the probe may miss, which with BL=1 is a reset */
+        sf_u32 sr;
+        __asm__ volatile ("stc sr, %0" : "=r"(sr));
+        if (sr & SR_BL) {
+            dbt_puts("[dbt] WARNING: translating mapped code "); dbt_puthex(gpc);
+            dbt_puts(" with BL=1 (a TLB miss here resets the CPU)\n");
+        }
+    }
     g_translating = 1; g_translating_pc = gpc;
     r = dbt_translate_block(&g_env, gpc, host, (sf_u16 *)host, DBT_BLOCK_WORDS, &g_scratch, &fault);
     g_translating = 0;
@@ -571,7 +580,10 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
     }
     case HC_PUTC: dbt_putc((int)ctx->r[4]); return RT_ACT_RESUME;
     case HC_PUTHEX: dbt_puthex(ctx->r[4]); return RT_ACT_RESUME;
-    case HC_FLUSH: dbt_invalidate(ctx->r[4], ctx->r[5]); return RT_ACT_RESUME;
+    case HC_FLUSH:                                          /* r4 = address, r5 = length (0,0: everything) */
+        if (ctx->r[5] == 0) dbt_invalidate(0, 0xFFFFFFFFu);
+        else dbt_invalidate(ctx->r[4], ctx->r[4] + ctx->r[5]);
+        return RT_ACT_RESUME;
     case HC_STATS: print_stats(); return RT_ACT_RESUME;
     case HC_BENCH: ctx->r[0] = dbt_bench_native(ctx->r[4], ctx->r[5]); return RT_ACT_RESUME;
     case HC_TLB_INVAL:
@@ -644,8 +656,12 @@ static sf_u32 resume_pc(const dbt_block *b, sf_u32 off, const dbt_gctx *ctx, int
     if (idx < 0) dbt_halt("resume_pc outside translated code");
     m = &b->meta[idx];
     if (m->kind == META_INSN && m->commit_rel != 0xFF && off > (sf_u32)m->host_off + m->commit_rel) {
+        /* resume at the next guest instruction: skip further ranges of this
+         * one (the device-aware slow path has a range of its own) */
+        int j = idx + 1;
+        while (j < b->nmeta && b->meta[j].kind == META_INSN && b->meta[j].guest_off == m->guest_off) j++;
         *committed = 1;
-        return meta_start_pc(b, idx + 1, ctx);
+        return meta_start_pc(b, j, ctx);
     }
     return meta_start_pc(b, idx, ctx);
 }
@@ -796,6 +812,20 @@ static int stub_window(dbt_gctx *ctx, sf_u32 *guest_pc)
         if (!AFTER(spc, dbt_full_m3)) UNDO(ctx, 2, SLOT_A0);
         UNDO(ctx, 1, SLOT_Y1);
         *guest_pc = guest_pc_of_host(target, ctx);
+        return 1;
+    }
+    /* rte trampoline (target not translated at the rte): resume = the target */
+    if (IN(spc, dbt_rte_tramp, dbt_rt_masked)) {
+        if (AFTER(spc, dbt_rt_s1)) UNDO(ctx, 0, SLOT_Y0);
+        if (AFTER(spc, dbt_rt_s2)) UNDO(ctx, 1, SLOT_Y1);
+        if (AFTER(spc, dbt_rt_s3)) UNDO(ctx, 2, SLOT_A0);
+        *guest_pc = dbt_ctx_rt.sw_target;
+        return 1;
+    }
+    /* bank-switch trampoline: resume = the guest instruction after the ldc */
+    if (IN(spc, dbt_bank_tramp, dbt_bt_end)) {
+        if (AFTER(spc, dbt_bt_s1)) UNDO(ctx, 1, SLOT_X0);
+        *guest_pc = guest_pc_of_host(dbt_ctx_rt.sw_target, ctx);
         return 1;
     }
     /* helper prologues before masking: resume = the calling instruction,
@@ -952,7 +982,21 @@ sf_u32 dbt_rte_c(sf_u32 guest_spc, sf_u32 *ssr)
 {
     sf_u32 host;
     note_asid();                       /* a context switch returns to the new thread through rte */
-    host = dbt_resolve(guest_spc, 0);
+    dbt_dbgring_drain();
+    host = hash_find(guest_spc);
+    if (!host) {
+        dbt_block *b = find_block_by_gpc(guest_spc);
+        if (b) { dbt_stat.hash_evicted++; hash_insert(guest_spc, b->host_base); host = b->host_base; }
+    }
+    if (!host) {
+        /* Not translated yet. Translating here would probe the target with
+         * the current SR: the CE kernel dispatches threads with BL=1, and a
+         * TLB miss on a mapped target would then be a reset. The real CPU
+         * fetches the target after the rte, so do the same: rte into the
+         * trampoline, which looks the target up in the new context. */
+        dbt_ctx_rt.sw_target = guest_spc;
+        host = (sf_u32)dbt_rte_tramp;
+    }
     dbt_shadow_md = *ssr & SR_MD;
     *ssr = (*ssr | SR_MD | SR_DSP);
     return host;
@@ -968,6 +1012,11 @@ int dbt_ldc_sr_c(dbt_gctx *ctx, sf_u32 newsr)
     note_asid();
     dbt_shadow_md = newsr & SR_MD;
     ctx->sr = newsr | SR_MD | SR_DSP;
+    if (flip) {
+        /* still the guest's values: nothing has trapped since the helper was entered */
+        __asm__ volatile ("stc spc, %0" : "=r"(ctx->sw_spc));
+        __asm__ volatile ("stc ssr, %0" : "=r"(ctx->sw_ssr));
+    }
     return flip;
 }
 

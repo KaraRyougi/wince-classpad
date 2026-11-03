@@ -205,10 +205,15 @@ What the kernel sources settled (2026-11-02, notes/ce/kernel-sh-notes.md):
 3. `PLATFORM\CLASSPAD`: ~~StartUp, OEMInit with TMU0 tick and INTC, hypercall
    debug output, cache flush hook. Headless OS design, RAMIMAGE config.bib~~
    written and compiled (bsp/classpad, 2026-11-02; CRLF files, cacheops.src).
-   First run of the ClassPad NK.bin: StartUp, KernelStart, kernel sign-on
-   through the debug ring, stops at SHInit's MMUTTB write because casio-emu
-   does not model TTB/PTEA (dbt/emu-patch/add_ccn_regs.py). Device-aware
-   kernel.dll translation done; SR.FD still open.
+   The ClassPad NK.bin (Debug configuration) boots under the translator in
+   casio-emu (with dbt/emu-patch/add_ccn_regs.py applied): SHInit, OEMInit,
+   KernelInit, the first thread, LoaderInit (ROM decompression), FSDMGR, the
+   ROM file system and the boot registry, boot phases 0 and 1 within 90 s
+   of emulated time. Fixed on the way: bank-switching `ldc sr` (SPC/SSR
+   through a trampoline), `rte` into untranslated mapped code with BL=1
+   (resolved after the rte), committed-resume across the device slow path,
+   HC_FLUSH's range. Still open: SR.FD, display, speed (Release build of
+   the image, decompression off).
 4. `make -C dbt NKBIN=NK.bin run`: expect the kernel banner on stdout,
    then the first scheduler tick. Fix what breaks.
 5. Memory: ~~compact block metadata; move the translator region down and

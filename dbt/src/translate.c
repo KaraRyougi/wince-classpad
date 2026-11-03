@@ -172,6 +172,7 @@ static void tr_mem_dev(tctx *t, const sh_insn *d)
     int rT = pick_scratch(d->touched);
     int bra_slow, bra_done, slow, done;
     sf_u32 goff = t->gpc - t->blk->guest_pc;
+    dbt_imeta parent = *t->cur;           /* a branch range when this is a delay slot */
     spill(t, rT, SA(t));
     emit16(e, OP_MOV_RR(d->base, rT));
     if (d->am == AM_PREDEC) emit16(e, OP_ADD_IMM(-4, rT));
@@ -197,6 +198,11 @@ static void tr_mem_dev(tctx *t, const sh_insn *d)
     call_helper(t, t->env->rt_fallback, 0, 2, d->op, d->touched);
     done = emit_pos(e);
     emit_patch16(e, bra_done, OP_BRA((done - (bra_done + 4)) / 2));
+    if (parent.kind != META_INSN) {
+        /* inside a branch: what follows (target capture, the jump) must keep
+         * the branch range's resume rule, not restart the branch */
+        begin_meta_kind(t, parent.kind, parent.guest_off, parent.target, parent.fallthrough);
+    }
 }
 
 static void tr_mem(tctx *t, const sh_insn *d)

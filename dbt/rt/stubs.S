@@ -57,6 +57,8 @@
 .Ltra\sfx:          .long 0xFF000020
 .Ltea\sfx:          .long 0xFF00000C
 .Lintevt\sfx:       .long 0xFF000028
+.Lctx_sw\sfx:       .long _dbt_ctx_rt + CTX_SWSPC
+.Ltramp\sfx:        .long _dbt_bank_tramp
         .endm
 
 /* Save the guest context into dbt_ctx_rt with descending stores.
@@ -268,8 +270,12 @@ _dbt_full_end:
  * after the loads. */
         .global _dbt_tail_rte_prep
 _dbt_tail_rte_prep:
-        TAIL_PREP
-        ldc     r1, spc                /* host target */
+        TAIL_PREP                      /* r1 = host target, r3 = SR, r2 = ctx + CTX_R0 + 24 */
+        add     #100, r2
+        add     #(CTX_SWSPC - CTX_R0 - 24 - 100), r2
+        mov.l   r1, @(CTX_SWTARGET - CTX_SWSPC, r2)
+        mov.l   .LtrampA, r1
+        ldc     r1, spc                /* land in the trampoline, in the new bank */
         ldc     r3, ssr                /* guest SR with the new RB */
         STSX    SLOT_X1, 3
         STSX    SLOT_Y0, 0
@@ -277,6 +283,53 @@ _dbt_tail_rte_prep:
         STSX    SLOT_Y1, 1
         rte
         nop
+
+/* Entered by that rte with the guest's new SR. The guest's own SPC/SSR
+ * (saved by dbt_ldc_sr_c) go back into the hardware, since the CE kernel's
+ * interrupt entry pushes them after it switches banks. Only r1 is borrowed
+ * (parked in X0; the window is known to stub_window). */
+        .global _dbt_bank_tramp, _dbt_bt_s1, _dbt_bt_end
+_dbt_bank_tramp:
+        LDSX    1, SLOT_X0
+_dbt_bt_s1:
+        mov.l   .Lctx_swA, r1
+        ldc.l   @r1+, spc
+        ldc.l   @r1+, ssr
+        mov.l   @r1, r1                /* host target */
+        jmp     @r1
+        STSX    SLOT_X0, 1
+_dbt_bt_end:
+
+/* A guest rte whose target is not translated yet lands here, in the guest's
+ * new context (SR from SSR, banks switched): hand the target (ctx->sw_target)
+ * to the lookup stub, which translates it with the SR the real CPU would
+ * fetch it under. Only r0 is borrowed, parked in Y0. */
+        .global _dbt_rte_tramp, _dbt_rt_s1, _dbt_rt_s2, _dbt_rt_s3, _dbt_rt_masked, _dbt_rte_tramp_end
+_dbt_rte_tramp:
+        LDSX    0, SLOT_Y0
+_dbt_rt_s1:
+        LDSX    1, SLOT_Y1
+_dbt_rt_s2:
+        LDSX    2, SLOT_A0
+_dbt_rt_s3:
+        stc     sr, r1                 /* guest SR, T included: restored by the full tail */
+        mov.l   .LimaskA, r2
+        or      r1, r2
+        ldc     r2, sr                 /* interrupts masked from here on */
+_dbt_rt_masked:
+        SAVE_CTX_RT A
+        mov     r2, r4
+        add     #100, r4
+        add     #(CTX_SWTARGET - 100), r4
+        mov.l   @r4, r4                /* arg0 = guest target */
+        mov     #0, r5
+        mov.l   .Lstack_rtA, r15
+        mov.l   .LresolveA, r0
+        jsr     @r0
+        nop
+        bra     _dbt_tail_full_prep    /* r0 = host target; SR (and T) come back from the context */
+        nop
+_dbt_rte_tramp_end:
         POOL    A
 
 /* ------------------------------------------------------------------ */

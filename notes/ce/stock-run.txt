@@ -18,3 +18,10 @@ Consequences, all folded into bsp/classpad:
   Release config with IMGNOKITL=1 IMGNODEBUGGER=1 (no kitl/kd/hd/osaxs), SYSGEN_SHELL optional for the first boot.
 nk.map of the HARP build (target\SH4\debug): _StartUp at 0x000163b0 (nk.exe base 0x10000 before ROMIMAGE relocation),
   OEMInitDebugSerial, OEMWriteDebugByte, OEMInit, OEMIdle, OEMCacheRangeFlush, SH4ClearTLB, OALTimerInit all in oal.lib.
+
+ClassPad NK.bin (bsp/classpad, Debug configuration, SYSGEN_SHELL=1, IMGNOKITL/IMGNODEBUGGER), 2026-11-03, casio-emu + add_ccn_regs.py:
+  make -C dbt NKBIN=notes/ce/NK.bin run -> kernel sign-on, "CCR=0105 INTEVT=000c", OEMInit messages, KernelFindMemory,
+  "SH Initialization is done.", KernelInit, "Scheduling the first thread.", LoaderInit (e32_vsize fix-ups, ROM decompression),
+  PGPOOL, Message Queue, FSDMGR DllMain, "FileSystem Starting - starting with clean file system", StoreMgr/ROM volumes,
+  boot registry (ROM + RAM), boot phase 0, Object Store, boot phase 1 -- all within the 90 s of the run-headless alarm.
+  Slow: Debug kernel + ROM decompression through the device-aware translation. The 20 s default alarm stops at "Message Queue".

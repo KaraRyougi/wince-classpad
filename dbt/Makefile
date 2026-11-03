@@ -42,6 +42,8 @@ NK_ENV = $(if $(NKBIN),HLE_OSROM=$(abspath $(NK_PADDED)) HLE_OSROM_PAD=$(NK_FLAS
 # casio-emu remembers the last machine profile (model.txt); the translator is an
 # fx-CG100 add-in, so pin the profile or a remembered ClassPad refuses to boot
 EMU_ENV = CALCEMU_MODEL=fx-cg100
+# make DEVALL=1 GUEST=x run: the guest asks for device-aware translation of its whole code (start.S)
+GUEST_CFLAGS += $(if $(filter 1,$(DEVALL)),-DDEVAWARE_ALL,)
 define NK_PAD
 python3 -c 'import sys;d=open(sys.argv[1],"rb").read();open(sys.argv[2],"wb").write(d+b"\0"*(-len(d)%4))' $(NKBIN) $(NK_PADDED)
 endef
@@ -68,7 +70,13 @@ GUEST_EXTRA     := $(GUEST_EXTRA_$(GUEST))
 GUEST_START_nkimg := guest/nkimg_start.S
 GUEST_START     := $(or $(GUEST_START_$(GUEST)),guest/start.S)
 
-$(BUILD)/$(GUEST).elf: $(GUEST_START) guest/$(GUEST).c $(GUEST_EXTRA) guest/hyper.h guest/mmio.h guest/guest.ld | $(BUILD)
+# guests are rebuilt when DEVALL changes (the flag lives in a stamp file name)
+DEVALL_STAMP := $(BUILD)/.devall-$(if $(filter 1,$(DEVALL)),1,0)
+$(DEVALL_STAMP): | $(BUILD)
+	rm -f $(BUILD)/.devall-*
+	touch $@
+
+$(BUILD)/$(GUEST).elf: $(GUEST_START) guest/$(GUEST).c $(GUEST_EXTRA) guest/hyper.h guest/mmio.h guest/guest.ld $(DEVALL_STAMP) | $(BUILD)
 	$(CC) $(GUEST_CFLAGS) -T guest/guest.ld -o $@ $(GUEST_START) guest/$(GUEST).c $(GUEST_EXTRA)
 
 # the guest wrapped as a CE .bin (records + ROMHDR pointer) for the loader test

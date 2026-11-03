@@ -229,6 +229,21 @@ via hypercall 0xF1):
   Verified by the `bank` guest. After a resume the hardware SPC/SSR hold
   host values; a guest that nests an exception without saving SPC/SSR first
   reads those, which the CE kernel never does.
+- A guest `ldc rm, sr` that switches register banks cannot be finished with
+  `ldc` + `jmp`: after the switch no register of the new bank is free for the
+  jump (the kernel's PSL entry passes arguments through bank-0 r1-r3 across
+  its switch). `dbt_ldc_sr_c` reports the flip and the stub returns through
+  `rte` with SPC = `dbt_bank_tramp`, which reloads the guest's own SPC/SSR
+  from the context (`ldc.l @r1+`, one register borrowed and parked in X0)
+  and jumps to the target: the interrupt entry pushes SPC/SSR after its
+  switch to bank 0. `bank` guest, 19 checks.
+- A guest `rte` whose target is not translated yet does not translate it in
+  the rte stub: that would probe the target under the SR in force at the
+  rte, and the CE kernel dispatches threads with BL=1, where a TLB miss on a
+  mapped target is a manual reset. `dbt_rte_c` only consults the hash; on a
+  miss the rte lands in `dbt_rte_tramp`, which resolves the target in the new
+  context (full context save, so T comes back from SR). `mmu` guest, last
+  check.
 - Debug ring: an exception-free console at `GUEST_RAM_HI - 4 KiB`
   (uncached P2 alias, words little-endian: write count, read count, magic
   0x47424452, 4080 bytes of storage). The guest appends bytes and the
@@ -251,7 +266,14 @@ via hypercall 0xF1):
   hypercalls. A device access in a delay slot is handled like a helper
   slot. Test hypercall FC turns the range on for a running guest (`devmem`
   guest, 17 checks). Cost is paid in kernel.dll only; our OAL keeps the
-  pre-swapped convention.
+  pre-swapped convention. The slow path is a META range of its own, so
+  `resume_pc` continues after a committed access at the next range of a
+  different guest instruction, and inside a branch's delay slot it is
+  followed by a range that restores the branch's resume rule. `make
+  DEVALL=1 GUEST=x run` translates a whole test guest device-aware; the
+  pre-swapped MMIO reads of exc/tmu/apicall/bank/mmu/aspace are then wrong
+  by design, but hello/fpu/bench and the postinc/predec/slot loops of tmu
+  must still pass.
 - Faults while translating: a fault raised by the translator's code probe
   (TLB miss on a mapped page, any vector) is delivered to the guest at the
   pc being translated, with the guest registers taken from `dbt_ctx_rt`

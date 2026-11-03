@@ -11,7 +11,14 @@ _start:
         mov.l   r0, @r1
         bra     1b
         add     #4, r1
-2:      mov.l   .Lmain, r0
+2:
+#ifdef DEVAWARE_ALL
+        /* make DEVALL=1: translate the whole guest device-aware (stress test for docs/05) */
+        mov.l   .Ldev_lo, r4
+        mov.l   .Ldev_hi, r5
+        trapa   #0xFC
+#endif
+        mov.l   .Lmain, r0
         jsr     @r0
         nop
         mov     #0, r4
@@ -23,3 +30,7 @@ _start:
 .Lbss_e: .long __bss_end
 .Lstack: .long 0x8C1F0000
 .Lmain:  .long _guest_main
+#ifdef DEVAWARE_ALL
+.Ldev_lo: .long 0x8C100000
+.Ldev_hi: .long 0x8C200000
+#endif

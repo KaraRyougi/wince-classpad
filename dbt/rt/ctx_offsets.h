@@ -19,4 +19,7 @@
 #define CTX_NEWSSR  140
 #define CTX_B1      144         /* b1[8]: the other register bank (bank 1 when the guest ran in bank 0) */
 #define CTX_B1END   176
-#define CTX_SIZE    176
+#define CTX_SWSPC   176         /* bank-switching ldc sr: guest SPC, SSR and the host target for the trampoline */
+#define CTX_SWSSR   180
+#define CTX_SWTARGET 184
+#define CTX_SIZE    188
