@@ -39,4 +39,7 @@ ClassPad NK-release.bin (Release configuration, COMPRESSION=OFF, 1.1 MB; ~/Downl
   "Booting Windows CE version"), so the OAL now prints "CLASSPAD OAL: POSTINIT" and "CLASSPAD OAL: first idle"
   (needs a rebuild of the OAL). Block trace: 37.6 k translations, kernel.dll 17.6 k, filesys 7 k, k.coredll 6.8 k,
   fsdmgr 4.2 k, nk.exe 1.3 k, romfsd 0.5 k; SHATransform (hive hashing) is the single hottest function.
+  Rebuilt OAL (~/Downloads/CLASSPAD_SH4_Release, 2026-11-03, with the SR.FD emulation in the translator): within 150 s
+    CLASSPAD OAL: SH7305 under the translator / CLASSPAD OAL: POSTINIT (kernel initialised) / CLASSPAD OAL: first idle
+  so a silent retail image can be judged by the OAL's own markers; cesym needs that directory's .map files now.
 
