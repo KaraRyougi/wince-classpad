@@ -209,11 +209,15 @@ What the kernel sources settled (2026-11-02, notes/ce/kernel-sh-notes.md):
    casio-emu (with dbt/emu-patch/add_ccn_regs.py applied): SHInit, OEMInit,
    KernelInit, the first thread, LoaderInit (ROM decompression), FSDMGR, the
    ROM file system and the boot registry, boot phases 0 and 1 within 90 s
-   of emulated time. Fixed on the way: bank-switching `ldc sr` (SPC/SSR
+   of emulated time, then the system and user hives, "FILESYS: Launching
+   apps" and "This device has booted 1 times" (2026-11-03, about 7 minutes
+   of Debug-build boot; nothing to launch in a kernel-only image, the
+   kernel then idles). Fixed on the way: bank-switching `ldc sr` (SPC/SSR
    through a trampoline), `rte` into untranslated mapped code with BL=1
    (resolved after the rte), committed-resume across the device slow path,
-   HC_FLUSH's range. Still open: SR.FD, display, speed (Release build of
-   the image, decompression off).
+   HC_FLUSH's range, and a link-literal patch after a full code-cache flush
+   (showed as a coredll RHeapFree DEBUGCHK). Still open: SR.FD, display,
+   speed (Release build of the image, decompression off).
 4. `make -C dbt NKBIN=NK.bin run`: expect the kernel banner on stdout,
    then the first scheduler tick. Fix what breaks.
 5. Memory: ~~compact block metadata; move the translator region down and

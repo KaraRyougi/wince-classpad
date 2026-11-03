@@ -77,7 +77,16 @@ static dbt_env   g_env;
 
 /* ---------------------------------------------------------- console */
 
-void dbt_putc(int c) { DEBUG_PORT = (sf_u8)c; }
+#ifdef DBT_TRACE_EXEC
+static void watch_char(int c);
+#endif
+void dbt_putc(int c)
+{
+    DEBUG_PORT = (sf_u8)c;
+#ifdef DBT_TRACE_EXEC
+    watch_char(c);
+#endif
+}
 void dbt_puts(const char *s) { while (*s) dbt_putc(*s++); }
 void dbt_puthex(sf_u32 v)
 {
@@ -344,7 +353,7 @@ static unsigned g_watch_pos;
 void dbt_exec_dump(unsigned n)
 {
     unsigned i, idx = g_exec_ctl;
-    dbt_puts("[dbt] exec trace, oldest first ("); dbt_puthex(n); dbt_puts(" entries):\n");
+    dbt_puts("[dbt] exec trace, oldest first ("); dbt_puthex(n); dbt_puts(" entries, ctl "); dbt_puthex(idx); dbt_puts("):\n");
     for (i = n; i > 0; i--) {
         sf_u32 at = (idx - 4u * i) & 0xFFFFu;
         sf_u32 pc = *(volatile sf_u32 *)(g_exec_ring + at);
@@ -354,11 +363,15 @@ void dbt_exec_dump(unsigned n)
 
 static void watch_char(int c)
 {
+    static int dumping;
+    if (dumping) return;                                    /* the dump itself goes through dbt_putc */
     if ((char)c == g_watch[g_watch_pos]) {
         if (!g_watch[++g_watch_pos]) {
             g_watch_pos = 0;
+            dumping = 1;
             dbt_puts("\n[dbt] watch string seen\n");
             dbt_exec_dump(512);
+            dumping = 0;
         }
     } else g_watch_pos = ((char)c == g_watch[0]) ? 1 : 0;
 }
@@ -369,9 +382,6 @@ void dbt_rt_init(const dbt_rt_config *cfg)
     g_cfg = *cfg;
     memset(&dbt_stat, 0, sizeof dbt_stat);
     dbgring_init();
-#ifdef DBT_TRACE_EXEC
-    g_env.exec_ctl = (sf_u32)&g_exec_ctl; g_env.exec_ring = (sf_u32)g_exec_ring;
-#endif
     cache_flush_all();
     fpuemu_reset(&g_fpu);
     memset(&g_env, 0, sizeof g_env);
@@ -387,6 +397,9 @@ void dbt_rt_init(const dbt_rt_config *cfg)
     g_env.shadow_md_addr = (sf_u32)&dbt_shadow_md;
     g_env.max_insns = DBT_MAX_INSNS;
     g_env.dev_lo = cfg->dev_lo; g_env.dev_hi = cfg->dev_hi;
+#ifdef DBT_TRACE_EXEC
+    g_env.exec_ctl = (sf_u32)&g_exec_ctl; g_env.exec_ring = (sf_u32)g_exec_ring;   /* after the memset above */
+#endif
 }
 
 static dbt_block *translate_at(sf_u32 gpc)
@@ -463,11 +476,12 @@ static sf_u32 lookup_or_translate(sf_u32 gpc)
 
 sf_u32 dbt_resolve_ic(sf_u32 gpc, sf_u32 ic_addr)
 {
+    sf_u32 gen = dbt_stat.flushes;
     sf_u32 host = lookup_or_translate(gpc);
     volatile sf_u32 *ic = (volatile sf_u32 *)ic_addr;
     dbt_stat.lookups_c++;
     dbt_stat.ic_misses_c++;
-    ic[0] = gpc; ic[1] = host;                           /* data: read by mov.l @(disp,PC) through the operand cache */
+    if (dbt_stat.flushes == gen) { ic[0] = gpc; ic[1] = host; }   /* data: read by mov.l @(disp,PC) through the operand cache; not after a flush (the cache is gone) */
     return host;
 }
 
@@ -514,7 +528,7 @@ static int g_devrange_pending;
 
 sf_u32 dbt_resolve(sf_u32 gpc, sf_u32 link_lit)
 {
-    sf_u32 host;
+    sf_u32 host, gen;
     dbt_dbgring_drain();
     if (g_devrange_pending) {
         /* HC_DEVRANGE: retranslate everything with the new range; the link
@@ -524,9 +538,12 @@ sf_u32 dbt_resolve(sf_u32 gpc, sf_u32 link_lit)
         cache_flush_all();
         link_lit = 0;
     }
+    gen = dbt_stat.flushes;
     host = lookup_or_translate(gpc);
     dbt_stat.lookups_c++;
-    if (link_lit) link_direct(link_lit, host);
+    /* a full flush inside the lookup freed the block holding the link
+     * literal (and maybe reused its memory for the new one): leave it alone */
+    if (link_lit && dbt_stat.flushes == gen) link_direct(link_lit, host);
     return host;
 }
 
@@ -548,7 +565,7 @@ void dbt_invalidate(sf_u32 lo, sf_u32 hi)
 #define HC_SYNTH  0xF8                  /* translator-internal: deliver a synthetic exception (r4 = guest pc, r5 = EXPEVT) */
 #define HC_TLB_INVAL 0xF9               /* kernel: user mappings in [r4, r4+r5) changed (r5 = 0: all) */
 #define HC_ASID   0xFA                  /* kernel: address space switched to ASID r4 */
-#define HC_GETSTAT 0xFB                 /* r4 = index -> r0 (0 translations, 1 blocks, 2 invalidations, 3 asid switches, 4 ic misses) */
+#define HC_GETSTAT 0xFB                 /* r4 = index -> r0 (0 translations, 1 blocks, 2 invalidations, 3 asid switches, 4 ic misses, 5 debug-ring bytes, 6 device accesses, 7 full flushes) */
 #define HC_DEVRANGE 0xFC                /* tests: translate [r4, r5) device-aware from now on (drops all translations at the next lookup) */
 
 #define REG_EXPEVT (*(volatile sf_u32 *)0xFF000024u)
@@ -644,6 +661,7 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
         case 4: v = dbt_stat.ic_misses_c; break;
         case 5: v = dbt_stat.dbgring_bytes; break;
         case 6: v = dbt_stat.dev_accesses; break;
+        case 7: v = dbt_stat.flushes; break;
         }
         ctx->r[0] = v;
         return RT_ACT_RESUME;

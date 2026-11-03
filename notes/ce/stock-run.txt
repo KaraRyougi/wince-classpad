@@ -25,3 +25,6 @@ ClassPad NK.bin (bsp/classpad, Debug configuration, SYSGEN_SHELL=1, IMGNOKITL/IM
   PGPOOL, Message Queue, FSDMGR DllMain, "FileSystem Starting - starting with clean file system", StoreMgr/ROM volumes,
   boot registry (ROM + RAM), boot phase 0, Object Store, boot phase 1 -- all within the 90 s of the run-headless alarm.
   Slow: Debug kernel + ROM decompression through the device-aware translation. The 20 s default alarm stops at "Message Queue".
+  2026-11-03, 420 s run (make RUN_SECS=420): system hive, user hive ("Mounting clean user hive"), "FILESYS: Launching apps",
+  "This device has booted 1 times !!!", then idle. The earlier coredll RHeapFree DEBUGCHK (rheap.cpp:1715, pointer in no
+  region) was a translator bug: a direct-link literal patched after the translation had flushed the full code cache.

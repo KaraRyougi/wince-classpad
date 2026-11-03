@@ -208,6 +208,14 @@ via hypercall 0xF1):
   fast path); on a miss the stub masks interrupts, saves the guest context
   into `dbt_ctx_rt` and calls `dbt_resolve`, which translates and patches the
   link literal (a data write; PC-relative loads go through the operand cache).
+  The patch is skipped when the translation flushed the whole cache
+  (`dbt_stat.flushes` changed under the lookup: 2048 blocks or 2 MiB
+  reached): the literal belongs to a block that no longer exists, and the
+  write would land in whatever the fresh cache has put there. The same
+  guard covers inline-cache refills. Found with the CE kernel, where the
+  cache fills once per boot and the stale patch corrupted a freshly
+  translated coredll block (a heap free with a wrong pointer, two minutes
+  later).
 - Helpers (`dbt_fpu_stub`, `dbt_fallback_stub`, `dbt_ldc_sr_stub`): X0 =
   argument, X1 = return address. They save the full context, mask interrupts,
   call C, restore and jump back through the shared `dbt_tail_full`.
@@ -460,6 +468,7 @@ Status 2026-10-22: all four guests pass under the emulator.
 | `bank` | register bank 1 across the translator: values parked in r4/r5/r7_bank1 (the CE kernel's pCurThread, context pointer, SH3CTL_BASE) survive hypercalls from bank 0, translation of new code, a trapa handled in bank 1, a hypercall issued from bank 1 with BL cleared (both banks intact), a synthetic address error returning through PR, and 50 more exceptions; the handler sees the interrupted bank-0 registers | PASS (14 checks) |
 | `devmem` | device-aware translation: a value written to TEA pre-swapped reads back unswapped once the guest is translated device-aware, plain round trips, a pre-swapped accessor is now wrong, ordinary memory keeps its LE view, T survives device and memory loads, device access in `bra` and `jsr` delay slots, `@Rm+`, `@-Rn`, `@(r0,Rm)` forms, a PTEH store switches the ASID, MMUCR.TI goes through the device path, accesses counted | PASS (17 checks) |
 | `tlbdata` | every memory addressing form (byte/word/long; @Rm, @Rm+, @-Rn, @(disp,Rm), @(r0,Rm), @(disp,GBR), movca, base = data, base = r0, load-modify-store) with a synchronous TLB miss on the access itself: the data page is mapped only by the miss handler and the TLB is flushed before each form, so the translated sequence faults at its memory op, the handler refills, the instruction restarts; exactly one miss per form and the little-endian result checked through the physical alias | PASS (55 checks; casio-emu adds 4 to the raw loaded word for `mov.l @Rm+,Rn` with m = n, where the SH manual increments only for m != n: accepted) |
+| `flush` | code-cache pressure: 3000 indirect calls and a 3000-block direct chain, three passes, 9 full flushes with links and inline caches resolved across them; the sums must not change | PASS (the hazard above is not reproduced: after a flush the stale literal lies in cache memory the new block does not reuse) |
 | `tmu` | TMU0 programmed through pre-swapped MMIO, IMASK/BL and IMR masking, INTEVT, `rte` restoring SR, `sleep` wake-up; register probe across `trapa`; 15 one-construct hot loops (loads, stores of every form, `bt/s` with a T-writing slot, `jsr` with a store in the slot, push/pop, pc-relative) plus a compiled loop, each run with ~3000 interrupts landing at arbitrary host instructions and compared with an interrupt-free run | PASS (34 checks) |
 
 ![lcd guest frame](img/lcd-guest.png)
