@@ -26,6 +26,20 @@ BOOL OALIoCtlHalReboot(
 }
 
 //------------------------------------------------------------------------------
+//------------------------------------------------------------------------------
+//  IOCTL_HAL_POSTINIT: the kernel is up (called from the first thread once
+//  the system has been initialised). A retail kernel prints nothing itself,
+//  so the OAL marks the milestone; under the translator it is the sign
+//  that the boot got past the kernel.
+//
+BOOL OALIoCtlHalPostInit(
+    UINT32 code, VOID *pInpBuffer, UINT32 inpSize, VOID *pOutBuffer,
+    UINT32 outSize, UINT32 *pOutSize
+) {
+    RETAILMSG(1, (L"CLASSPAD OAL: POSTINIT (kernel initialised)\r\n"));
+    return TRUE;
+}
+
 const OAL_IOCTL_HANDLER g_oalIoCtlTable[] = {
 #include "ioctl_tab.h"
 };

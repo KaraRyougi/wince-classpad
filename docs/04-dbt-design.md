@@ -270,7 +270,10 @@ via hypercall 0xF1):
   using the image's module table, the o32 section tables and the build's
   .map files (kernel-mode DLLs run at their fixed-up VM base, 0xC00xxxxx).
 - Device-aware blocks (`dbt_env.dev_lo/dev_hi`, set from the ROMHDR module
-  table to kernel.dll's range): code that reaches the on-chip control
+  table to the union of kernel.dll's code sections; the o32 table, not
+  load..load+vsize: ROMIMAGE put the Release kernel.dll's text 16 KiB below
+  its load address, and the exception vectors in it read EXPEVT/TEA
+  through r7_bank swapped until the range was fixed): code that reaches the on-chip control
   registers directly cannot use pre-swapped accessors, so every 32-bit
   load/store in such a block tests its effective address for P4 (top byte
   0xFF) at run time with 15 extra instructions that leave T alone (the test
@@ -487,7 +490,7 @@ boundaries had the T sense inverted, loads were restarted after they had
 executed (now the commit-point metadata), and the `rte` stub restored r2 in
 the delay slot after the bank switch. `make -C dbt GUEST=tmu run` is the
 regression test for anything touching the exception path; build the runtime
-with `-DDBT_TRACE_EXC` to print the last 16 exception landings with the stats.
+with `-DDBT_TRACE_EXC` to print every exception delivery as it happens (`[exc] vec= blk=+off kind= resume= where=`; where 1 = helper, 2 = translated code, 3 = outside) and the last 16 landings with the stats.
 
 The guest blob carries file contents only, so guests zero their own `.bss`
 (`guest/start.S`); a CE image does that itself.

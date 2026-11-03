@@ -10,6 +10,7 @@
 { IOCTL_HAL_REQUEST_IRQ,                    0,  OALIoCtlHalRequestIrq       },
 { IOCTL_HAL_INITREGISTRY,                   0,  OALIoCtlHalInitRegistry     },
 { IOCTL_HAL_INIT_RTC,                       0,  OALIoCtlHalInitRTC          },
+{ IOCTL_HAL_POSTINIT,                       0,  OALIoCtlHalPostInit         },
 { IOCTL_HAL_REBOOT,                         0,  OALIoCtlHalReboot           },
 { IOCTL_HAL_DDK_CALL,                       0,  OALIoCtlHalDdkCall          },
 { IOCTL_HAL_GET_CACHE_INFO,                 0,  OALIoCtlHalGetCacheInfo     },

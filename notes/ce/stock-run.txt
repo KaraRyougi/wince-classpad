@@ -28,3 +28,15 @@ ClassPad NK.bin (bsp/classpad, Debug configuration, SYSGEN_SHELL=1, IMGNOKITL/IM
   2026-11-03, 420 s run (make RUN_SECS=420): system hive, user hive ("Mounting clean user hive"), "FILESYS: Launching apps",
   "This device has booted 1 times !!!", then idle. The earlier coredll RHeapFree DEBUGCHK (rheap.cpp:1715, pointer in no
   region) was a translator bug: a direct-link literal patched after the translation had flushed the full code cache.
+
+ClassPad NK-release.bin (Release configuration, COMPRESSION=OFF, 1.1 MB; ~/Downloads/Classpad400_RELEASE), 2026-11-03:
+  First run reset right after "CLASSPAD OAL": ROMIMAGE put kernel.dll's .text (o32 realaddr 8c10b000) below the module's
+  load address (8c10f000), so the device-aware range load..load+vsize missed the exception vectors (TLBMissHandler,
+  InterruptExceptionHandler, GeneralException, NKStartup at 8c10d980..) and their r7_bank CCN reads came back swapped
+  (TEA 0x1c000000, ppdir d0c5228c = bswap 8c22c5d0). dbt/rt/nkbin.c now takes the union of kernel.dll's code sections.
+  With that: boots to OEMIdle (every thread blocked) within the 120 s alarm, versus ~7 min for the Debug image. The run
+  is silent after the OAL sign-on: the retail kernel libraries contain no message strings (not even RETAILMSG's
+  "Booting Windows CE version"), so the OAL now prints "CLASSPAD OAL: POSTINIT" and "CLASSPAD OAL: first idle"
+  (needs a rebuild of the OAL). Block trace: 37.6 k translations, kernel.dll 17.6 k, filesys 7 k, k.coredll 6.8 k,
+  fsdmgr 4.2 k, nk.exe 1.3 k, romfsd 0.5 k; SHATransform (hive hashing) is the single hottest function.
+

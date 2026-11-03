@@ -64,13 +64,22 @@ class Image:
         return syms
     def lookup(self, addr):
         a = (addr & 0x1FFFFFFF) | 0x80000000 if addr >= 0x80000000 and addr < 0xC0000000 else addr
+        # sections first across every module (ROMIMAGE places a module's
+        # sections anywhere, also below another module's load address), the
+        # fixed-up VM address range only as a fallback
+        hits = []
         for name, secs, vbase, vsize in self.modules:
             r = None
             for ra, vs, rva in secs:
                 if ra <= a < ra + vs: r = rva + (a - ra)
-            if r is None and vbase and vbase <= addr < vbase + vsize:
-                r = addr - vbase                  # kernel-mode DLL running at its fixed-up VM address
-            if r is not None:
+            if r is not None: hits.append((name, r))
+        if not hits:
+            for name, secs, vbase, vsize in self.modules:
+                if vbase and vbase <= addr < vbase + vsize:
+                    hits.append((name, addr - vbase))     # kernel-mode DLL running at its fixed-up VM address
+                    break
+        for name, r in hits:
+            if True:
                 off = r - 0x1000
                 syms = self.mapsyms(name)
                 best = None

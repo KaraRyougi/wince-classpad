@@ -71,6 +71,15 @@ void OEMIdle(DWORD idleParam)
     UINT32 before, after, idle;
     ULARGE_INTEGER currIdle;
 
+    static BOOL s_idleSeen;
+
+    if (!s_idleSeen) {
+        // first idle = every boot thread is blocked: with a retail kernel
+        // the only sign that the boot has finished (goes through the ring: BL=1)
+        s_idleSeen = TRUE;
+        RETAILMSG(1, (L"CLASSPAD OAL: first idle\r\n"));
+    }
+
     currIdle.LowPart  = curridlelow;
     currIdle.HighPart = curridlehigh;
 

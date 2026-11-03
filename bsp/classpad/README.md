@@ -27,7 +27,17 @@ network yet.
    Afterwards only `build -c` in `PLATFORM\CLASSPAD` and `makeimg` in the
    release directory are needed when OAL sources change (notes/ce/build-commands.txt).
 5. Copy `NK.bin` from the flat release directory to the Mac and run
-   `make -C dbt NKBIN=path/to/NK.bin run`.
+   `make -C dbt NKBIN=/absolute/path/NK.bin RUN_SECS=600 run` (the path is
+   resolved inside `dbt/`; 20 s is the default alarm).
+
+A Release image is silent: the prebuilt retail kernel libraries carry no
+message strings at all (not even the RETAILMSG ones: "Booting Windows CE
+version", "This device has booted"), so after the OAL sign-on nothing
+prints. The OAL marks the milestones itself: "CLASSPAD OAL: POSTINIT"
+(IOCTL_HAL_POSTINIT, the kernel's first thread has finished system init)
+and "CLASSPAD OAL: first idle" (OEMIdle's first call: every boot thread is
+blocked). The Debug image prints the kernel's and filesys' messages as
+well, at about the same boot time under the translator.
 
 ## What the files are
 

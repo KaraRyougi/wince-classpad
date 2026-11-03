@@ -60,8 +60,22 @@ int nkbin_load(const sf_u8 *bin, sf_u32 maxlen, sf_u32 ram_lo, sf_u32 ram_hi, nk
                         if (name < ram_lo || name + 16 > ram_hi || e32 < ram_lo || e32 + 24 > ram_hi) continue;
                         for (k = 0; k < sizeof kname; k++) if (((const char *)name)[k] != kname[k]) break;
                         if (k == sizeof kname) {
-                            out->kernel_lo = load;
-                            out->kernel_hi = load + le32((const sf_u8 *)e32 + 20);   /* e32_vsize */
+                            /* the code range is the union of the module's code
+                             * sections (o32: vsize +0, realaddr +16, flags +20;
+                             * IMAGE_SCN_CNT_CODE 0x20): ROMIMAGE places them
+                             * anywhere, a Release kernel.dll's text starts below
+                             * its load address. Fallback: load .. load+e32_vsize */
+                            sf_u32 o32 = le32(te + 24), nobj = le16((const sf_u8 *)e32), j, lo = 0xFFFFFFFF, hi = 0;
+                            (void)load;
+                            for (j = 0; j < nobj && j < 32 && o32 >= ram_lo && o32 + 24 <= ram_hi; j++, o32 += 24) {
+                                const sf_u8 *o = (const sf_u8 *)o32;
+                                sf_u32 vsize = le32(o), real = le32(o + 16), flags = le32(o + 20);
+                                if (!(flags & 0x20) || !vsize) continue;
+                                if (real < lo) lo = real;
+                                if (real + vsize > hi) hi = real + vsize;
+                            }
+                            if (hi) { out->kernel_lo = lo; out->kernel_hi = hi; }
+                            else { out->kernel_lo = load; out->kernel_hi = load + le32((const sf_u8 *)e32 + 20); }
                             break;
                         }
                     }

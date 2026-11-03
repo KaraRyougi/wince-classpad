@@ -781,6 +781,8 @@ static sf_u32 g_trace_n;
 static void trace_exc(sf_u32 host, sf_u32 blk, sf_u32 off, sf_u32 kind, sf_u32 committed, sf_u32 resume, sf_u32 vec, sf_u32 where)
 {
     unsigned i = g_trace_n++ % TRACE_N;
+    dbt_puts("[exc] vec="); dbt_puthex(vec); dbt_puts(" blk="); dbt_puthex(blk); dbt_puts("+"); dbt_puthex(off);
+    dbt_puts(" kind="); dbt_puthex(kind); dbt_puts(" resume="); dbt_puthex(resume); dbt_puts(" where="); dbt_puthex(where); dbt_puts("\n");
     g_trace[i].host = host; g_trace[i].blk = blk; g_trace[i].off = off; g_trace[i].kind = kind;
     g_trace[i].committed = committed; g_trace[i].resume = resume; g_trace[i].vec = vec; g_trace[i].where = where;
 }

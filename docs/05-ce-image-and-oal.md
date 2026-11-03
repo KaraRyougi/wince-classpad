@@ -216,8 +216,13 @@ What the kernel sources settled (2026-11-02, notes/ce/kernel-sh-notes.md):
    through a trampoline), `rte` into untranslated mapped code with BL=1
    (resolved after the rte), committed-resume across the device slow path,
    HC_FLUSH's range, and a link-literal patch after a full code-cache flush
-   (showed as a coredll RHeapFree DEBUGCHK). Still open: SR.FD, display,
-   speed (Release build of the image, decompression off).
+   (showed as a coredll RHeapFree DEBUGCHK). The Release image
+   (COMPRESSION=OFF, 1.1 MB) boots to OEMIdle within 2 minutes once the
+   device-aware range was taken from kernel.dll's code sections instead of
+   load..load+vsize (ROMIMAGE had put the Release kernel's text, with the
+   exception vectors, below its load address). A retail kernel prints
+   nothing, so the OAL marks POSTINIT and the first idle. Still open:
+   SR.FD, display.
 4. `make -C dbt NKBIN=NK.bin run`: expect the kernel banner on stdout,
    then the first scheduler tick. Fix what breaks.
 5. Memory: ~~compact block metadata; move the translator region down and
