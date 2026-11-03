@@ -36,7 +36,7 @@ translator (`dbt/`) runs its three test guests to completion inside casio-emu
 make test          # host tests: FPU emulator + translator
 make -C dbt run    # build launcher+translator+guest, run in casio-emu (GUEST=hello|exc|fpu|tmu|bench|lcd|apicall|mmu|aspace|bank|devmem)
 make -C dbt GUEST=lcd screenshot   # same, dumping the emulated LCD to dbt/build/dbt-lcd.png
-make -C dbt NKBIN=path/NK.bin run  # run a Windows CE .bin image from emulated flash (docs/05)
+make -C dbt NKBIN=path/NK.bin RUN_SECS=300 run  # run a Windows CE .bin image from emulated flash for 5 minutes (docs/05)
 make -C dbt GUEST=nkimg nkrun      # loader self-test with a synthetic CE-format image
 python3 tools/nkbin.py path/to/NK.bin
 ```

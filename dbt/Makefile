@@ -42,6 +42,8 @@ NK_ENV = $(if $(NKBIN),HLE_OSROM=$(abspath $(NK_PADDED)) HLE_OSROM_PAD=$(NK_FLAS
 # casio-emu remembers the last machine profile (model.txt); the translator is an
 # fx-CG100 add-in, so pin the profile or a remembered ClassPad refuses to boot
 EMU_ENV = CALCEMU_MODEL=fx-cg100
+# seconds before run-headless.sh kills the emulator (a CE boot needs minutes: make RUN_SECS=300 NKBIN=... run)
+RUN_SECS ?= 20
 # make DEVALL=1 GUEST=x run: the guest asks for device-aware translation of its whole code (start.S)
 GUEST_CFLAGS += $(if $(filter 1,$(DEVALL)),-DDEVAWARE_ALL,)
 define NK_PAD
@@ -107,13 +109,13 @@ $(IMG).g3a: $(IMG)-loader.bin
 
 run: $(IMG).g3a
 	$(if $(NKBIN),$(NK_PAD))
-	-$(EMU_ENV) $(NK_ENV) $(EMU)/run-headless.sh $(abspath $(IMG).g3a) 20
+	-$(EMU_ENV) $(NK_ENV) $(EMU)/run-headless.sh $(abspath $(IMG).g3a) $(RUN_SECS)
 
 # run the current guest through the .bin loader (image in emulated flash)
 nkrun: NKBIN = $(BUILD)/$(GUEST).nk.bin
 nkrun: $(IMG).g3a $(BUILD)/$(GUEST).nk.bin
 	$(NK_PAD)
-	-$(EMU_ENV) $(NK_ENV) $(EMU)/run-headless.sh $(abspath $(IMG).g3a) 20
+	-$(EMU_ENV) $(NK_ENV) $(EMU)/run-headless.sh $(abspath $(IMG).g3a) $(RUN_SECS)
 
 # run headless with the emulator dumping the presented frame (PPM) and convert the
 # last one to $(IMG).png; HLE_FORCE_R61524 presents the LCD controller's pixels
