@@ -18,4 +18,4 @@ SOURCES=\
 
 SH_SOURCES=\
     startup.src \
-    cache.src
+    cacheops.src

@@ -41,7 +41,7 @@ Cache and TLB
   SOC\OAL\CACHE\cfw.c                 OEMCacheRangeFlush: D-cache writeback/invalidate (whole cache), I-cache invalidate via CCR.ICI,
                                       TLB flush via MMUCR.TI; OALCacheGlobalsInit (16 KiB I / 32 KiB D, 2-way, 32-byte lines)
   SOC\OAL\CACHE\flushdc.src, flushic.src, tlbclear.src, fw.src (OEMExtraCCR 0x80000105, SH4CacheLines 1024)
-  -> CLASSPAD cache.c + cache.src: ocbwb/ocbp/icbi loops (SH-4A), MMUCR via pre-swapped store, hypercalls F2 (code ranges) and F9 (TLB)
+  -> CLASSPAD cache.c + cacheops.src: ocbwb/ocbp/icbi loops (SH-4A), MMUCR via pre-swapped store, hypercalls F2 (code ranges) and F9 (TLB)
 
 Debug output
   SOC\OAL\DEBUG\debug.c               OEMInitDebugSerial (SCIF2 at 0xFFE80000), OEMWriteDebugByte, OEMWriteDebugString, OEMReadDebugByte,

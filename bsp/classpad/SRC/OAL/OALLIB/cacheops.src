@@ -1,5 +1,5 @@
 ;;-----------------------------------------------------------------------------
-;;  cache.src - cache maintenance by address range (SH-4A)
+;;  cacheops.src - cache maintenance by address range (SH-4A)
 ;;
 ;;  r4 = start address, r5 = length in bytes. Lines are 32 bytes. These
 ;;  instructions run natively under the translator.

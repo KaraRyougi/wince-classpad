@@ -38,7 +38,7 @@ network yet.
 - `timer.c`: TMU0 fixed 1 ms tick, `OEMIdle`, `OALStall`.
 - `intr.c`: IRQ numbering (INTEVT - 0x200) / 0x20, IPR/IMR programming,
   hooks `OALTimerIntrHandler` on IRQ 16.
-- `cache.c` + `cache.src`: `OEMCacheRangeFlush` with `ocbwb`/`ocbp`/`icbi`
+- `cache.c` + `cacheops.src`: `OEMCacheRangeFlush` with `ocbwb`/`ocbp`/`icbi`
   loops, MMUCR.TI, and the translator hypercalls F2 (code changed) and F9
   (TLB changed).
 - `debug.c`: `OEMWriteDebugByte` -> hypercall F3 when SR.BL is clear, else
