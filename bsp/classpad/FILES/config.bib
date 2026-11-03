@@ -15,10 +15,8 @@ CONFIG
     KERNELFIXUPS=ON
     AUTOSIZE=ON
     PROFILE=OFF
-; @CESYSGEN IF !NK_NKNOCOMP
-    COMPRESSION=ON
-; @CESYSGEN ENDIF !NK_NKNOCOMP
-; @CESYSGEN IF NK_NKNOCOMP
+; No compression: the writable sections are stored as is, so the kernel
+; does not run its decompressor at boot (slow under the translator) and
+; the image is a few hundred KB larger (the window has 11.5 MiB).
     COMPRESSION=OFF
-; @CESYSGEN ENDIF NK_NKNOCOMP
     ROMFLAGS=00
