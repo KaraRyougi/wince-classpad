@@ -15,10 +15,14 @@ network yet.
    The catalog should list "Casio ClassPad: SH4" under BSPs (if not: Tools >
    Platform Builder for CE 6.0 > Catalog refresh, or restart VS). Template
    Custom Device, remove everything the wizard pre-selects.
-3. Project > Properties > Configuration Properties > Build Options: tick
-   nothing but "Enable eboot space in memory" off; the BSP's `classpad.bat`
-   already sets IMGNOKITL=1 and IMGNODEBUGGER=1. Use the Release
-   configuration.
+3. Project > Properties > Configuration Properties > Build Options, Release
+   configuration: untick everything. In particular "Enable eboot space in
+   memory" (IMGEBOOT, no bootloader here), "Enable kernel debugger" (so
+   IMGNODEBUGGER=1: no kd/hd/osaxs in the image) and "Enable KITL" (so
+   IMGNOKITL=1: no transport). Leave "Enable ship build" off too, it would
+   compile the RETAILMSG output away. The generated PBInitEnv.bat clears the
+   IMG* variables after calling `classpad.bat`, so what this page says is
+   what counts.
 4. Build > Advanced Build Commands > Sysgen (once), then Build Solution.
    Afterwards only `build -c` in `PLATFORM\CLASSPAD` and `makeimg` in the
    release directory are needed when OAL sources change (notes/ce/build-commands.txt).
