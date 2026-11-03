@@ -58,7 +58,7 @@ int    dbt_exc_c(dbt_gctx *ctx);
  * mac fallback, and ldc rm,sr (writes ctx->sr with the SR to really load). */
 void   dbt_fpu_c(dbt_gctx *ctx, sf_u32 opcode);
 void   dbt_fallback_c(dbt_gctx *ctx, sf_u32 opcode);
-void   dbt_ldc_sr_c(dbt_gctx *ctx, sf_u32 newsr);
+int    dbt_ldc_sr_c(dbt_gctx *ctx, sf_u32 newsr);   /* returns 1 when the new SR switches register banks */
 /* Guest rte: returns host address for the guest SPC; updates *ssr for the real rte. */
 sf_u32 dbt_rte_c(sf_u32 guest_spc, sf_u32 *ssr);
 /* Drop every block overlapping [lo, hi) of guest code (after code writes). */

@@ -78,6 +78,26 @@ void guest_main(void)
         check("bank 1 intact after the address error", bank1_intact());
     }
 
+    /* ldc sr that switches banks (the kernel's PR_B1_BK / PR_B0_IE loads):
+     * the old bank keeps its r0-r7, the new bank shows its own values, and
+     * coming back finds everything as it was */
+    {
+        static unsigned res[8];
+        __asm__ volatile (
+            "mov #0x21, r0\n\tmov #0x22, r1\n\tmov #0x23, r2\n\tmov #0x24, r3\n\tmov #0x26, r6\n\t"
+            "stc sr, r9\n\tmov.l 1f, r10\n\tor r9, r10\n\t"
+            "ldc r10, sr\n\t"             /* RB=1, BL=1 */
+            "mov r4, r11\n\tmov r5, r12\n\tmov r7, r13\n\t"
+            "ldc r9, sr\n\t"              /* back to bank 0 */
+            "mov.l r0, @(0, %0)\n\tmov.l r1, @(4, %0)\n\tmov.l r2, @(8, %0)\n\tmov.l r3, @(12, %0)\n\tmov.l r6, @(16, %0)\n\t"
+            "mov.l r11, @(20, %0)\n\tmov.l r12, @(24, %0)\n\tmov.l r13, @(28, %0)\n\t"
+            "bra 2f\n\tnop\n\t.align 2\n1:\t.long 0x30000000\n2:\n\t"
+            :: "r"(res) : "r0", "r1", "r2", "r3", "r6", "r9", "r10", "r11", "r12", "r13", "memory");
+        check("ldc sr into bank 1 shows the parked r4/r5/r7", res[5] == MAGIC4 && res[6] == MAGIC5 && res[7] == MAGIC7);
+        check("ldc sr back to bank 0 finds r0-r3/r6 intact", res[0] == 0x21 && res[1] == 0x22 && res[2] == 0x23 && res[3] == 0x24 && res[4] == 0x26);
+        check("bank 1 intact after the bank switches", bank1_intact());
+    }
+
     /* many exceptions: nothing drifts */
     {
         int i;

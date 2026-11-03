@@ -387,7 +387,9 @@ static dbt_block *translate_at(sf_u32 gpc)
     g_nblocks++;
     dbt_sync_code(host, (sf_u32)b->host_len);
     hash_insert(gpc, host);
-#ifdef DBT_TRACE_LINK
+#if defined(DBT_TRACE_LINK) || defined(DBT_TRACE_BLOCKS)
+    /* -DDBT_TRACE_BLOCKS (EXTRA_CFLAGS) prints every block translated: the
+     * cheapest way to follow a guest that dies without a word */
     dbt_puts("[dbt] translate gpc="); dbt_puthex(gpc); dbt_puts(" host="); dbt_puthex(host);
     dbt_puts(" len="); dbt_puthex((sf_u32)b->guest_len); dbt_puts(" end="); dbt_puthex((sf_u32)b->end_reason); dbt_puts("\n");
 #endif
@@ -938,11 +940,17 @@ sf_u32 dbt_rte_c(sf_u32 guest_spc, sf_u32 *ssr)
     return host;
 }
 
-void dbt_ldc_sr_c(dbt_gctx *ctx, sf_u32 newsr)
+int dbt_ldc_sr_c(dbt_gctx *ctx, sf_u32 newsr)
 {
+    /* ctx->sr is the SR at the helper's entry (SAVE_CTX_RT): compare banks.
+     * When RB changes the stub returns through rte, since after the switch
+     * no register of either bank may be touched (the old bank keeps the
+     * guest's r0-r7, the new bank is live state of the other context). */
+    int flip = ((ctx->sr ^ newsr) & SR_RB) != 0;
     note_asid();
     dbt_shadow_md = newsr & SR_MD;
     ctx->sr = newsr | SR_MD | SR_DSP;
+    return flip;
 }
 
 /* -------------------------------------------------------------- helpers */

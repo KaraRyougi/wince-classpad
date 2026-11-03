@@ -208,8 +208,7 @@ _dbt_hit_end:
 
 /* Restore the guest context from dbt_ctx_rt and jump to r0 (host target).
  * Leaves r1 = target, r3 = SR to load; guest r0,r1,r2,r3 in Y0,Y1,A0,X1. */
-        .global _dbt_tail_full_prep
-_dbt_tail_full_prep:
+        .macro TAIL_PREP
         mov     r0, r1
         mov.l   .Lctx_rtA, r2
         mov.l   @(CTX_SR, r2), r3
@@ -242,6 +241,11 @@ _dbt_tail_full_prep:
         mov.l   @(28, r2), r13
         mov.l   @(32, r2), r14
         mov.l   @(36, r2), r15
+        .endm
+
+        .global _dbt_tail_full_prep
+_dbt_tail_full_prep:
+        TAIL_PREP
         .global _dbt_tail_full, _dbt_full_m1, _dbt_full_m2, _dbt_full_m3, _dbt_full_m4, _dbt_full_end
 _dbt_tail_full:
         ldc     r3, sr                 /* guest SR back (interrupts may now arrive) */
@@ -255,11 +259,29 @@ _dbt_full_m4:
         jmp     @r1
         STSX    SLOT_Y1, 1
 _dbt_full_end:
+
+/* Same, for a guest `ldc rm, sr` that switches register banks: everything is
+ * restored into the old bank, then rte loads the new SR and the target at
+ * once, so no register of the new bank is used as a temporary. SPC/SSR are
+ * consumed (a context that switches banks has already read them). No
+ * exception can land here: interrupts are masked and nothing touches memory
+ * after the loads. */
+        .global _dbt_tail_rte_prep
+_dbt_tail_rte_prep:
+        TAIL_PREP
+        ldc     r1, spc                /* host target */
+        ldc     r3, ssr                /* guest SR with the new RB */
+        STSX    SLOT_X1, 3
+        STSX    SLOT_Y0, 0
+        STSX    SLOT_A0, 2
+        STSX    SLOT_Y1, 1
+        rte
+        nop
         POOL    A
 
 /* ------------------------------------------------------------------ */
 /* Helper stubs. In: X0 = argument (opcode / new SR), X1 = return address. */
-        .macro HELPER name, cfunc, s1, s2, s3, masked
+        .macro HELPER name, cfunc, s1, s2, s3, masked, rb=0
         .global _dbt_\name
 _dbt_\name:
         LDSX    0, SLOT_Y0
@@ -277,14 +299,23 @@ _dbt_\name:
         mov.l   \cfunc, r0
         jsr     @r0
         nop
+        .if \rb
+        tst     r0, r0                 /* r0 = 1: the new SR switches register banks */
         STSX    SLOT_X1, 0             /* r0 = return address */
+        bt      1f
+        bra     _dbt_tail_rte_prep
+        nop
+1:
+        .else
+        STSX    SLOT_X1, 0             /* r0 = return address */
+        .endif
         bra     _dbt_tail_full_prep
         nop
         .endm
 
         HELPER  fpu_stub, .Lfpu_cB, _dbt_hfpu_s1, _dbt_hfpu_s2, _dbt_hfpu_s3, _dbt_hfpu_masked
         HELPER  fallback_stub, .Lfallback_cB, _dbt_hfb_s1, _dbt_hfb_s2, _dbt_hfb_s3, _dbt_hfb_masked
-        HELPER  ldc_sr_stub, .Lldc_sr_cB, _dbt_hsr_s1, _dbt_hsr_s2, _dbt_hsr_s3, _dbt_hsr_masked
+        HELPER  ldc_sr_stub, .Lldc_sr_cB, _dbt_hsr_s1, _dbt_hsr_s2, _dbt_hsr_s3, _dbt_hsr_masked, 1
         .global _dbt_hfpu_s1, _dbt_hfpu_s2, _dbt_hfpu_s3, _dbt_hfpu_masked
         .global _dbt_hfb_s1, _dbt_hfb_s2, _dbt_hfb_s3, _dbt_hfb_masked
         .global _dbt_hsr_s1, _dbt_hsr_s2, _dbt_hsr_s3, _dbt_hsr_masked
