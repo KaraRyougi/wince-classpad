@@ -9,8 +9,12 @@ void *memcpy(void *d, const void *s, dbt_size_t n);
 void *memset(void *d, int c, dbt_size_t n);
 
 #define HSIZE        8192                 /* hash entries, power of two */
-#define MAX_BLOCKS   2048                 /* block headers (~180 B each) + a metadata arena; see docs/04 */
-#define META_ARENA_BYTES (640u * 1024u)   /* meta + spill entries of all live blocks (~250 B per block typical) */
+#ifndef MAX_BLOCKS
+#define MAX_BLOCKS   4096                 /* block headers (~180 B each) + a metadata arena; see docs/04 */
+#endif
+#ifndef META_ARENA_BYTES
+#define META_ARENA_BYTES (1280u * 1024u)  /* meta + spill entries of all live blocks (~320 B per block in the CE boot) */
+#endif
 #define EXPEVT_REG   (*(volatile sf_u32 *)0xFF000024u)
 #define TRA_REG      (*(volatile sf_u32 *)0xFF000020u)
 #define DEBUG_PORT   (*(volatile sf_u8 *)0xFFFFF000u)
@@ -53,6 +57,7 @@ static int       g_translating;             /* guest pc being translated or 0 */
 static sf_u32    g_translating_pc;
 static int guest_pc_fetchable(sf_u32 gpc);
 static void deliver_synthetic(sf_u32 gpc, sf_u32 expevt);
+static void print_stats(void);
 
 /* ------------------------------------------- address spaces and the TLB */
 /* Blocks are keyed by virtual pc. Code below 0x80000000 is TLB-mapped and
@@ -72,6 +77,15 @@ static void deliver_synthetic(sf_u32 gpc, sf_u32 expevt);
 #define ASID_ANY     0xFFFFu
 typedef struct { sf_u8 dead, user; sf_u16 asid; sf_u32 phys; } binfo;
 static binfo  g_binfo[MAX_BLOCKS];
+/* Every block by guest pc, chained through the fast-path hash's index: the
+ * direct-mapped g_hash holds one block per slot and loses the others to
+ * collisions, and finding those by scanning the block table cost a full
+ * pass over all live blocks at every translation (0.24 ms of emulated time
+ * each with 4096 blocks: a third of a CE boot). CHAIN_NONE ends a chain;
+ * dead blocks stay linked and are skipped. */
+#define CHAIN_NONE 0xFFFFu
+static sf_u16 g_chain_head[HSIZE];
+static sf_u16 g_chain_next[MAX_BLOCKS];
 static sf_u32 g_asid;
 static dbt_env   g_env;
 
@@ -274,7 +288,7 @@ static dbt_block *find_block_by_gpc(sf_u32 gpc)
 {
     int i;
     sf_u32 phys = 0; int have_phys = 0;
-    for (i = 0; i < g_nblocks; i++) {
+    for (i = g_chain_head[hidx(gpc)]; i != CHAIN_NONE; i = g_chain_next[i]) {
         dbt_block *b = &g_blocks[i];
         if (g_binfo[i].dead || b->guest_pc != gpc) continue;
         if (!g_binfo[i].user || g_binfo[i].asid == g_asid) return b;
@@ -288,12 +302,30 @@ static dbt_block *find_block_by_gpc(sf_u32 gpc)
 
 static void cache_flush_all(void)
 {
-    sf_u32 i;
-    for (i = 0; i < HSIZE; i++) { g_hash[i].gpc = 1; g_hash[i].host = 0; }
+#ifdef DBT_TRACE_FLUSH
+    sf_u32 cache_was = g_cache_used, arena_was = g_arena_used;
+#endif
+    sf_u32 i, sr;
+    /* Interrupts land in the translator's C code and abandon it (the guest
+     * resumes at the pc being translated). Clearing 8192 hash slots takes
+     * about one tick, so an unmasked flush was restarted by every tick and
+     * never finished: the Release boot livelocked at its first full flush
+     * once the chain heads made the loop a little longer. Mask IMASK for
+     * the flush (one tick of latency, once per cache fill). */
+    __asm__ volatile ("stc sr, %0" : "=r"(sr));
+    __asm__ volatile ("ldc %0, sr" :: "r"(sr | 0xF0u) : "memory");
     g_nblocks = 0;
     g_cache_used = 0;
     g_arena_used = 0;
+    for (i = 0; i < HSIZE; i++) { g_hash[i].gpc = 1; g_hash[i].host = 0; g_chain_head[i] = CHAIN_NONE; }
     dbt_stat.flushes++;
+    __asm__ volatile ("ldc %0, sr" :: "r"(sr) : "memory");
+#ifdef DBT_TRACE_FLUSH
+    if (dbt_stat.flushes > 1) {
+        dbt_puts("[dbt] full flush "); dbt_puthex(dbt_stat.flushes); dbt_puts(" cache="); dbt_puthex(cache_was);
+        dbt_puts(" arena="); dbt_puthex(arena_was); dbt_puts(": "); print_stats();
+    }
+#endif
 }
 
 /* ---------------------------------------------------------- debug ring
@@ -441,14 +473,25 @@ static dbt_block *translate_at(sf_u32 gpc)
         dbt_halt("translation failed");
     }
     g_cache_used += ((sf_u32)b->host_len + 31u) & ~31u;
+    dbt_sync_code(host, (sf_u32)b->host_len);     /* before anything can find the block: see below */
     {
         binfo *bi = &g_binfo[g_nblocks];
         bi->dead = 0; bi->user = (sf_u8)IS_USER(gpc);
         bi->asid = bi->user ? (sf_u16)g_asid : (sf_u16)ASID_ANY;
         bi->phys = bi->user ? utlb_translate(gpc, g_asid) : (gpc & 0x1FFFFFFFu);
+        g_chain_next[g_nblocks] = g_chain_head[hidx(gpc)];
     }
+    /* An interrupt can land in the translator (it resumes the guest at the
+     * pc being translated and this C context is abandoned), so the order
+     * matters: the host code is synced to the instruction cache first (a
+     * block found before that ran whatever the cache memory held before the
+     * last flush: the Release boot hung that way once the chained index
+     * returned the newest duplicate), the block is allocated before its
+     * chain head is published (never a head pointing at an index the next
+     * translation reuses), and the hash entry comes last. An abandoned
+     * insert leaves at worst a block nobody finds, translated again. */
     g_nblocks++;
-    dbt_sync_code(host, (sf_u32)b->host_len);
+    g_chain_head[hidx(gpc)] = (sf_u16)(g_nblocks - 1);
     hash_insert(gpc, host);
 #if defined(DBT_TRACE_LINK) || defined(DBT_TRACE_BLOCKS)
     /* -DDBT_TRACE_BLOCKS (EXTRA_CFLAGS) prints every block translated: the
@@ -552,6 +595,27 @@ void dbt_invalidate(sf_u32 lo, sf_u32 hi)
     invalidate_range(lo, hi, 0);
 }
 
+/* HC_FLUSH with no range: the kernel synchronised the whole instruction
+ * cache (InitModule, CreateNewProcHelper) without saying what it wrote.
+ * Blocks whose code lies in the ROM image (XIP: executed in place from the
+ * NK.bin records, directly mapped or through a kernel-mode DLL's fixed-up
+ * TLB mapping) cannot be stale, the image is never written; dropping them
+ * cost a retranslation of all hot code at every module load. Everything
+ * else goes. */
+static void invalidate_all_but_rom(void)
+{
+    int i, kept = 0;
+    for (i = 0; i < g_nblocks; i++) {
+        dbt_block *b = &g_blocks[i];
+        sf_u32 pa;
+        if (g_binfo[i].dead) continue;
+        pa = (b->guest_pc >= 0x80000000u && b->guest_pc < 0xC0000000u) ? (b->guest_pc & 0x1FFFFFFFu) : g_binfo[i].phys;
+        if (g_cfg.rom_hi && pa != PHYS_UNKNOWN && pa >= g_cfg.rom_lo && pa + b->guest_len <= g_cfg.rom_hi) { kept++; continue; }
+        invalidate_block(b);
+    }
+    dbt_stat.rom_kept += (sf_u32)kept;
+}
+
 /* ------------------------------------------------------------ hypercalls */
 
 #define HC_EXIT   0xF0
@@ -605,6 +669,8 @@ static void print_stats(void)
     dbt_puts(" exceptions="); dbt_puthex(dbt_stat.exceptions);
     dbt_puts(" fpu="); dbt_puthex(dbt_stat.fpu_ops);
     dbt_puts(" fpudis="); dbt_puthex(dbt_stat.fpu_disabled);
+    dbt_puts(" hcflush="); dbt_puthex(dbt_stat.hc_flush); dbt_puts("/"); dbt_puthex(dbt_stat.hc_flush_all); dbt_puts(" romkept="); dbt_puthex(dbt_stat.rom_kept);
+    dbt_puts(" ldcsr="); dbt_puthex(dbt_stat.ldc_sr_calls); dbt_puts(" fallback="); dbt_puthex(dbt_stat.fallback_calls); dbt_puts(" rte="); dbt_puthex(dbt_stat.rte_calls);
     dbt_puts(" chained="); dbt_puthex(dbt_stat.chained);
     dbt_puts(" evicted="); dbt_puthex(dbt_stat.hash_evicted);
     dbt_puts(" ic_miss_c="); dbt_puthex(dbt_stat.ic_misses_c);
@@ -639,7 +705,8 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
     case HC_PUTC: dbt_putc((int)ctx->r[4]); return RT_ACT_RESUME;
     case HC_PUTHEX: dbt_puthex(ctx->r[4]); return RT_ACT_RESUME;
     case HC_FLUSH:                                          /* r4 = address, r5 = length (0,0: everything) */
-        if (ctx->r[5] == 0) dbt_invalidate(0, 0xFFFFFFFFu);
+        dbt_stat.hc_flush++;
+        if (ctx->r[5] == 0) { dbt_stat.hc_flush_all++; invalidate_all_but_rom(); }
         else dbt_invalidate(ctx->r[4], ctx->r[4] + ctx->r[5]);
         return RT_ACT_RESUME;
     case HC_STATS: print_stats(); return RT_ACT_RESUME;
@@ -784,7 +851,9 @@ static void trace_exc(sf_u32 host, sf_u32 blk, sf_u32 off, sf_u32 kind, sf_u32 c
 {
     unsigned i = g_trace_n++ % TRACE_N;
     dbt_puts("[exc] vec="); dbt_puthex(vec); dbt_puts(" blk="); dbt_puthex(blk); dbt_puts("+"); dbt_puthex(off);
-    dbt_puts(" kind="); dbt_puthex(kind); dbt_puts(" resume="); dbt_puthex(resume); dbt_puts(" where="); dbt_puthex(where); dbt_puts("\n");
+    dbt_puts(" kind="); dbt_puthex(kind); dbt_puts(" resume="); dbt_puthex(resume); dbt_puts(" where="); dbt_puthex(where);
+    if (where >= 3) { dbt_puts(" host="); dbt_puthex(host); }   /* 3: a stub window, 4: the translator's C code (its pc, for a profile) */
+    dbt_puts("\n");
     g_trace[i].host = host; g_trace[i].blk = blk; g_trace[i].off = off; g_trace[i].kind = kind;
     g_trace[i].committed = committed; g_trace[i].resume = resume; g_trace[i].vec = vec; g_trace[i].where = where;
 }
@@ -993,6 +1062,7 @@ static int exc_c_body(dbt_gctx *ctx)
                 g_translating = 0;
                 take_stub_context(ctx);
                 dbt_stat.probe_faults++;
+                trace_exc(ctx->host_spc, 0, 0, 0, 0, guest_pc, ctx->vec_off, 4);   /* 4: in the translator's C code (host = its pc) */
             } else {
                 dbt_puts("[dbt] exception outside translated code: spc="); dbt_puthex(ctx->host_spc);
                 dbt_puts(" expevt="); dbt_puthex(ctx->expevt); dbt_puts(" vec="); dbt_puthex(ctx->vec_off);
@@ -1042,6 +1112,7 @@ deliver:
 
 sf_u32 dbt_rte_c(sf_u32 guest_spc, sf_u32 *ssr)
 {
+    dbt_stat.rte_calls++;
     sf_u32 host;
     note_asid();                       /* a context switch returns to the new thread through rte */
     dbt_dbgring_drain();
@@ -1066,6 +1137,7 @@ sf_u32 dbt_rte_c(sf_u32 guest_spc, sf_u32 *ssr)
 
 int dbt_ldc_sr_c(dbt_gctx *ctx, sf_u32 newsr)
 {
+    dbt_stat.ldc_sr_calls++;
     /* ctx->sr is the SR at the helper's entry (SAVE_CTX_RT): compare banks.
      * When RB changes the stub returns through rte, since after the switch
      * no register of either bank may be touched (the old bank keeps the
@@ -1151,6 +1223,7 @@ static void dev_mem(dbt_gctx *ctx, const sh_insn *d)
 
 void dbt_fallback_c(dbt_gctx *ctx, sf_u32 opcode)
 {
+    dbt_stat.fallback_calls++;
     int n = (opcode >> 8) & 0xF, m = (opcode >> 4) & 0xF;
     sf_u64 acc;
     if (opcode == 0x0038) { tlb_hook(); return; }           /* ldtlb */

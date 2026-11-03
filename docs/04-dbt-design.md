@@ -176,8 +176,8 @@ can only be a TLB miss from the code probe; longjmp out and deliver as above.
 
 ## Memory layout on the device
 
-Reserve the top of RAM for the translator: code cache (2 MiB), tables and
-stacks. The tables are 2048 block headers (416 KiB), a 640 KiB arena holding
+Reserve the top of RAM for the translator: code cache (1 MiB), tables and
+stacks. The tables are 4096 block headers (0.7 MiB), a 1.25 MiB arena holding
 each block's resume metadata and spill records (about 240 bytes per block in
 practice; the translator writes a fixed-size scratch block and the runtime
 copies the used entries), the 64 KiB hash and ~60 KiB of code: 1.3 MiB in
@@ -185,7 +185,7 @@ all, so the translator needs about 3.5 MiB with the cache. Guest RAM is told
 to end below it (`MainMemoryEndAddress`). On 16 MiB units (fx-CP400,
 fx-CG100) that leaves about 12 MiB for CE; 8 MiB units run headless only.
 The emulator layout (docs/05, defined in `dbt/Makefile`) gives the
-translator 1.5 MiB plus the 2 MiB cache and the guest 11.5 MiB.
+translator 2.5 MiB plus the 1 MiB cache and the guest 11.5 MiB (2026-11-03: the cache was 2 MiB and never filled past 0.6 MiB before the 2048-block cap; the room went to 4096 blocks).
 
 ## Test plan
 
@@ -208,8 +208,24 @@ via hypercall 0xF1):
   fast path); on a miss the stub masks interrupts, saves the guest context
   into `dbt_ctx_rt` and calls `dbt_resolve`, which translates and patches the
   link literal (a data write; PC-relative loads go through the operand cache).
+  A block the direct-mapped hash lost to a collision is found through a
+  second index chained by the same hash slot (`g_chain_head/next`); until
+  2026-11-03 this was a linear scan of the block table at every miss, which
+  made each translation cost about 0.24 ms of emulated time with 4096
+  blocks (a third of a CE boot) and grow with the block cap. Rule for
+  every table the translator's C code updates: an interrupt can land in
+  that C code, the guest handler runs and returns to the pc being
+  translated, and the C context is abandoned (`where=3` in the exception
+  trace), so updates are ordered so that an abandoned one leaves a block
+  nobody finds (translated again later), never a half-published entry: the
+  host code is synced to the instruction cache first, the block is
+  allocated (`g_nblocks++`) before its chain head is written, the hash entry
+  comes last. Work that must not be restarted from scratch runs with IMASK
+  raised: the full flush clears 8192 hash slots, about one tick, and an
+  unmasked flush was abandoned by every tick and never finished (a livelock
+  at the first cache fill of the Release boot).
   The patch is skipped when the translation flushed the whole cache
-  (`dbt_stat.flushes` changed under the lookup: 2048 blocks or 2 MiB
+  (`dbt_stat.flushes` changed under the lookup: 4096 blocks or 1 MiB
   reached): the literal belongs to a block that no longer exists, and the
   write would land in whatever the fresh cache has put there. The same
   guard covers inline-cache refills. Found with the CE kernel, where the
@@ -454,12 +470,51 @@ Optimizations, in order of payoff per effort:
 4. **Spill avoidance for stores** when a dead register is provably available
    (needs liveness across blocks; only after the above).
 
+### Profiling a CE boot (2026-11-03)
+
+The 1 ms TMU tick is a sampling profiler: `-DDBT_TRACE_EXC` prints every
+exception delivery with the guest pc it resumes at, and
+`tools/cesym.py NK.bin RELDIR -` turns the `vec=00000600` lines into
+module!function names (the recipe: `grep vec=00000600 | grep -o 'resume=...'
+| cesym | sort | uniq -c | sort -rn`). `-DDBT_TRACE_FLUSH` prints the
+statistics at every full code-cache flush, with the cache and arena fill.
+Release image, 29770 samples (about 30 s of emulated time to the first
+idle; the emulator runs at roughly a quarter of real time):
+
+| Function | Samples | Note |
+|---|---|---|
+| nk.exe ClasspadCacheWriteback | 4761 | OEMCacheRangeFlush walking the 11.5 MiB RAM window line by line for "whole cache" calls |
+| k.coredll SHATransform | 765 | registry hive hashing, plain translated code |
+| kernel.dll ZeroPage | 550 | stores of zero still pay the swap |
+| kernel.dll KCNextThread | 418 | |
+| nk.exe ClasspadICacheInvalidate | 310 | as the write-back above |
+| kernel.dll InitModule | 290 | |
+| k.coredll memset / memcpy / sh3memcpy | 563 | |
+| nk.exe OEMCacheRangeFlush | 177 | |
+
+So 18 % of the boot was the OAL's whole-cache walks: `OEMCacheRangeFlush`
+now walks the cache address arrays instead (1024 stores to 0xF4000000 /
+0xF0000000 for the 32 KiB 4-way caches, `cacheops.src`), which needs
+casio-emu to accept the operand-cache arrays (`dbt/emu-patch/add_oc_arrays.py`,
+it models no operand cache). The code cache filled 18 times in those 30 s
+(MAX_BLOCKS was 2048, now 4096; `-DMAX_BLOCKS=n -DMETA_ARENA_BYTES=n`
+override the limits for experiments), 36 k translations in all, and with the
+cap halved the boot took 13 % longer for 16 k more translations: about
+0.24 ms of emulated time per translation, a third of the boot. The kernel's
+two whole-cache instruction flushes (InitModule, CreateNewProcHelper, 8 per
+boot) made the translator drop every translation; now blocks whose code lies
+in the ROM image are kept (XIP, never written; `hcflush=` calls / all and
+`romkept=` in the statistics).
+
 ## Test platform
 
 casio-emu implements only `lds rm, x0` of the DSP transfers; the patch in
 `dbt/emu-patch/add_dsp_transfers.py` adds the other nine (applied to the local
 casio-emu checkout on 2026-10-22; rerun it after updating the emulator, then
-`node scripts/genDispatch.mjs && cmake --build build`). The emulator starts a
+`node scripts/genDispatch.mjs && cmake --build build`); `add_ccn_regs.py`
+adds the TTB and PTEA registers (2026-11-02) and `add_oc_arrays.py` makes the
+operand-cache address and data arrays (0xF4000000/0xF5000000) accepted
+(the OAL's whole-cache flush walks them). The emulator starts a
 raw `.g3a` payload at 0x00300000; `dbt/loader` copies the translator image to
 `IMAGE_BASE` (0x8CC80000, see the layout in `dbt/Makefile`) and jumps.
 `make -C dbt run` builds everything and runs it headless;

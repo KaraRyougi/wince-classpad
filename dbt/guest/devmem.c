@@ -87,6 +87,11 @@ void guest_main(void)
     }
     (void)inval0;
     check("device accesses were counted", hc_getstat(6) > dev0 + 10);
+    /* the OAL's whole-cache flush walks the operand-cache address array; casio-emu
+     * models no operand cache and accepts the array through dbt/emu-patch/add_oc_arrays.py */
+    *(volatile unsigned *)0xF4000000u = 0;
+    *(volatile unsigned *)0xF4007FE0u = 0;
+    check("operand-cache address array writes are accepted (emulator patch)", *(volatile unsigned *)0xF4000000u == 0);
 
     hc_stats();
     hc_puts(fails ? "RESULT: FAIL\n" : "RESULT: PASS\n");

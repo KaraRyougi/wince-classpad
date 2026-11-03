@@ -11,14 +11,15 @@ BUILD    := build
 # RAM layout (16 MiB at 0x8C000000), the single place these addresses live:
 #   0x8C000000-0x8C0FFFFF  launcher workspace (casio-emu starts us with sp=0x8C080000)
 #   0x8C100000-0x8CC7FFFF  guest window: 11.5 MiB (test guests linked at 0x8C100000)
-#   0x8CC80000-0x8CDFFFFF  translator image (text+data ~60 KiB, bss 1.2 MiB) and its C stack below the top
-#   0x8CE00000-0x8CFFFFFF  code cache, 2 MiB
+#   0x8CC80000-0x8CEFFFFF  translator image (text+data ~60 KiB, bss ~2.2 MiB: 4096 block headers,
+#                          1.25 MiB metadata arena) and its C stack below the top
+#   0x8CF00000-0x8CFFFFFF  code cache, 1 MiB (4096 blocks of ~140 bytes fill 0.6 MiB)
 GUEST_RAM_LO := 0x8C100000
 GUEST_RAM_HI := 0x8CC80000
 IMAGE_BASE   := 0x8CC80000
-IMAGE_STACK  := 0x8CE00000
-CACHE_BASE   := 0x8CE00000
-CACHE_SIZE   := 0x00200000
+IMAGE_STACK  := 0x8CF00000
+CACHE_BASE   := 0x8CF00000
+CACHE_SIZE   := 0x00100000
 LAYOUT_DEFS  := -DGUEST_RAM_LO=$(GUEST_RAM_LO)u -DGUEST_RAM_HI=$(GUEST_RAM_HI)u -DIMAGE_BASE=$(IMAGE_BASE) \
                 -DCACHE_BASE=$(CACHE_BASE)u -DCACHE_SIZE=$(CACHE_SIZE)u
 LAYOUT_LD    := -Wl,--defsym,IMAGE_BASE=$(IMAGE_BASE) -Wl,--defsym,_image_stack_top=$(IMAGE_STACK)

@@ -52,6 +52,7 @@ typedef struct {
     sf_u32 cache_base, cache_size;     /* code cache */
     sf_u32 guest_ram_lo, guest_ram_hi; /* what the guest may use (for sanity checks only) */
     sf_u32 dev_lo, dev_hi;             /* device-aware translation range (kernel.dll), 0,0 = none */
+    sf_u32 rom_lo, rom_hi;             /* the ROM image (physical, read-only for the whole run), 0,0 = none */
 } dbt_rt_config;
 
 void   dbt_rt_init(const dbt_rt_config *cfg);
@@ -110,6 +111,9 @@ void dbt_halt(const char *why) __attribute__((noreturn));
 typedef struct {
     sf_u32 blocks, translations, flushes, lookups_c, exceptions, hypercalls, fpu_ops, invalidations;
     sf_u32 fpu_disabled;                 /* FPU instructions turned into EXPEVT 0x800/0x820 (SR.FD set) */
+    sf_u32 hc_flush, hc_flush_all;       /* HC_FLUSH calls, and those with no range (every non-ROM translation dropped) */
+    sf_u32 rom_kept;                     /* blocks kept across those because their code is in the ROM image */
+    sf_u32 ldc_sr_calls, fallback_calls, rte_calls;   /* helper and stub C entries (each a full context save) */
     sf_u32 resumes, resumes_committed;
     sf_u32 chained;                      /* direct jumps rewritten into native branches */
     sf_u32 hash_evicted;                 /* lookups that found the block only in the block table */
