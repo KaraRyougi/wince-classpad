@@ -180,12 +180,13 @@ What the kernel sources settled (2026-11-02, notes/ce/kernel-sh-notes.md):
 - **kernel.dll touches the CCN registers directly** (EXPEVT, INTEVT, TEA,
   TRA, PTEH/PTEL/PTEA, TTB, MMUCR, CCR; table in the notes). Through the
   swapped memory path those values arrive byte-reversed, so API calls would
-  never be recognised and ASIDs would never reach the hardware. Next
-  translator item: device-aware translation for blocks inside kernel.dll's
-  address range (from the ROMHDR module table): 16/32-bit memory
-  instructions test the top byte of the effective address and take an
-  unswapped helper for 0xFF, which also observes PTEH/PTEL/MMUCR writes.
-  Fallback: patch the ~25 sites and rebuild kernel.dll in the VM.
+  never be recognised and ASIDs would never reach the hardware. ~~Next
+  translator item~~ done 2026-11-02: device-aware translation for blocks
+  inside kernel.dll's address range (from the ROMHDR module table, docs/04
+  "Runtime conventions"): 32-bit memory instructions test the top byte of
+  the effective address and take an unswapped helper for 0xFF, which also
+  observes PTEH/MMUCR writes (`devmem` guest). The loader prints the range
+  it found ("[nk] kernel.dll ... (device-aware translation)").
 - **SR.FD must be emulated** for the kernel's lazy FPU switch: an FPU
   instruction with FD=1 has to raise EXPEVT 0x800 instead of executing.
 - The OAL's debug output cannot trap while BL=1 (SHInit/OEMInit): debug ring.
@@ -203,8 +204,11 @@ What the kernel sources settled (2026-11-02, notes/ce/kernel-sh-notes.md):
    `mmu`); address-space handling done (`aspace`).
 3. `PLATFORM\CLASSPAD`: ~~StartUp, OEMInit with TMU0 tick and INTC, hypercall
    debug output, cache flush hook. Headless OS design, RAMIMAGE config.bib~~
-   written (bsp/classpad, 2026-11-02); to compile in the VM. Translator
-   side before the first boot: device-aware kernel.dll translation, SR.FD.
+   written and compiled (bsp/classpad, 2026-11-02; CRLF files, cacheops.src).
+   First run of the ClassPad NK.bin: StartUp, KernelStart, kernel sign-on
+   through the debug ring, stops at SHInit's MMUTTB write because casio-emu
+   does not model TTB/PTEA (dbt/emu-patch/add_ccn_regs.py). Device-aware
+   kernel.dll translation done; SR.FD still open.
 4. `make -C dbt NKBIN=NK.bin run`: expect the kernel banner on stdout,
    then the first scheduler tick. Fix what breaks.
 5. Memory: ~~compact block metadata; move the translator region down and

@@ -49,6 +49,23 @@ int nkbin_load(const sf_u8 *bin, sf_u32 maxlen, sf_u32 ram_lo, sf_u32 ram_hi, nk
                 out->ram_start = le32(h + 20); out->ram_free = le32(h + 24); out->ram_end = le32(h + 28);
                 out->kernel_flags = le32(h + 52);
                 out->cpu_type = le16(h + 68);
+                /* module table right after the ROMHDR (84 bytes): 32-byte TOC
+                 * entries, name pointer at +16, e32 at +20, load address at +28 */
+                {
+                    sf_u32 i, toc = out->romhdr + 84;
+                    static const char kname[] = "kernel.dll";
+                    for (i = 0; i < out->nummods && i < 256 && toc + 32 <= ram_hi; i++, toc += 32) {
+                        const sf_u8 *te = (const sf_u8 *)toc;
+                        sf_u32 name = le32(te + 16), e32 = le32(te + 20), load = le32(te + 28), k;
+                        if (name < ram_lo || name + 16 > ram_hi || e32 < ram_lo || e32 + 24 > ram_hi) continue;
+                        for (k = 0; k < sizeof kname; k++) if (((const char *)name)[k] != kname[k]) break;
+                        if (k == sizeof kname) {
+                            out->kernel_lo = load;
+                            out->kernel_hi = load + le32((const sf_u8 *)e32 + 20);   /* e32_vsize */
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
@@ -66,4 +83,8 @@ void nkbin_print(const nkbin_info *i)
     dbt_puts(" mods "); dbt_puthex(i->nummods); dbt_puts("\n[nk] RAM "); dbt_puthex(i->ram_start);
     dbt_puts(" free "); dbt_puthex(i->ram_free); dbt_puts(" end "); dbt_puthex(i->ram_end);
     dbt_puts(" kflags "); dbt_puthex(i->kernel_flags); dbt_puts("\n");
+    if (i->kernel_hi) {
+        dbt_puts("[nk] kernel.dll "); dbt_puthex(i->kernel_lo); dbt_puts(".."); dbt_puthex(i->kernel_hi);
+        dbt_puts(" (device-aware translation)\n");
+    }
 }

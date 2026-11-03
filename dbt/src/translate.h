@@ -32,6 +32,13 @@ typedef struct {
     sf_u32 shadow_vbr_addr;  /* host word holding the guest VBR */
     sf_u32 shadow_md_addr;   /* host word holding guest SR.MD (0 or 0x40000000) */
     int max_insns;           /* <= DBT_MAX_INSNS; 0 = default */
+    /* Blocks whose guest pc (P1/P2 folded) lies in [dev_lo, dev_hi) are
+     * translated device-aware: every 32-bit load/store tests its effective
+     * address for P4 (top byte 0xFF, the on-chip control registers) at run
+     * time and performs such accesses unswapped through rt_fallback. For
+     * code that reaches device registers directly, i.e. the CE kernel.dll;
+     * our own code uses pre-swapped accessors instead. 0,0 = off. */
+    sf_u32 dev_lo, dev_hi;
 } dbt_env;
 
 typedef struct {

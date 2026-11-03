@@ -346,6 +346,7 @@ void dbt_rt_init(const dbt_rt_config *cfg)
     g_env.shadow_vbr_addr = (sf_u32)&dbt_shadow_vbr;
     g_env.shadow_md_addr = (sf_u32)&dbt_shadow_md;
     g_env.max_insns = DBT_MAX_INSNS;
+    g_env.dev_lo = cfg->dev_lo; g_env.dev_hi = cfg->dev_hi;
 }
 
 static dbt_block *translate_at(sf_u32 gpc)
@@ -459,10 +460,21 @@ static void link_direct(sf_u32 link_lit, sf_u32 host)
     }
 }
 
+static sf_u32 g_devrange_lo, g_devrange_hi;
+static int g_devrange_pending;
+
 sf_u32 dbt_resolve(sf_u32 gpc, sf_u32 link_lit)
 {
     sf_u32 host;
     dbt_dbgring_drain();
+    if (g_devrange_pending) {
+        /* HC_DEVRANGE: retranslate everything with the new range; the link
+         * literal belongs to a block that is gone, so it is not patched */
+        g_devrange_pending = 0;
+        g_env.dev_lo = g_devrange_lo; g_env.dev_hi = g_devrange_hi;
+        cache_flush_all();
+        link_lit = 0;
+    }
     host = lookup_or_translate(gpc);
     dbt_stat.lookups_c++;
     if (link_lit) link_direct(link_lit, host);
@@ -488,6 +500,7 @@ void dbt_invalidate(sf_u32 lo, sf_u32 hi)
 #define HC_TLB_INVAL 0xF9               /* kernel: user mappings in [r4, r4+r5) changed (r5 = 0: all) */
 #define HC_ASID   0xFA                  /* kernel: address space switched to ASID r4 */
 #define HC_GETSTAT 0xFB                 /* r4 = index -> r0 (0 translations, 1 blocks, 2 invalidations, 3 asid switches, 4 ic misses) */
+#define HC_DEVRANGE 0xFC                /* tests: translate [r4, r5) device-aware from now on (drops all translations at the next lookup) */
 
 #define REG_EXPEVT (*(volatile sf_u32 *)0xFF000024u)
 #define REG_TEA    (*(volatile sf_u32 *)0xFF00000Cu)
@@ -531,6 +544,7 @@ static void print_stats(void)
     dbt_puts(" probe_faults="); dbt_puthex(dbt_stat.probe_faults);
     dbt_puts(" synth="); dbt_puthex(dbt_stat.synth_exceptions);
     dbt_puts("\n[dbt] inval="); dbt_puthex(dbt_stat.invalidations);
+    dbt_puts(" dev="); dbt_puthex(dbt_stat.dev_accesses);
     dbt_puts(" unchained="); dbt_puthex(dbt_stat.unchained);
     dbt_puts(" asid_switches="); dbt_puthex(dbt_stat.asid_switches);
     dbt_puts(" tlb_hooks="); dbt_puthex(dbt_stat.tlb_hooks);
@@ -565,6 +579,9 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
         else invalidate_range(ctx->r[4], ctx->r[4] + ctx->r[5], 1);
         return RT_ACT_RESUME;
     case HC_ASID: switch_asid(ctx->r[4] & 0xFF); return RT_ACT_RESUME;
+    case HC_DEVRANGE:
+        g_devrange_lo = ctx->r[4]; g_devrange_hi = ctx->r[5]; g_devrange_pending = 1;
+        return RT_ACT_RESUME;
     case HC_GETSTAT: {
         sf_u32 v = 0;
         switch (ctx->r[4]) {
@@ -574,6 +591,7 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
         case 3: v = dbt_stat.asid_switches; break;
         case 4: v = dbt_stat.ic_misses_c; break;
         case 5: v = dbt_stat.dbgring_bytes; break;
+        case 6: v = dbt_stat.dev_accesses; break;
         }
         ctx->r[0] = v;
         return RT_ACT_RESUME;
@@ -970,11 +988,41 @@ void dbt_fpu_c(dbt_gctx *ctx, sf_u32 opcode)
 }
 
 /* mac.w @rm+,@rn+ and mac.l @rm+,@rn+ with saturation per SR.S ignored (S=0). */
+/* A 32-bit load/store whose address turned out to be in P4 (device-aware
+ * blocks, docs/05): performed unswapped, so the register sees the value the
+ * little-endian program meant. Writes that change the address space or the
+ * TLB are observed here, which is what the kernel hypercalls FA/F9 would
+ * have told us. */
+static void dev_mem(dbt_gctx *ctx, const sh_insn *d)
+{
+    sf_u32 ea = ctx->r[d->base], v;
+    if (d->am == AM_DISP) ea += (sf_u32)d->disp;
+    else if (d->am == AM_R0IDX) ea += ctx->r[0];
+    else if (d->am == AM_PREDEC) ea -= 4;
+    dbt_stat.dev_accesses++;
+    if (d->is_store) {
+        if (d->am == AM_PREDEC) ctx->r[d->base] = ea;       /* the decremented value is what gets stored */
+        v = ctx->r[d->data];
+        *(volatile sf_u32 *)ea = v;
+        if (ea == 0xFF000000u) switch_asid(v & 0xFF);                               /* PTEH: ASID */
+        else if (ea == 0xFF000010u && (v & 4)) invalidate_range(0, 0x80000000u, 1); /* MMUCR.TI */
+    } else {
+        v = *(volatile sf_u32 *)ea;
+        if (d->am == AM_POSTINC) ctx->r[d->base] += 4;
+        ctx->r[d->data] = v;                                /* after the increment: @Rm+ with m == n keeps the load */
+    }
+}
+
 void dbt_fallback_c(dbt_gctx *ctx, sf_u32 opcode)
 {
     int n = (opcode >> 8) & 0xF, m = (opcode >> 4) & 0xF;
     sf_u64 acc;
     if (opcode == 0x0038) { tlb_hook(); return; }           /* ldtlb */
+    if ((opcode & 0xF00F) != 0x000F && (opcode & 0xF00F) != 0x400F) {
+        sh_insn d;
+        sh4_decode(opcode, &d);
+        if (d.kind == K_MEM) { dev_mem(ctx, &d); return; }
+    }
     acc = ((sf_u64)ctx->mach << 32) | ctx->macl;
     if ((opcode & 0xF00F) == 0x000F) {                       /* mac.l */
         sf_u32 a = bswap32(*(volatile sf_u32 *)ctx->r[n]), b = bswap32(*(volatile sf_u32 *)ctx->r[m]);

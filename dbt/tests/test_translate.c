@@ -428,6 +428,36 @@ int main(void)
              && (blk.links[0].w1 & 0xF000) == 0xD000 && blk.links[0].skip_w == 0);
     }
 
+    /* device-aware blocks: a 32-bit load tests its address for P4 without
+     * touching T, then takes the swapped path or the fallback helper */
+    {
+        static const sf_u32 ops[] = { 0x5211 };                      /* mov.l @(4,r1),r2 */
+        static const sf_u32 exp[] = {
+            0x438A,                     /* lds r3,x0 (scratch) */
+            0x6313, 0x7304,             /* mov r1,r3 ; add #4,r3 : effective address */
+            0x6337, 0x4329, 0x4319,     /* not ; shlr16 ; shlr8 : 0 for 0xFF.. */
+            0x633B, 0x4329, 0x4319,     /* neg ; shlr16 ; shlr8 : 0 or 0xFF */
+            0x7301, 0x4319, 0x4308,     /* add #1 ; shlr8 ; shll2 : 0 or 4 */
+            0x0323, 0x038A,             /* braf r3 ; sts x0,r3 */
+            0xA000 | 0,                 /* bra slow (patched) */
+            0x0009,
+            0x5211, 0x6228, 0x6229, 0x6228,   /* fast: the swapped load */
+        };
+        env.dev_lo = GBASE; env.dev_hi = GBASE + 0x1000;
+        expect("dev load translates", translate(ops, 1, 0) == DBT_OK);
+        expect_seq("dev load test sequence", 0, exp, 14);
+        expect_seq("dev load fast path", 16, exp + 16, 4);
+        expect("dev bra slow skips the fast path", (hbuf[14] & 0xF000) == 0xA000 && (hbuf[14] & 0xFFF) == 6);   /* over 4 fast words + bra/nop */
+        {
+            int w, found = 0;
+            for (w = 22; w < 40 && w < blk.code_len / 2; w++)
+                if ((hbuf[w] & 0xF000) == 0xD000 && lit_of_movl(2 * w) == env.rt_fallback) found = 1;
+            expect("dev slow path calls the fallback helper", found);
+        }
+        env.dev_lo = env.dev_hi = 0;
+        expect("plain load again without the range", translate(ops, 1, 0) == DBT_OK && blk.code_len < 20);
+    }
+
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

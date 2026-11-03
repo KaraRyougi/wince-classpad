@@ -45,6 +45,7 @@ enum { RT_ACT_RESUME = 0, RT_ACT_JUMP = 1, RT_ACT_HALT = 2 };
 typedef struct {
     sf_u32 cache_base, cache_size;     /* code cache */
     sf_u32 guest_ram_lo, guest_ram_hi; /* what the guest may use (for sanity checks only) */
+    sf_u32 dev_lo, dev_hi;             /* device-aware translation range (kernel.dll), 0,0 = none */
 } dbt_rt_config;
 
 void   dbt_rt_init(const dbt_rt_config *cfg);
@@ -109,6 +110,7 @@ typedef struct {
     sf_u32 arena_bytes;                  /* metadata arena in use */
     sf_u32 synth_exceptions;             /* address errors synthesized for unfetchable guest pcs */   /* exceptions resumed inside a block: restart / after the memory op */
     sf_u32 dbgring_bytes;          /* bytes printed from the guest debug ring */
+    sf_u32 dev_accesses;           /* device-aware 32-bit accesses taken through the fallback helper */
 } dbt_stats;
 extern dbt_stats dbt_stat;
 

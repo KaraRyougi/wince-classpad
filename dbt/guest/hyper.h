@@ -23,6 +23,12 @@ static inline unsigned hc_getstat(unsigned idx)
     __asm__ volatile ("trapa #0xFB" : "=r"(r0) : "r"(r4) : "memory");
     return r0;
 }
+/* tests: translate guest code in [lo, hi) device-aware from the next lookup on (docs/05) */
+static inline void hc_devrange(unsigned lo, unsigned hi)
+{
+    register unsigned r4 __asm__("r4") = lo; register unsigned r5 __asm__("r5") = hi;
+    __asm__ volatile ("trapa #0xFC" :: "r"(r4), "r"(r5) : "memory");
+}
 /* guest code in [addr, addr+len) changed: drop its translations */
 static inline void hc_flush(unsigned addr, unsigned len)
 {

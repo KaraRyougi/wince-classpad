@@ -41,7 +41,7 @@ static const char *nk_err(int r)
     }
 }
 
-static sf_u32 load_nk(const sf_u8 *src, sf_u32 maxlen, const char *where)
+static sf_u32 load_nk(const sf_u8 *src, sf_u32 maxlen, const char *where, nkbin_info *out)
 {
     nkbin_info info;
     int r = nkbin_load(src, maxlen, GUEST_LOAD, GUEST_RAM_HI, &info);
@@ -61,21 +61,24 @@ static sf_u32 load_nk(const sf_u8 *src, sf_u32 maxlen, const char *where)
             dbt_puts("[nk] WARNING: ROMHDR RAM range leaves the guest window; the kernel would overwrite the translator\n");
     }
     dbt_sync_code(info.start, info.length);
+    *out = info;
     return info.entry;
 }
 
 void dbt_main(void)
 {
     dbt_rt_config cfg;
+    nkbin_info info;
     sf_u32 n = (sf_u32)(guest_blob_end - guest_blob_start);
     sf_u32 host, entry;
+    memset(&info, 0, sizeof info);
 
     dbt_puts("[dbt] translator image up, guest blob "); dbt_puthex(n); dbt_puts(" bytes\n");
 
     if (nkbin_is_image((const sf_u8 *)NK_FLASH)) {
-        entry = load_nk((const sf_u8 *)NK_FLASH, NK_FLASH_MAX, "flash");
+        entry = load_nk((const sf_u8 *)NK_FLASH, NK_FLASH_MAX, "flash", &info);
     } else if (n >= 7 && nkbin_is_image(guest_blob_start)) {
-        entry = load_nk(guest_blob_start, n, "embedded blob");
+        entry = load_nk(guest_blob_start, n, "embedded blob", &info);
     } else {
         memcpy((void *)GUEST_LOAD, guest_blob_start, n);
         dbt_sync_code(GUEST_LOAD, n);             /* guest code is data to us, but keep caches coherent */
@@ -84,6 +87,7 @@ void dbt_main(void)
 
     cfg.cache_base = CACHE_BASE; cfg.cache_size = CACHE_SIZE;
     cfg.guest_ram_lo = GUEST_LOAD; cfg.guest_ram_hi = GUEST_RAM_HI;
+    cfg.dev_lo = info.kernel_lo; cfg.dev_hi = info.kernel_hi;      /* kernel.dll reaches the CCN registers directly */
     dbt_rt_init(&cfg);
     dbt_shadow_vbr = 0;
     dbt_shadow_md = SR_MD;

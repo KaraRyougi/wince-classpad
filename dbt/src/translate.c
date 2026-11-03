@@ -142,7 +142,70 @@ static int store_data_is_fixed_r0(const sh_insn *d)
 
 /* --------------------------------------------------------- memory ops */
 
+/* Device-aware translation (dbt_env.dev_lo/hi): is this a 32-bit access that
+ * must test its address at run time? */
+static int dev_candidate(const tctx *t, const sh_insn *d)
+{
+    sf_u32 pc;
+    if (!t->env->dev_hi || d->kind != K_MEM || d->size != 4 || d->ctrl != CR_NONE || d->movca || d->am == AM_GBR) return 0;
+    pc = t->gpc & 0x1FFFFFFFu;
+    return pc >= (t->env->dev_lo & 0x1FFFFFFFu) && pc < (t->env->dev_hi & 0x1FFFFFFFu);
+}
+
+static void tr_mem_plain(tctx *t, const sh_insn *d);
+static void call_helper(tctx *t, sf_u32 helper, sf_u32 arg_reg, int arg_mode, sf_u32 arg_imm, sf_u32 avoid);
+static void begin_meta_kind(tctx *t, int kind, sf_u32 guest_off, sf_u32 target, sf_u32 fallthrough);
+
+/* The effective address is tested for P4 without touching T (every shift
+ * used here leaves T alone): rT ends as 0 for a P4 address and 4 otherwise,
+ * and `braf rT` either falls into the `bra slow` or skips it. Layout:
+ *   test ; braf rT ; sts rT (slot)
+ *   bra slow ; nop
+ *   fast: the usual swapped access ; bra done ; nop
+ *   slow: fallback helper with the opcode, in a META range of its own so a
+ *         fault in its prologue restarts the instruction (no commit there)
+ *   done:
+ * Cost: 15 instructions on top of the plain sequence, kernel.dll only. */
+static void tr_mem_dev(tctx *t, const sh_insn *d)
+{
+    emitter *e = &t->em;
+    int rT = pick_scratch(d->touched);
+    int bra_slow, bra_done, slow, done;
+    sf_u32 goff = t->gpc - t->blk->guest_pc;
+    spill(t, rT, SA(t));
+    emit16(e, OP_MOV_RR(d->base, rT));
+    if (d->am == AM_PREDEC) emit16(e, OP_ADD_IMM(-4, rT));
+    else if (d->am == AM_DISP && d->disp) emit16(e, OP_ADD_IMM(d->disp, rT));
+    else if (d->am == AM_R0IDX) emit16(e, OP_ADD_RR(0, rT));
+    emit16(e, OP_NOT_RR(rT, rT));         /* top byte 0xFF -> 0x00 */
+    emit16(e, OP_SHLR16(rT));
+    emit16(e, OP_SHLR8(rT));              /* 0 for P4, else 1..255 */
+    emit16(e, OP_NEG_RR(rT, rT));         /* 0 or negative */
+    emit16(e, OP_SHLR16(rT));
+    emit16(e, OP_SHLR8(rT));              /* 0 or 0xFF */
+    emit16(e, OP_ADD_IMM(1, rT));         /* 1 or 0x100 */
+    emit16(e, OP_SHLR8(rT));              /* 0 or 1 */
+    emit16(e, OP_SHLL2(rT));              /* 0 (P4: fall into bra slow) or 4 (skip it) */
+    emit16(e, OP_BRAF(rT));
+    restore(t, rT, SA(t));                /* delay slot */
+    bra_slow = emit_pos(e); emit16(e, OP_BRA(0)); emit16(e, OP_NOP);
+    tr_mem_plain(t, d);
+    bra_done = emit_pos(e); emit16(e, OP_BRA(0)); emit16(e, OP_NOP);
+    slow = emit_pos(e);
+    emit_patch16(e, bra_slow, OP_BRA((slow - (bra_slow + 4)) / 2));
+    begin_meta_kind(t, META_INSN, goff, 0, 0);
+    call_helper(t, t->env->rt_fallback, 0, 2, d->op, d->touched);
+    done = emit_pos(e);
+    emit_patch16(e, bra_done, OP_BRA((done - (bra_done + 4)) / 2));
+}
+
 static void tr_mem(tctx *t, const sh_insn *d)
+{
+    if (d->ctrl == CR_NONE && dev_candidate(t, d)) { tr_mem_dev(t, d); return; }
+    tr_mem_plain(t, d);
+}
+
+static void tr_mem_plain(tctx *t, const sh_insn *d)
 {
     emitter *e = &t->em;
     if (d->ctrl != CR_NONE) {
@@ -409,7 +472,8 @@ static int set_pr(tctx *t, sf_u32 value, sf_u32 avoid, int keep)
     return rT;
 }
 
-static int is_helper(const sh_insn *s) { return s && (s->kind == K_FPU || s->kind == K_FALLBACK); }
+/* Instructions translated as a helper call own all five DSP slots. */
+static int is_helper(const tctx *t, const sh_insn *s) { return s && (s->kind == K_FPU || s->kind == K_FALLBACK || dev_candidate(t, s)); }
 static int slot_writes_pr(const sh_insn *s)
 {
     if (!s) return 0;
@@ -429,7 +493,7 @@ static void begin_meta_kind(tctx *t, int kind, sf_u32 guest_off, sf_u32 target, 
 static void indirect_slot(tctx *t, const sh_insn *slot, int reg, int from_pr, sf_u32 add_const,
                           sf_u32 avoid, sf_u32 target_regs)
 {
-    int helper_slot = slot && (slot->kind == K_FPU || slot->kind == K_FALLBACK);
+    int helper_slot = is_helper(t, slot);
     if (helper_slot) {
         if (slot->defs & target_regs) { t->err = DBT_ERR_UNSUPPORTED; return; }
         tr_insn(t, slot, 1);
@@ -484,7 +548,7 @@ static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
              * PR scratch stays spilled across the slot unless the slot is a
              * helper call (helpers own Y0). */
             int rT = -1;
-            if (d->br == BR_JSR) rT = set_pr(t, next, avoid | R(d->br_reg), !is_helper(slot));
+            if (d->br == BR_JSR) rT = set_pr(t, next, avoid | R(d->br_reg), !is_helper(t, slot));
             if (slot) tr_insn(t, slot, 1);
             begin_meta_kind(t, META_TARGET_REG, goff, 0, 0);
             t->cur->fix_reg = (sf_u8)d->br_reg;

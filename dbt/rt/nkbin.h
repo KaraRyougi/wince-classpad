@@ -14,6 +14,7 @@ typedef struct {
     sf_u32 physfirst, physlast, nummods;
     sf_u32 ram_start, ram_free, ram_end;
     sf_u32 kernel_flags, cpu_type;    /* usCPUType: 0x01A6 = SH4 */
+    sf_u32 kernel_lo, kernel_hi;      /* kernel.dll from the module table (load .. load + e32 vsize), 0 if absent */
     sf_u32 fail_off;                  /* source offset where parsing stopped (diagnostics) */
 } nkbin_info;
 

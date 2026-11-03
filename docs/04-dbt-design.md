@@ -239,6 +239,19 @@ via hypercall 0xF1):
 - An illegal instruction inside translated code is reported with host
   address, word, block and guest pc before it is delivered: it is almost
   always a translator bug.
+- Device-aware blocks (`dbt_env.dev_lo/dev_hi`, set from the ROMHDR module
+  table to kernel.dll's range): code that reaches the on-chip control
+  registers directly cannot use pre-swapped accessors, so every 32-bit
+  load/store in such a block tests its effective address for P4 (top byte
+  0xFF) at run time with 15 extra instructions that leave T alone (the test
+  ends in `braf` on a 0/4 displacement), takes the usual swapped sequence
+  otherwise, and performs a P4 access unswapped through the fallback helper.
+  The helper also observes PTEH stores (ASID switch) and MMUCR.TI (user
+  translations dropped), which stands in for the kernel-side FA/F9
+  hypercalls. A device access in a delay slot is handled like a helper
+  slot. Test hypercall FC turns the range on for a running guest (`devmem`
+  guest, 17 checks). Cost is paid in kernel.dll only; our OAL keeps the
+  pre-swapped convention.
 - Faults while translating: a fault raised by the translator's code probe
   (TLB miss on a mapped page, any vector) is delivered to the guest at the
   pc being translated, with the guest registers taken from `dbt_ctx_rt`
@@ -254,7 +267,8 @@ via hypercall 0xF1):
   F9 user mappings changed in a range (`hc_tlb_inval`), FA address space
   switched to an ASID (`hc_asid`), FB read a statistic (0 translations,
   1 blocks, 2 invalidations, 3 ASID switches, 4 inline-cache misses,
-  5 debug-ring bytes).
+  5 debug-ring bytes, 6 device accesses), FC translate a range device-aware
+  from now on (tests).
 - Address spaces: blocks are keyed by virtual pc. A block of TLB-mapped
   code (pc < 0x80000000) also records the ASID it was translated under and
   the physical address of its first instruction, found by scanning the UTLB
@@ -415,6 +429,7 @@ Status 2026-10-22: all four guests pass under the emulator.
 | `aspace` | address spaces: the same virtual page mapped to different code in ASID 1 and 2 (switch noticed at `ldc sr`, or announced with HC_ASID), blocks reused when an ASID returns and across ASIDs for a shared (SH=1) page, a remap announced by HC_TLB_INVAL, a remap noticed at `ldtlb` alone, reloading an identical mapping invalidating nothing, and a chained cross-page `bra` unlinked when its target page is remapped | PASS (14 checks) |
 | `lcd` | draws into a little-endian RGB565 VRAM and pushes 24 frames to the R61524 display controller (16-bit bus at 0xB4000000, RS on Port R) through the pre-swapped MMIO accessors; `make -C dbt GUEST=lcd screenshot` captures the frame | shows the picture (docs/img/lcd-guest.png) |
 | `bank` | register bank 1 across the translator: values parked in r4/r5/r7_bank1 (the CE kernel's pCurThread, context pointer, SH3CTL_BASE) survive hypercalls from bank 0, translation of new code, a trapa handled in bank 1, a hypercall issued from bank 1 with BL cleared (both banks intact), a synthetic address error returning through PR, and 50 more exceptions; the handler sees the interrupted bank-0 registers | PASS (14 checks) |
+| `devmem` | device-aware translation: a value written to TEA pre-swapped reads back unswapped once the guest is translated device-aware, plain round trips, a pre-swapped accessor is now wrong, ordinary memory keeps its LE view, T survives device and memory loads, device access in `bra` and `jsr` delay slots, `@Rm+`, `@-Rn`, `@(r0,Rm)` forms, a PTEH store switches the ASID, MMUCR.TI goes through the device path, accesses counted | PASS (17 checks) |
 | `tmu` | TMU0 programmed through pre-swapped MMIO, IMASK/BL and IMR masking, INTEVT, `rte` restoring SR, `sleep` wake-up; register probe across `trapa`; 15 one-construct hot loops (loads, stores of every form, `bt/s` with a T-writing slot, `jsr` with a store in the slot, push/pop, pc-relative) plus a compiled loop, each run with ~3000 interrupts landing at arbitrary host instructions and compared with an interrupt-free run | PASS (34 checks) |
 
 ![lcd guest frame](img/lcd-guest.png)
