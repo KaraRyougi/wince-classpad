@@ -38,8 +38,14 @@ DBGPARAM dpCurSettings = {
 };
 #endif
 
-// in gpe.lib, declared by every GPE driver itself
-extern "C" BOOL GPEEnableDriver(ULONG engineVersion, ULONG cj, DRVENABLEDATA *data, PENGCALLBACKS engineCallbacks);
+// in gpe.lib (C++ linkage), declared by every GPE driver itself
+BOOL APIENTRY GPEEnableDriver(ULONG engineVersion, ULONG cj, DRVENABLEDATA *data, PENGCALLBACKS engineCallbacks);
+
+// DirectDraw HAL registration hook called from gpe.lib's DllMain; provided by
+// ddgpe.lib for DirectDraw-capable drivers, an empty C++ function otherwise.
+VOID RegisterDDHALAPI(void)
+{
+}
 
 class ClasspadGPE : public GPE
 {
