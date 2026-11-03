@@ -254,6 +254,13 @@ via hypercall 0xF1):
 - An illegal instruction inside translated code is reported with host
   address, word, block and guest pc before it is delivered: it is almost
   always a translator bug.
+- Execution trace (`EXTRA_CFLAGS=-DDBT_TRACE_EXEC`): every block starts
+  with 13 instructions that append its guest pc to a 64 KiB ring; the last
+  512 entries are printed when the guest's debug output contains
+  `DBT_WATCH` (default `DEBUGCHK`, the CE kernel's assertion message).
+  `tools/cesym.py NK.bin RELDIR -` turns the pcs into module!symbol+offset
+  using the image's module table, the o32 section tables and the build's
+  .map files (kernel-mode DLLs run at their fixed-up VM base, 0xC00xxxxx).
 - Device-aware blocks (`dbt_env.dev_lo/dev_hi`, set from the ROMHDR module
   table to kernel.dll's range): code that reaches the on-chip control
   registers directly cannot use pre-swapped accessors, so every 32-bit
@@ -452,6 +459,7 @@ Status 2026-10-22: all four guests pass under the emulator.
 | `lcd` | draws into a little-endian RGB565 VRAM and pushes 24 frames to the R61524 display controller (16-bit bus at 0xB4000000, RS on Port R) through the pre-swapped MMIO accessors; `make -C dbt GUEST=lcd screenshot` captures the frame | shows the picture (docs/img/lcd-guest.png) |
 | `bank` | register bank 1 across the translator: values parked in r4/r5/r7_bank1 (the CE kernel's pCurThread, context pointer, SH3CTL_BASE) survive hypercalls from bank 0, translation of new code, a trapa handled in bank 1, a hypercall issued from bank 1 with BL cleared (both banks intact), a synthetic address error returning through PR, and 50 more exceptions; the handler sees the interrupted bank-0 registers | PASS (14 checks) |
 | `devmem` | device-aware translation: a value written to TEA pre-swapped reads back unswapped once the guest is translated device-aware, plain round trips, a pre-swapped accessor is now wrong, ordinary memory keeps its LE view, T survives device and memory loads, device access in `bra` and `jsr` delay slots, `@Rm+`, `@-Rn`, `@(r0,Rm)` forms, a PTEH store switches the ASID, MMUCR.TI goes through the device path, accesses counted | PASS (17 checks) |
+| `tlbdata` | every memory addressing form (byte/word/long; @Rm, @Rm+, @-Rn, @(disp,Rm), @(r0,Rm), @(disp,GBR), movca, base = data, base = r0, load-modify-store) with a synchronous TLB miss on the access itself: the data page is mapped only by the miss handler and the TLB is flushed before each form, so the translated sequence faults at its memory op, the handler refills, the instruction restarts; exactly one miss per form and the little-endian result checked through the physical alias | PASS (55 checks; casio-emu adds 4 to the raw loaded word for `mov.l @Rm+,Rn` with m = n, where the SH manual increments only for m != n: accepted) |
 | `tmu` | TMU0 programmed through pre-swapped MMIO, IMASK/BL and IMR masking, INTEVT, `rte` restoring SR, `sleep` wake-up; register probe across `trapa`; 15 one-construct hot loops (loads, stores of every form, `bt/s` with a T-writing slot, `jsr` with a store in the slot, push/pop, pc-relative) plus a compiled loop, each run with ~3000 interrupts landing at arbitrary host instructions and compared with an interrupt-free run | PASS (34 checks) |
 
 ![lcd guest frame](img/lcd-guest.png)
