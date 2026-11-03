@@ -1,6 +1,6 @@
 # Plan and status
 
-Last updated: 2026-10-22
+Last updated: 2026-11-02
 
 ## The blocker found on day one: endianness
 
@@ -74,10 +74,13 @@ needed: casio-emu runs the translator as an ordinary big-endian add-in.
 4. ~~Guest image choice~~: self-built CE 6.0 R3 SH4 image (decided
    2026-10-22; Pocket PC 2000 SH3 ROMs would mean emulating a Jornada 540).
 5. CE image loading: ~~`.bin` records to guest RAM, ROMHDR, entry~~ done
-   (dbt/rt/nkbin.c, image in emulated flash via HLE_OSROM; docs/05). Next:
-   Platform Builder VM, SH7305 OAL (startup, INTC, TMU tick, hypercall debug
-   output, cache-flush hook), headless boot inside casio-emu. Plan and
-   register map in docs/05-ce-image-and-oal.md.
+   (dbt/rt/nkbin.c, image in emulated flash via HLE_OSROM; docs/05).
+   ~~Platform Builder VM~~ up, stock HARP image built (2026-11-02); kernel
+   SH4 sources read (notes/ce/kernel-sh-notes.md): translator now preserves
+   register bank 1 and offers a BL=1-safe debug ring. ~~SH7305 OAL~~ written
+   as bsp/classpad (to compile in the VM). Next: device-aware translation of
+   kernel.dll (CCN register access), SR.FD emulation, then the headless boot
+   inside casio-emu. Plan and register map in docs/05-ce-image-and-oal.md.
 6. Display driver (flat framebuffer, 320x528 CP400 / 396x224 CG50-class),
    keyboard, touch. GWES up.
 7. Real hardware: run the `.g3a` on an fx-CG50/CP400; fix anything the

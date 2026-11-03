@@ -1,16 +1,12 @@
-# bsp/ - Platform Builder BSP for SH7305 (to do)
+# bsp/ - Platform Builder BSP sources
 
-Needs Windows with Visual Studio 2005 and Platform Builder 6.0 R3 (SH4 is
-dropped in Windows Embedded Compact 7). Planned layout, following the PB
-convention:
+- `classpad/`: `PLATFORM\CLASSPAD`, the SH7305 OAL for CE 6.0 R3. Copy it
+  into the Platform Builder VM; see `classpad/README.md`.
 
-- `oal/`: startup.src (entry, SR/VBR setup), timer (TMU), intr (INTC), serial
-  debug (SCIF), KITL, power, `OEMInit`, `OEMGetExtensionDRAM`.
-- `oal/fpu/`: copies of `../../fpuemu/src/*.c` compiled into the kernel, plus
-  the exception-path glue described in docs/02-fpu-emulation.md.
-- `drivers/display`: flat framebuffer DDI (`ddi_flat` sample as a base).
-- `drivers/keybd`, `drivers/touch`: KEYSC and ADC.
-- `files/`: platform.bib, platform.reg, config.bib with RAMSTART 0x8C000000.
+Needs Windows with Visual Studio 2005 and Platform Builder 6.0 R3 with the
+SH4 CPU support and Shared Source installed (SH4 is dropped in Windows
+Embedded Compact 7). The kernel itself (kernel.dll) is used as built by
+Platform Builder; everything SH7305-specific lives in the OAL.
 
-Keep the BSP sources C89-clean and free of float/double: the SH4 compiler
-would emit FPU instructions and the kernel would trap on itself.
+Later additions: `drivers/display` (R61524 frame buffer, protocol in
+`dbt/guest/lcd.c`), `drivers/keybd` (KEYSC), `drivers/touch` (ADC).

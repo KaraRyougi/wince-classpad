@@ -87,6 +87,7 @@ void dbt_puthex(sf_u32 v)
 }
 void dbt_halt(const char *why)
 {
+    dbt_dbgring_drain();                 /* whatever the guest logged before dying */
     dbt_puts("\n[dbt] HALT: "); dbt_puts(why); dbt_puts("\n");
     for (;;) __asm__ volatile ("sleep");
 }
@@ -286,10 +287,51 @@ static void cache_flush_all(void)
     dbt_stat.flushes++;
 }
 
+/* ---------------------------------------------------------- debug ring
+ * An exception-free console for guest code that cannot trap: the CE kernel
+ * calls the OAL's OEMWriteDebugByte with BL=1 during SHInit (and trapa with
+ * BL=1 is a manual reset). The guest appends bytes to a ring in the last
+ * 4 KiB page of its RAM window and the translator prints them whenever it is
+ * entered (lookup miss, hypercall, halt). Layout, guest little-endian words,
+ * accessed uncached (P2) on both sides:
+ *   +0  wr     bytes appended by the guest (monotonic)
+ *   +4  rd     bytes printed, written back by the translator
+ *   +8  magic  0x47424452 ('RBGD'), set here at init
+ *   +16 ..     storage: byte i of the stream lives at 16 + i % DBGRING_BYTES */
+#define DBGRING_BYTES (4096 - 16)
+#define DBGRING_MAGIC 0x47424452u
+static volatile sf_u32 *g_dbgring;
+static sf_u32 g_dbgring_rd;
+
+static void dbgring_init(void)
+{
+    g_dbgring = (volatile sf_u32 *)((g_cfg.guest_ram_hi - 0x1000) | 0x20000000u);
+    g_dbgring[0] = 0; g_dbgring[1] = 0; g_dbgring[2] = bswap32(DBGRING_MAGIC);
+    g_dbgring_rd = 0;
+}
+
+void dbt_dbgring_drain(void)
+{
+    sf_u32 wr;
+    volatile sf_u8 *bytes;
+    if (!g_dbgring) return;
+    wr = bswap32(g_dbgring[0]);
+    if (wr == g_dbgring_rd) return;
+    bytes = (volatile sf_u8 *)g_dbgring + 16;
+    if (wr - g_dbgring_rd > DBGRING_BYTES) g_dbgring_rd = wr - DBGRING_BYTES;   /* overrun: the oldest bytes are gone */
+    while (g_dbgring_rd != wr) {
+        dbt_putc(bytes[g_dbgring_rd % DBGRING_BYTES]);
+        g_dbgring_rd++;
+        dbt_stat.dbgring_bytes++;
+    }
+    g_dbgring[1] = bswap32(g_dbgring_rd);
+}
+
 void dbt_rt_init(const dbt_rt_config *cfg)
 {
     g_cfg = *cfg;
     memset(&dbt_stat, 0, sizeof dbt_stat);
+    dbgring_init();
     cache_flush_all();
     fpuemu_reset(&g_fpu);
     memset(&g_env, 0, sizeof g_env);
@@ -417,7 +459,9 @@ static void link_direct(sf_u32 link_lit, sf_u32 host)
 
 sf_u32 dbt_resolve(sf_u32 gpc, sf_u32 link_lit)
 {
-    sf_u32 host = lookup_or_translate(gpc);
+    sf_u32 host;
+    dbt_dbgring_drain();
+    host = lookup_or_translate(gpc);
     dbt_stat.lookups_c++;
     if (link_lit) link_direct(link_lit, host);
     return host;
@@ -498,6 +542,7 @@ static void print_stats(void)
 static int hypercall(dbt_gctx *ctx, sf_u32 nr)
 {
     dbt_stat.hypercalls++;
+    dbt_dbgring_drain();
     switch (nr) {
     case HC_EXIT:
         dbt_puts("[dbt] guest exit code "); dbt_puthex(ctx->r[4]); dbt_puts("\n");
@@ -526,6 +571,7 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
         case 2: v = dbt_stat.invalidations; break;
         case 3: v = dbt_stat.asid_switches; break;
         case 4: v = dbt_stat.ic_misses_c; break;
+        case 5: v = dbt_stat.dbgring_bytes; break;
         }
         ctx->r[0] = v;
         return RT_ACT_RESUME;
@@ -773,7 +819,31 @@ static void take_stub_context(dbt_gctx *ctx)
     ctx->ssr = dbt_ctx_rt.sr;
 }
 
+/* The stub saves bank 0 into ctx->r[0..7] and the current bank (1) into
+ * ctx->b1, by position. C code wants ctx->r to be the registers the guest
+ * was using: swap the two when the guest itself ran in bank 1 (SSR.RB=1),
+ * and swap back before the stub restores by position again. The CE kernel
+ * never takes an exception in bank 1 (it runs there with BL=1), so this is
+ * for completeness. */
+static void bank_normalize(dbt_gctx *ctx)
+{
+    int i;
+    if (ctx->ssr & SR_RB)
+        for (i = 0; i < 8; i++) { sf_u32 t = ctx->r[i]; ctx->r[i] = ctx->b1[i]; ctx->b1[i] = t; }
+}
+
+static int exc_c_body(dbt_gctx *ctx);
+
 int dbt_exc_c(dbt_gctx *ctx)
+{
+    int act;
+    bank_normalize(ctx);
+    act = exc_c_body(ctx);
+    bank_normalize(ctx);
+    return act;
+}
+
+static int exc_c_body(dbt_gctx *ctx)
 {
     dbt_block *b;
     sf_u32 guest_pc, handler;
@@ -832,6 +902,15 @@ int dbt_exc_c(dbt_gctx *ctx)
                 guest_pc = resume_pc(b, off, ctx, &idx, &committed);
                 apply_resume_state(b, idx, off, committed, ctx);
                 trace_exc(ctx->host_spc, b->guest_pc, off, b->meta[idx].kind, (sf_u32)committed, guest_pc, ctx->vec_off, 2);
+                if (ctx->vec_off == 0x100 && (ctx->expevt == 0x180 || ctx->expevt == 0x1A0)) {
+                    /* an illegal instruction inside translated code is almost
+                     * always the translator's own bug: say where */
+                    dbt_puts("[dbt] illegal instruction in translated code: host="); dbt_puthex(ctx->host_spc);
+                    dbt_puts(" word="); dbt_puthex(*(volatile sf_u16 *)ctx->host_spc);
+                    dbt_puts(" block="); dbt_puthex(b->guest_pc);
+                    dbt_puts(" off="); dbt_puthex(off);
+                    dbt_puts(" guest="); dbt_puthex(guest_pc); dbt_puts("\n");
+                }
             }
         }
     }

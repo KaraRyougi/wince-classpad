@@ -105,11 +105,14 @@ tools are still obtainable, so everything is built there.
   (`AUTOSIZE` lets ROMIMAGE move the RAM start up to the real image end.)
   Second iteration: `NK 81000000 ... ROMIMAGE` with RAM at `8C100000`.
 - **Debug output**: `OEMInitDebugSerial` does nothing, `OEMWriteDebugByte`
-  issues the translator's `trapa #0xF3` hypercall (one byte in r4), so the
-  kernel's debug messages appear on the emulator's stdout from the first
-  instruction. `OEMReadDebugByte` returns `OEM_DEBUG_READ_NODATA`.
+  issues the translator's `trapa #0xF3` hypercall (one byte in r4) when
+  SR.BL is clear. The kernel calls `OEMInitDebugSerial`, the sign-on string
+  and `OEMInit` from `SHInit` with SR = PR_B1_BK (bank 1, BL=1), where a
+  trapa is a manual reset; those bytes go to the debug ring in the last page
+  of the guest window (0xACC7F000, docs/04), which the translator prints at
+  its next entry. `OEMReadDebugByte` returns `OEM_DEBUG_READ_NODATA`.
 
-## 3. SH7305 OAL (to write)
+## 3. SH7305 OAL (written: `bsp/classpad`, not yet compiled)
 
 The SH4 sample OAL targets the SH7750 (on-chip modules at `0xFFDxxxxx`);
 the SH7305 is an SH-4A SoC with the SH7724-style peripheral map at
@@ -165,15 +168,43 @@ Translator-side items the OAL work depends on:
   MD=0). Privileged-instruction traps and page protection by mode do not
   fire; acceptable for bring-up, to be revisited for user/kernel isolation.
 
+What the kernel sources settled (2026-11-02, notes/ce/kernel-sh-notes.md):
+
+- ~~Bank 1~~: the kernel does keep live state in r4/r5/r7_bank1. The
+  translator's exception stubs now preserve bank 1 (`bank` guest).
+- F2 and F9 both live in `OEMCacheRangeFlush` (the kernel routes code
+  writes and TLB invalidation through it); FA is not needed as a kernel
+  edit (the translator reads PTEH at `rte`/`ldc sr`, and SHSetASID's store
+  will be seen by the device-aware translation below). No kernel.dll change
+  for the hypercall contract.
+- **kernel.dll touches the CCN registers directly** (EXPEVT, INTEVT, TEA,
+  TRA, PTEH/PTEL/PTEA, TTB, MMUCR, CCR; table in the notes). Through the
+  swapped memory path those values arrive byte-reversed, so API calls would
+  never be recognised and ASIDs would never reach the hardware. Next
+  translator item: device-aware translation for blocks inside kernel.dll's
+  address range (from the ROMHDR module table): 16/32-bit memory
+  instructions test the top byte of the effective address and take an
+  unswapped helper for 0xFF, which also observes PTEH/PTEL/MMUCR writes.
+  Fallback: patch the ~25 sites and rebuild kernel.dll in the VM.
+- **SR.FD must be emulated** for the kernel's lazy FPU switch: an FPU
+  instruction with FD=1 has to raise EXPEVT 0x800 instead of executing.
+- The OAL's debug output cannot trap while BL=1 (SHInit/OEMInit): debug ring.
+- The stock HARP image cannot be loaded as-is (records at 0x8C001000, RAM to
+  0x90000000): `config.bib` of the ClassPad BSP places NK at 0x8C101000 and
+  RAM up to 0x8CC7F000.
+
 ## 4. Order of work
 
-1. Install the VM and Platform Builder; build the stock SH4 BSP image once
+1. ~~Install the VM and Platform Builder; build the stock SH4 BSP image once
    (no hardware needed) to prove the toolchain. Read the kernel's SH4
-   exception sources and settle the bank-1 question.
+   exception sources and settle the bank-1 question.~~ Done 2026-11-02
+   (HARP image built; notes/ce/).
 2. ~~Guest tests for the two translator gaps~~ done 2026-10-22 (`apicall`,
    `mmu`); address-space handling done (`aspace`).
-3. `PLATFORM\CLASSPAD`: StartUp, OEMInit with TMU0 tick and INTC, hypercall
-   debug output, cache flush hook. Headless OS design, RAMIMAGE config.bib.
+3. `PLATFORM\CLASSPAD`: ~~StartUp, OEMInit with TMU0 tick and INTC, hypercall
+   debug output, cache flush hook. Headless OS design, RAMIMAGE config.bib~~
+   written (bsp/classpad, 2026-11-02); to compile in the VM. Translator
+   side before the first boot: device-aware kernel.dll translation, SR.FD.
 4. `make -C dbt NKBIN=NK.bin run`: expect the kernel banner on stdout,
    then the first scheduler tick. Fix what breaks.
 5. Memory: ~~compact block metadata; move the translator region down and

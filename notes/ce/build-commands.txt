@@ -1,0 +1,15 @@
+Build environment (from the generated OSDesigns\Classpad\Classpad\Wince600\Aspen7750R_SH4\PBInitEnv.bat):
+  _WINCEROOT=C:\WINCE600  _FLATRELEASEDIR=...\RelDir\<config>  LOCALE=0409  WINCEDEBUG=debug|retail
+  call %_WINCEROOT%\public\COMMON\OAK\MISC\wince.bat SH4 Classpad Aspen7750R
+  set SYSGEN_SHELL=1; IMGEBOOT=1 (HARP: ethernet boot); IMGNODEBUGGER/IMGNOKITL per configuration
+
+Command-line loop for PLATFORM\CLASSPAD (open "Build > Open Release Directory in Build Window", or run PBInitEnv.bat then):
+  rem one-time after copying bsp\classpad to %_WINCEROOT%\PLATFORM\CLASSPAD and creating an OS design on it
+  cd /d %_WINCEROOT%\PLATFORM\CLASSPAD
+  build -c                         rem rebuilds oal.lib and nk.exe (SRC\OAL\OALLIB, SRC\OAL\OALEXE)
+  cd /d %_FLATRELEASEDIR%
+  buildrel                          rem copies platform binaries/.bib files to the flat release dir (only after BSP changes to FILES\)
+  makeimg                           rem romimage: NK.bin from config.bib + ce.bib + platform.bib
+Equivalent in the IDE: Build > Advanced Build Commands > Build Current BSP and Subprojects, then Make Run-Time Image.
+Set in the OS design (Project > Properties > Build Options): IMGNOKITL=1, IMGNODEBUGGER=1, IMGNOLOC? no; keep "Enable KITL" off.
+Then on the Mac: copy NK.bin to notes/ce/, `make -C dbt NKBIN=notes/ce/NK.bin run`.

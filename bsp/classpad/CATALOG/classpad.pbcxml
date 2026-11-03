@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<CatalogFile xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" RequiredVersion="6.00" xsi:schemaLocation="urn:Microsoft.PlatformBuilder/Catalog PbcXml600.xsd" xmlns="urn:Microsoft.PlatformBuilder/Catalog">
+  <FileInformation Id="FileInformation:ClassPad:classpad">
+    <Title>Casio ClassPad BSP</Title>
+    <Description>BSP for the Casio SH7305 calculators (fx-CP400, fx-CG50/CG100) running under the little-endian translator.</Description>
+    <Vendor>wince-classpad</Vendor>
+    <OSVersion>6.00</OSVersion>
+    <FileVersion>6.00</FileVersion>
+  </FileInformation>
+  <Bsp Id="Bsp:ClassPad:classpad:sh4">
+    <Title>Casio ClassPad: SH4</Title>
+    <Description>SH7305 (SH-4A, no FPU) with the TMU0 tick, INTC and a translator-side debug console. Headless.</Description>
+    <PlatformDirectory>CLASSPAD</PlatformDirectory>
+    <CpuId>Cpu:SH4</CpuId>
+  </Bsp>
+</CatalogFile>

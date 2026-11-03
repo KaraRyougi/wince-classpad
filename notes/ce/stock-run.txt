@@ -1,0 +1,20 @@
+Stock HARP image (OSDesigns\Classpad, config "Renesas US7750R HARP SDB SH4 Debug", SYSGEN_SHELL=1, IMGEBOOT=1, debugger on)
+
+python3 tools/nkbin.py notes/ce/stock-NK.bin:
+  image   : 0x8c001000 .. 0x8c276c38 (2579512 bytes, 25 records)
+  entry   : 0x8c001004
+  ROMHDR  : at 0x8c010c30, CPU 0x01a6 (SH4), ROM 0x8c001000..0x8c276c38, RAM start 0x8c277000 free 0x8c2ca000 end 0x90000000
+  18 modules: nk.exe (64512, the OAL) kitl.dll kernel.dll (535552) kd.dll hd.dll osaxst0.dll osaxst1.dll coredll.dll oalioctl.dll
+              k.coredll.dll filesys.dll romfsd.dll relfsd.dll shell.exe shellcelog.dll toolhelp.dll k.toolhelp.dll fsdmgr.dll
+
+make -C dbt NKBIN=notes/ce/stock-NK.bin run:
+  not loadable as-is: records start at 0x8C001000 (below the guest window 0x8C100000) and ROMHDR RAM end is 0x90000000
+  (64 MiB board). The loader refuses records outside the window (NKBIN_ERR_RANGE), as designed. First the emulator had to be
+  pinned to the fx-CG100 profile (casio-emu now remembers the last machine; dbt/Makefile sets CALCEMU_MODEL=fx-cg100).
+  The debug build also carries KITL, KD and OsAxs (would stop at the HARP SCIF/TMU registers anyway).
+
+Consequences, all folded into bsp/classpad:
+  config.bib: NK at 0x8C101000 (AUTOSIZE), RAM up to 0x8CC7F000, the last 4 KiB page of the window reserved for the debug ring.
+  Release config with IMGNOKITL=1 IMGNODEBUGGER=1 (no kitl/kd/hd/osaxs), SYSGEN_SHELL optional for the first boot.
+nk.map of the HARP build (target\SH4\debug): _StartUp at 0x000163b0 (nk.exe base 0x10000 before ROMIMAGE relocation),
+  OEMInitDebugSerial, OEMWriteDebugByte, OEMInit, OEMIdle, OEMCacheRangeFlush, SH4ClearTLB, OALTimerInit all in oal.lib.

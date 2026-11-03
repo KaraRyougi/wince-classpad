@@ -1,0 +1,21 @@
+RELEASETYPE=PLATFORM
+TARGETNAME=oal
+TARGETTYPE=LIBRARY
+
+LDEFINES=-subsystem:native /DEBUG /DEBUGTYPE:CV /FIXED:NO
+CDEFINES=$(CDEFINES) -DCEDDK_USEDDKMACRO
+
+SOURCES=\
+    init.c      \
+    intr.c      \
+    timer.c     \
+    cache.c     \
+    debug.c     \
+    ioctl.c     \
+    rtc.c       \
+    power.c     \
+    args.c
+
+SH_SOURCES=\
+    startup.src \
+    cache.src

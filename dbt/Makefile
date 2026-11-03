@@ -39,6 +39,9 @@ NK_FLASH_OFF ?= 0x01000000
 # casio-emu copies flash files in 32-bit units, so the image is padded to a multiple of 4 first
 NK_PADDED = $(BUILD)/nk-padded.bin
 NK_ENV = $(if $(NKBIN),HLE_OSROM=$(abspath $(NK_PADDED)) HLE_OSROM_PAD=$(NK_FLASH_OFF),)   # recursive: nkrun sets NKBIN per target
+# casio-emu remembers the last machine profile (model.txt); the translator is an
+# fx-CG100 add-in, so pin the profile or a remembered ClassPad refuses to boot
+EMU_ENV = CALCEMU_MODEL=fx-cg100
 define NK_PAD
 python3 -c 'import sys;d=open(sys.argv[1],"rb").read();open(sys.argv[2],"wb").write(d+b"\0"*(-len(d)%4))' $(NKBIN) $(NK_PADDED)
 endef
@@ -59,6 +62,7 @@ GUEST_EXTRA_bench := bench/loops.S
 GUEST_EXTRA_apicall := guest/fault_vectors.S
 GUEST_EXTRA_mmu := guest/fault_vectors.S
 GUEST_EXTRA_aspace := guest/fault_vectors.S
+GUEST_EXTRA_bank := guest/bank_vectors.S
 GUEST_EXTRA     := $(GUEST_EXTRA_$(GUEST))
 GUEST_START_nkimg := guest/nkimg_start.S
 GUEST_START     := $(or $(GUEST_START_$(GUEST)),guest/start.S)
@@ -94,18 +98,18 @@ $(IMG).g3a: $(IMG)-loader.bin
 
 run: $(IMG).g3a
 	$(if $(NKBIN),$(NK_PAD))
-	-$(NK_ENV) $(EMU)/run-headless.sh $(abspath $(IMG).g3a) 20
+	-$(EMU_ENV) $(NK_ENV) $(EMU)/run-headless.sh $(abspath $(IMG).g3a) 20
 
 # run the current guest through the .bin loader (image in emulated flash)
 nkrun: NKBIN = $(BUILD)/$(GUEST).nk.bin
 nkrun: $(IMG).g3a $(BUILD)/$(GUEST).nk.bin
 	$(NK_PAD)
-	-$(NK_ENV) $(EMU)/run-headless.sh $(abspath $(IMG).g3a) 20
+	-$(EMU_ENV) $(NK_ENV) $(EMU)/run-headless.sh $(abspath $(IMG).g3a) 20
 
 # run headless with the emulator dumping the presented frame (PPM) and convert the
 # last one to $(IMG).png; HLE_FORCE_R61524 presents the LCD controller's pixels
 screenshot: $(IMG).g3a
-	-HLE_FBDUMP=$(abspath $(IMG).ppm) HLE_FORCE_R61524=1 $(EMU)/run-headless.sh $(abspath $(IMG).g3a) 25
+	-$(EMU_ENV) HLE_FBDUMP=$(abspath $(IMG).ppm) HLE_FORCE_R61524=1 $(EMU)/run-headless.sh $(abspath $(IMG).g3a) 25
 	python3 ../tools/ppm2png.py $(IMG).ppm $(IMG).png
 
 disasm: $(IMG).elf $(BUILD)/$(GUEST).elf

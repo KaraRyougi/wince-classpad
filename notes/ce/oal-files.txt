@@ -1,0 +1,67 @@
+HARP (PLATFORM\ASPEN7750R + PLATFORM\COMMON\SRC\SOC\SH7750R_MS_V1) OAL pieces
+and where each one goes in PLATFORM\CLASSPAD (bsp/classpad in this repo).
+
+Image entry, CPU init
+  SOC\OAL\STARTUP\startup.src     _StartUp: SR, VBR=0, stop watchdog, braf KernelStart; _BusInit (SDRAM, unused by the OAL); _OEMNMI
+  -> CLASSPAD SRC\OAL\OALLIB\startup.src (no bus/watchdog work: the translator's launcher already runs)
+
+Kernel entry glue (not OAL, linked into nk.exe)
+  PRIVATE\...\NK\LDR\SH\shstart.src   KernelStart (nkldr.lib)
+  PRIVATE\...\NK\OEMMAIN\oemglobal.c  OEMGLOBAL table: the OAL must export OEMInitDebugSerial, OEMInit,
+                                      OEMWriteDebugByte/String, OEMReadDebugByte, OEMCacheRangeFlush,
+                                      OEMGetRealTime, OEMSetRealTime, OEMSetAlarmTime, OEMGetTickCount,
+                                      OEMIdle, OEMPowerOff, OEMGetExtensionDRAM, OEMInterruptEnable/Disable/
+                                      Done/Mask, OEMIoControl, OEMNMI
+
+OEMInit
+  ASPEN7750R\SRC\OAL\OALLIB\init.c    OEMInit: log zones, DrWatson size, profiler/KD hooks, OALCacheGlobalsInit,
+                                      CCInit (companion chip), OALIntrInit, OALTimerInit(1, COUNT_FREQUENCY/1000, 0), KITL
+  -> CLASSPAD init.c: zones, OALCacheGlobalsInit, OALIntrInit, OALTimerInit; no KITL, no companion chip
+
+System timer
+  SOC\OAL\TIMER\init.c                OALTimerInit: TMU0 TCR0 = D16|UNIE, TCOR0/TCNT0 = countsPerSysTick-1, TSTR |= STR0;
+                                      fills g_oalTimer, pQueryPerformanceFrequency/Counter
+  SOC\OAL\TIMER\timer.c               OALStall, OALTimerInitCount/GetCount/SetCount/GetCompare/SetCompare
+  SOC\OAL\TIMER\countdown.c/iltiming.c  OALTimerCountsSinceSysTick, IL timing (profiler)
+  ASPEN7750R\SRC\OAL\OALLIB\timer.c   OALTimerIntrHandler (clear UNF, CurMSec += 1, SYSINTR_RESCHED when due), OEMIdle (sleep)
+  COMMON\SRC\COMMON\TIMER\COMMON\counts.c  OEMGetTickCount, QueryPerformanceFrequency/Counter (oal_timer.lib, reused)
+  -> CLASSPAD timer.c: TMU0 at 0xA4490004.. with pre-swapped accessors, Pphi/4, 7372 counts per ms
+
+Interrupt controller
+  SOC\OAL\INTR\intr.c                 OALIntrInit (OALIntrMapInit + BSPIntrInit), OALIntrEnableIrqs/DisableIrqs/DoneIrqs
+                                      (RTC alarm only on SH7750R; on-chip IRQs are enabled by IPR level)
+  ASPEN7750R\SRC\OAL\OALLIB\intr.c    BSPIntrInit: ICR, IPRA/B/C priorities, HookAndSetPriority(IRQ_TMU0_TUNI0, OALTimerIntrHandler, 0xE)
+                                      + profiler/iltiming timers, RTC alarm, ethernet, HD64465; BSPIntrEnableIrq/DisableIrq/DoneIrq (FPGA mask)
+  ASPEN7750R\SRC\INC\intr_cfg.h       priorities, IPRx bit fields, IRQ_TMU0_PRIORITY 0xE
+  SOC\INC\sh4_intc.h                  IRQ numbering: EXCEPTIONCODETOIRQ(code) = (code - 0x200) / 0x20, TMU0 = 16
+  COMMON\SRC\COMMON\INTR\BASE\map.c, COMMON\ioctl.c   IRQ<->SYSINTR mapping, OEMInterruptEnable/Disable/Done, IOCTL_HAL_REQUEST_SYSINTR (oal_intr.lib, reused)
+  -> CLASSPAD intr.c: no BSP callbacks; IPRA TMU0 field + IMR4/IMCR4 bit 4; OALIntrEnableIrqs/DisableIrqs toggle IMR bits
+
+Cache and TLB
+  SOC\OAL\CACHE\cfw.c                 OEMCacheRangeFlush: D-cache writeback/invalidate (whole cache), I-cache invalidate via CCR.ICI,
+                                      TLB flush via MMUCR.TI; OALCacheGlobalsInit (16 KiB I / 32 KiB D, 2-way, 32-byte lines)
+  SOC\OAL\CACHE\flushdc.src, flushic.src, tlbclear.src, fw.src (OEMExtraCCR 0x80000105, SH4CacheLines 1024)
+  -> CLASSPAD cache.c + cache.src: ocbwb/ocbp/icbi loops (SH-4A), MMUCR via pre-swapped store, hypercalls F2 (code ranges) and F9 (TLB)
+
+Debug output
+  SOC\OAL\DEBUG\debug.c               OEMInitDebugSerial (SCIF2 at 0xFFE80000), OEMWriteDebugByte, OEMWriteDebugString, OEMReadDebugByte,
+                                      OEMClearDebugCommError, DumpRegisters
+  ASPEN7750R\SRC\OAL\OALLIB\debug.c   #include "..\..\bootloader\debug.c" (same code)
+  -> CLASSPAD debug.c: RAM ring drained by the translator (BL=1 safe) + trapa #0xF3 when BL=0
+
+IOCTL, RTC, power, args
+  ASPEN7750R\SRC\OAL\OALLIB\ioctl.c   g_oalIoCtlPlatformType/OEM, processor strings, OALIoCtlHalReboot, g_oalIoCtlTable[] from ioctl_tab.h
+  ASPEN7750R\SRC\INC\ioctl_tab.h, ioctl_cfg.h
+  SOC\OAL\RTC\COMMON\rtc.c, ALARM\alarm.c   OEMGetRealTime/SetRealTime/SetAlarmTime on the SH7750R RTC (0xFFC80000)
+  SOC\OAL\POWER\power.c               OEMPowerOff (sleep until a wake source), SHxPowerIoctl
+  ASPEN7750R\SRC\OAL\OALLIB\args.c    OALArgsQuery (boot args at 0x8C000000 from the bootloader)
+  COMMON\SRC\COMMON\OTHER\memory.c, clock.c   OEMGetExtensionDRAM (FALSE), InitClock (empty) (oal_other.lib, reused)
+  -> CLASSPAD ioctl.c (trimmed table), rtc.c (software RTC first, SH7305 RTC at 0xA413FEC0 later), power.c (stub), args.c (NULL)
+
+Not carried over: ether.c, cc_intr.c, dma_intr.c, ddi.c, oemkdioctl.c (KD), KITL, bootloader, drivers.
+
+Build files
+  ASPEN7750R\dirs, sources.cmn, aspen7750r.bat, CESYSGEN\makefile, FILES\config.bib platform.bib platform.reg platform.db platform.dat,
+  CATALOG\aspen7750r.pbcxml + 1033\aspen7750rstrings.pbcxml, SRC\OAL\OALLIB\sources (TARGETNAME=oal, LIBRARY),
+  SRC\OAL\OALEXE\sources (TARGETNAME=oal, PROGRAM, EXEENTRY=StartUp, TARGETLIBS oemmain nkstub nkldr oal + common OAL libs + fulllibc)
+  -> same layout under bsp/classpad; the SoC libraries are folded into oal.lib

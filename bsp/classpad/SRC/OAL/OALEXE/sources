@@ -1,0 +1,26 @@
+TARGETNAME=oal
+TARGETTYPE=PROGRAM
+SYNCHRONIZE_DRAIN=1
+RELEASETYPE=PLATFORM
+
+EXEENTRY=StartUp
+
+LDEFINES=-subsystem:native /DEBUG /DEBUGTYPE:CV /FIXED:NO
+
+SOURCES=
+
+NOLIBC=1
+
+TARGETLIBS=\
+    $(_COMMONOAKROOT)\lib\$(_CPUDEPPATH)\oemmain.lib                  \
+    $(_COMMONOAKROOT)\lib\$(_CPUDEPPATH)\nkstub.lib                   \
+    $(_COMMONOAKROOT)\lib\$(_CPUDEPPATH)\nkldr.lib                    \
+    $(_TARGETPLATROOT)\lib\$(_CPUDEPPATH)\oal.lib                     \
+    $(_PLATCOMMONLIB)\$(_CPUDEPPATH)\oal_cache.lib                    \
+    $(_PLATCOMMONLIB)\$(_CPUDEPPATH)\oal_timer.lib                    \
+    $(_PLATCOMMONLIB)\$(_CPUDEPPATH)\oal_ioctl.lib                    \
+    $(_PLATCOMMONLIB)\$(_CPUDEPPATH)\oal_log.lib                      \
+    $(_PLATCOMMONLIB)\$(_CPUDEPPATH)\oal_io.lib                       \
+    $(_PLATCOMMONLIB)\$(_CPUDEPPATH)\oal_intr.lib                     \
+    $(_PLATCOMMONLIB)\$(_CPUDEPPATH)\oal_other.lib                    \
+    $(_COMMONOAKROOT)\lib\$(_CPUINDPATH)\fulllibc.lib                 \

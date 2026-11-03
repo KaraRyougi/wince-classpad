@@ -1,0 +1,8 @@
+;-------------------------------------------------------------------------------
+; CLASSPAD platform.reg
+;-------------------------------------------------------------------------------
+[HKEY_LOCAL_MACHINE\Platform]
+   "Name"="Casio ClassPad (SH7305)"
+   "Type"=dword:4
+
+; Device drivers are added here as they are written (display, keyboard, touch).

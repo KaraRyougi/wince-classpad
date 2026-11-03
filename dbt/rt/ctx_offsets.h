@@ -17,4 +17,6 @@
 #define CTX_JUMPTO  132
 #define CTX_NEWSPC  136
 #define CTX_NEWSSR  140
-#define CTX_SIZE    144
+#define CTX_B1      144         /* b1[8]: the other register bank (bank 1 when the guest ran in bank 0) */
+#define CTX_B1END   176
+#define CTX_SIZE    176

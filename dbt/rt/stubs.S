@@ -28,6 +28,9 @@
         .macro SYNCO
         .word 0x00AB
         .endm
+        .macro STCSGR reg              /* stc sgr, r\reg (SH-4A): r15 as it was at the exception */
+        .word 0x003A | (\reg << 8)
+        .endm
 
 /* One literal pool per region (mov.l @(disp,PC) reaches only 1 KiB). */
         .macro POOL sfx
@@ -351,32 +354,45 @@ _dbt_rte_stub:
         POOL    C
 
 /* ------------------------------------------------------------------ */
-/* Exception vectors. VBR = _dbt_vectors. Entered with MD=1 RB=1 BL=1, so
- * r0-r7 are bank 1 and free for us. */
+/* Exception vectors. VBR = _dbt_vectors. Entered with MD=1 RB=1 BL=1. The
+ * current r0-r7 are bank 1, which belongs to the guest too (the CE kernel
+ * keeps pCurThread, its context pointer and SH3CTL_BASE in r4/r5/r7_bank1 at
+ * all times), so nothing may be touched before it is saved. The only free
+ * register is r15: the hardware copied it to SGR. */
+        .macro EXC_ENTRY vec
+        mov.l   1f, r15                /* r15 is in SGR; use it as the first scratch */
+        mov.l   r7, @-r15              /* bank 1 -> ctx->b1[7..0] */
+        mov.l   r6, @-r15
+        mov.l   r5, @-r15
+        mov.l   r4, @-r15
+        mov.l   r3, @-r15
+        mov.l   r2, @-r15
+        mov.l   r1, @-r15
+        mov.l   r0, @-r15
+        mov     #(\vec >> 8), r0
+        shll8   r0
+        bra     _dbt_exc_common
+        nop
+        .align 2
+1:      .long   _dbt_ctx_exc + CTX_B1END
+        .endm
+
         .balign 4096
         .global _dbt_vectors
 _dbt_vectors:
         .org    _dbt_vectors + 0x100
-        mov     #1, r0
-        shll8   r0
-        bra     _dbt_exc_common
-        nop
+        EXC_ENTRY 0x100
         .org    _dbt_vectors + 0x400
-        mov     #4, r0
-        shll8   r0
-        bra     _dbt_exc_common
-        nop
+        EXC_ENTRY 0x400
         .org    _dbt_vectors + 0x600
-        mov     #6, r0
-        shll8   r0
-        bra     _dbt_exc_common
-        nop
+        EXC_ENTRY 0x600
 
         .align 2
 _dbt_exc_common:
-        /* r0 = vector offset. Save guest state into dbt_ctx_exc. */
+        /* r0 = vector offset, bank 1 saved. Save the guest state into dbt_ctx_exc. */
         mov.l   .Lctx_exc_rendD, r2
-        mov.l   r15, @-r2
+        STCSGR  1                      /* guest r15 (ours was clobbered by the thunk) */
+        mov.l   r1, @-r2
         mov.l   r14, @-r2
         mov.l   r13, @-r2
         mov.l   r12, @-r2
@@ -503,14 +519,35 @@ _dbt_exc_common:
         mov.l   @(20, r3), r13
         mov.l   @(24, r3), r14
         mov.l   @(28, r3), r15
+        mov     r2, r3
+        add     #CTX_SLOTS, r3
         cmp/eq  #1, r0
         bt      .Lexc_do_jump
+        /* resume: bank 1 back exactly as it was (r3 last, it is the base) */
+        add     #(CTX_B1 - CTX_SLOTS), r3
+        mov.l   @(0, r3), r0
+        mov.l   @(4, r3), r1
+        mov.l   @(8, r3), r2
+        mov.l   @(16, r3), r4
+        mov.l   @(20, r3), r5
+        mov.l   @(24, r3), r6
+        mov.l   @(28, r3), r7
+        mov.l   @(12, r3), r3
         rte
         nop
 .Lexc_do_jump:
-        mov     r2, r1
-        add     #CTX_SLOTS, r1
-        mov.l   @(CTX_JUMPTO - CTX_SLOTS, r1), r1
+        /* enter the guest handler in bank 1: everything restored except r1,
+         * which carries the host address (a scratch register for any SH
+         * exception handler, the hardware leaves bank 1 undefined there) */
+        mov.l   @(CTX_JUMPTO - CTX_SLOTS, r3), r1
+        add     #(CTX_B1 - CTX_SLOTS), r3
+        mov.l   @(0, r3), r0
+        mov.l   @(8, r3), r2
+        mov.l   @(16, r3), r4
+        mov.l   @(20, r3), r5
+        mov.l   @(24, r3), r6
+        mov.l   @(28, r3), r7
+        mov.l   @(12, r3), r3
         jmp     @r1
         nop
 

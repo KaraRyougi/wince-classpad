@@ -32,6 +32,11 @@ typedef struct {
     /* results for the asm side */
     sf_u32 jump_to;            /* host address to jump to (RT_ACT_JUMP) */
     sf_u32 new_spc, new_ssr;   /* for RT_ACT_JUMP from the exception path */
+    /* exception path: r0-r7 of the bank the guest was NOT running in (bank 1
+     * for a bank-0 guest). Saved first thing by the vector thunks, restored
+     * last: the CE kernel keeps pCurThread and SH3CTL_BASE in r4/r5/r7_bank1
+     * across all code, so the translator may not use bank 1 as scratch. */
+    sf_u32 b1[8];
 } dbt_gctx;
 
 enum { RT_ACT_RESUME = 0, RT_ACT_JUMP = 1, RT_ACT_HALT = 2 };
@@ -58,6 +63,8 @@ void   dbt_ldc_sr_c(dbt_gctx *ctx, sf_u32 newsr);
 sf_u32 dbt_rte_c(sf_u32 guest_spc, sf_u32 *ssr);
 /* Drop every block overlapping [lo, hi) of guest code (after code writes). */
 void   dbt_invalidate(sf_u32 lo, sf_u32 hi);
+/* Print what the guest appended to the debug ring (docs/04). */
+void   dbt_dbgring_drain(void);
 
 /* translator state visible to generated code */
 sf_u32 dbt_bench_native(sf_u32 which, sf_u32 n);      /* rt/bench.c */
@@ -101,6 +108,7 @@ typedef struct {
     sf_u32 unchained, asid_switches, tlb_hooks;
     sf_u32 arena_bytes;                  /* metadata arena in use */
     sf_u32 synth_exceptions;             /* address errors synthesized for unfetchable guest pcs */   /* exceptions resumed inside a block: restart / after the memory op */
+    sf_u32 dbgring_bytes;          /* bytes printed from the guest debug ring */
 } dbt_stats;
 extern dbt_stats dbt_stat;
 

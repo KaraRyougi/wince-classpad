@@ -122,6 +122,16 @@ runs the build from a command prompt (`blddemo` / `build -c` in the BSP
 directory, then `makeimg`) so no clicking is needed. Note the exact commands
 that worked in `notes/ce/build-commands.txt`.
 
+## Done with the results (2026-11-02)
+
+Steps 1-4 came back: the stock HARP image (not loadable in the window, as
+expected), the kernel's SH4 sources and the HARP OAL. Findings are in
+`notes/ce/kernel-sh-notes.md` and `notes/ce/oal-files.txt`; the OAL is
+written in `bsp/classpad` (its README has the install steps for
+`PLATFORM\CLASSPAD`). Before the first boot attempt two translator items
+remain: device-aware translation of kernel.dll's CCN register accesses and
+SR.FD emulation (docs/05 section 3).
+
 ## What I do with the results
 
 1. Step 2's run output tells whether the loader, ROMHDR and entry are

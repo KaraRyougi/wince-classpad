@@ -1,0 +1,58 @@
+;;-----------------------------------------------------------------------------
+;;  cache.src - cache maintenance by address range (SH-4A)
+;;
+;;  r4 = start address, r5 = length in bytes. Lines are 32 bytes. These
+;;  instructions run natively under the translator.
+;;    ocbwb  write back a line, keep it
+;;    ocbp   write back and invalidate a line
+;;    icbi   invalidate an instruction cache line (SH-4A, encoded by hand:
+;;           the CE 6.0 assembler only knows the SH-4)
+;;-----------------------------------------------------------------------------
+        .list       OFF
+        .include    "kxshx.h"
+        .list       ON
+
+;;  void ClasspadCacheWriteback(DWORD addr, DWORD len)
+        LEAF_ENTRY _ClasspadCacheWriteback
+        mov     r4, r0
+        add     r5, r0                  ; (r0) = end
+        mov     #-32, r1
+        and     r1, r4                  ; line align
+wb10:   ocbwb   @r4
+        add     #32, r4
+        cmp/hs  r0, r4                  ; T = r4 >= end
+        bf      wb10
+        rts
+        nop
+        ENTRY_END _ClasspadCacheWriteback
+
+;;  void ClasspadCachePurge(DWORD addr, DWORD len)
+        LEAF_ENTRY _ClasspadCachePurge
+        mov     r4, r0
+        add     r5, r0
+        mov     #-32, r1
+        and     r1, r4
+pg10:   ocbp    @r4
+        add     #32, r4
+        cmp/hs  r0, r4
+        bf      pg10
+        rts
+        nop
+        ENTRY_END _ClasspadCachePurge
+
+;;  void ClasspadICacheInvalidate(DWORD addr, DWORD len)
+        LEAF_ENTRY _ClasspadICacheInvalidate
+        mov     r4, r0
+        add     r5, r0
+        mov     #-32, r1
+        and     r1, r4
+ic10:   .data.w h'04E3                  ; icbi @r4
+        add     #32, r4
+        cmp/hs  r0, r4
+        bf      ic10
+        .data.w h'00AB                  ; synco
+        rts
+        nop
+        ENTRY_END _ClasspadICacheInvalidate
+
+        .end

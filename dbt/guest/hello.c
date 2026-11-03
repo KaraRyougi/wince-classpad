@@ -38,6 +38,20 @@ void guest_main(void)
     check("literal pool / rodata", sum == (1 + 0 + 0xFF + 0xEF) && ident(table[3]) == 0xDEADBEEFu);
     check("u32 pre-decrement store / post-increment load (stack)", ident(0x12345678u) == 0x12345678u);
     hc_puts("value of w: "); hc_puthex(w); hc_putc('\n');
+
+    /* the exception-free debug ring in the last page of the guest window
+     * (docs/04): bytes appended here come out at the translator's next entry */
+    {
+        volatile unsigned *ring = (volatile unsigned *)((GUEST_RAM_HI - 0x1000u) | 0x20000000u);
+        volatile unsigned char *bytes = (volatile unsigned char *)ring + 16;
+        const char *msg = "ring: hello through the debug ring\n";
+        unsigned n = 0, before = hc_getstat(5);
+        check("debug ring magic set by the translator", ring[2] == 0x47424452u);
+        while (msg[n]) { bytes[(ring[0] + n) % 4080u] = (unsigned char)msg[n]; n++; }
+        ring[0] += n;
+        hc_putc('>');                   /* any hypercall drains the ring */
+        check("debug ring drained", hc_getstat(5) == before + n && ring[1] == ring[0]);
+    }
     hc_stats();
     hc_puts(fails ? "RESULT: FAIL\n" : "RESULT: PASS\n");
     hc_exit(fails);

@@ -213,12 +213,32 @@ via hypercall 0xF1):
   call C, restore and jump back through the shared `dbt_tail_full`.
 - `dbt_rte_stub`: resolves the guest SPC, forces MD and DSP in SSR, keeps the
   guest MD in `dbt_shadow_md`, then executes the real `rte`.
-- Exceptions: VBR = `dbt_vectors`; handlers save bank-0 registers (via
-  `stc Rn_bank`, since RB=1), the DSP slots, SPC/SSR/EXPEVT/TRA/TEA/INTEVT into
-  `dbt_ctx_exc` and call `dbt_exc_c`. Hypercalls (`trapa` 0xF0-0xFF) return
-  with `rte`; everything else is delivered to the guest handler with
-  SPC = guest resume pc, SSR.MD = shadow MD. Assumption to verify against the
-  CE kernel source: bank-1 registers hold no persistent kernel state.
+- Exceptions: VBR = `dbt_vectors`. The hardware enters the vectors with
+  RB=1, so the current r0-r7 are bank 1, and bank 1 belongs to the guest
+  too: the CE kernel keeps pCurThread, its context pointer and SH3CTL_BASE
+  in r4/r5/r7_bank1 for the life of the system (notes/ce/kernel-sh-notes.md).
+  The vector thunks therefore save bank 1 first (`ctx->b1`), using r15 as the
+  only free register (the hardware copied it to SGR), then bank 0 (via
+  `stc Rn_bank`), the DSP slots and SPC/SSR/EXPEVT/TRA/TEA/INTEVT into
+  `dbt_ctx_exc`, and call `dbt_exc_c`, which swaps the two bank images when
+  the guest itself ran in bank 1 so that C always sees the guest's current
+  registers in `ctx->r`. Hypercalls (`trapa` 0xF0-0xFF) return with `rte`;
+  everything else is delivered to the guest handler with SPC = guest resume
+  pc, SSR.MD = shadow MD, bank 1 restored except r1, which carries the host
+  address of the handler (a scratch register for any SH exception handler).
+  Verified by the `bank` guest. After a resume the hardware SPC/SSR hold
+  host values; a guest that nests an exception without saving SPC/SSR first
+  reads those, which the CE kernel never does.
+- Debug ring: an exception-free console at `GUEST_RAM_HI - 4 KiB`
+  (uncached P2 alias, words little-endian: write count, read count, magic
+  0x47424452, 4080 bytes of storage). The guest appends bytes and the
+  translator prints them at every entry (C lookup, hypercall, halt) and
+  updates the read count. For code that runs with BL=1 and cannot `trapa`
+  (the CE kernel's SHInit/OEMInit path; a trapa with BL=1 is a manual
+  reset). The `hello` guest exercises it.
+- An illegal instruction inside translated code is reported with host
+  address, word, block and guest pc before it is delivered: it is almost
+  always a translator bug.
 - Faults while translating: a fault raised by the translator's code probe
   (TLB miss on a mapped page, any vector) is delivered to the guest at the
   pc being translated, with the guest registers taken from `dbt_ctx_rt`
@@ -232,7 +252,9 @@ via hypercall 0xF1):
   (`hc_flush`, for code the guest loaded or modified), F3 putc, F4 puthex,
   F5 stats, F6 bench, F7 dump host words, F8 synthetic exception (internal),
   F9 user mappings changed in a range (`hc_tlb_inval`), FA address space
-  switched to an ASID (`hc_asid`), FB read a statistic.
+  switched to an ASID (`hc_asid`), FB read a statistic (0 translations,
+  1 blocks, 2 invalidations, 3 ASID switches, 4 inline-cache misses,
+  5 debug-ring bytes).
 - Address spaces: blocks are keyed by virtual pc. A block of TLB-mapped
   code (pc < 0x80000000) also records the ASID it was translated under and
   the physical address of its first instruction, found by scanning the UTLB
@@ -261,10 +283,12 @@ via hypercall 0xF1):
   the handler which of r0-r3 are still parked in the DSP slots.
 - Known v1 limits: FPU memory operands and guest code must be in unmapped
   (P1) memory; a TLB miss inside C code halts unless it is the translator's
-  own code probe. Guest code running with SR.RB=1 must not take exceptions
-  or make hypercalls (the vectors save r0-r7 through `stc Rn_bank`, i.e.
-  bank 0): true for hardware-faithful handlers, which keep BL=1 while RB=1,
-  but to be checked against the CE kernel's exception entry.
+  own code probe. SR.FD is not emulated yet: FPU instructions run whatever
+  FD says, so the CE kernel's lazy FPU context switch (EXPEVT 0x800) never
+  triggers (notes/ce/kernel-sh-notes.md section 6). Device registers
+  accessed by kernel.dll itself (CCN at 0xFF000000) are byte-swapped like
+  memory; the plan is device-aware translation of kernel.dll's blocks
+  (docs/05).
 
 ## Performance (casio-emu, 2026-10-22)
 
@@ -390,6 +414,7 @@ Status 2026-10-22: all four guests pass under the emulator.
 | `mmu` | MMUCR.AT on, code and data pages mapped with PTEH/PTEL/`ldtlb`: translated call through a TLB-mapped code page with a data load through another, store through the TLB, TLB miss on a code fetch delivered to the guest's 0x400 handler (EXPEVT 0x040, TEA = SPC = pc), refill and retry, MMU off again | PASS (10 checks) |
 | `aspace` | address spaces: the same virtual page mapped to different code in ASID 1 and 2 (switch noticed at `ldc sr`, or announced with HC_ASID), blocks reused when an ASID returns and across ASIDs for a shared (SH=1) page, a remap announced by HC_TLB_INVAL, a remap noticed at `ldtlb` alone, reloading an identical mapping invalidating nothing, and a chained cross-page `bra` unlinked when its target page is remapped | PASS (14 checks) |
 | `lcd` | draws into a little-endian RGB565 VRAM and pushes 24 frames to the R61524 display controller (16-bit bus at 0xB4000000, RS on Port R) through the pre-swapped MMIO accessors; `make -C dbt GUEST=lcd screenshot` captures the frame | shows the picture (docs/img/lcd-guest.png) |
+| `bank` | register bank 1 across the translator: values parked in r4/r5/r7_bank1 (the CE kernel's pCurThread, context pointer, SH3CTL_BASE) survive hypercalls from bank 0, translation of new code, a trapa handled in bank 1, a hypercall issued from bank 1 with BL cleared (both banks intact), a synthetic address error returning through PR, and 50 more exceptions; the handler sees the interrupted bank-0 registers | PASS (14 checks) |
 | `tmu` | TMU0 programmed through pre-swapped MMIO, IMASK/BL and IMR masking, INTEVT, `rte` restoring SR, `sleep` wake-up; register probe across `trapa`; 15 one-construct hot loops (loads, stores of every form, `bt/s` with a T-writing slot, `jsr` with a store in the slot, push/pop, pc-relative) plus a compiled loop, each run with ~3000 interrupts landing at arbitrary host instructions and compared with an interrupt-free run | PASS (34 checks) |
 
 ![lcd guest frame](img/lcd-guest.png)
