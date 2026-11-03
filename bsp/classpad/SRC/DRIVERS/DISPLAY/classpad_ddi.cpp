@@ -252,8 +252,8 @@ GPE *GetGPE(void)
     return g_pGPE;
 }
 
-extern "C" BOOL APIENTRY DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID)
+BOOL WINAPI DllMain(HANDLE hInstance, DWORD dwReason, LPVOID lpReserved)      // declared by windows.h: no C linkage here
 {
-    if (dwReason == DLL_PROCESS_ATTACH) DisableThreadLibraryCalls(hInstance);
+    if (dwReason == DLL_PROCESS_ATTACH) DisableThreadLibraryCalls((HMODULE)hInstance);
     return TRUE;
 }

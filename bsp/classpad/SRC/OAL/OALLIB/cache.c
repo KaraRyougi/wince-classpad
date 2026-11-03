@@ -14,30 +14,34 @@
 extern void ClasspadCacheWriteback(DWORD addr, DWORD len);
 extern void ClasspadCachePurge(DWORD addr, DWORD len);
 extern void ClasspadICacheInvalidate(DWORD addr, DWORD len);
+extern void ClasspadOCacheFlushAll(void);
+extern void ClasspadICacheInvalidateAll(void);
 
 void OEMCacheRangeFlush(LPVOID pAddr, DWORD dwLength, DWORD dwFlags)
 {
     DWORD addr = (DWORD)pAddr, len = dwLength;
     BOOL all = (addr == 0 && len == 0);
+    // A range at least as large as the cache is cheaper as a walk of the
+    // address array (1024 stores) than line by line; the kernel's "whole
+    // cache" calls (no range) are the common case during boot.
+    BOOL wholeD = all || len >= g_oalCacheInfo.L1DSize;
+    BOOL wholeI = all || len >= g_oalCacheInfo.L1ISize;
 
-    if (all) {
-        // whole cache: walk the RAM window (no address-array geometry known yet)
-        addr = IMAGE_WINDOW_PA_START;
-        len  = IMAGE_WINDOW_PA_END - IMAGE_WINDOW_PA_START;
+    if (dwFlags & (CACHE_SYNC_DISCARD | CACHE_SYNC_WRITEBACK)) {
+        if (wholeD) ClasspadOCacheFlushAll();                // write-back and invalidate
+        else if (dwFlags & CACHE_SYNC_DISCARD) ClasspadCachePurge(addr, len);
+        else ClasspadCacheWriteback(addr, len);
     }
-
-    if (dwFlags & CACHE_SYNC_DISCARD) {
-        ClasspadCachePurge(addr, len);
-    } else if (dwFlags & CACHE_SYNC_WRITEBACK) {
-        ClasspadCacheWriteback(addr, len);
-    }
-
     if (dwFlags & CACHE_SYNC_INSTRUCTIONS) {
-        ClasspadCacheWriteback(addr, len);          // code written through the D-cache
-        ClasspadICacheInvalidate(addr, len);
+        if (wholeD) {
+            if (!(dwFlags & (CACHE_SYNC_DISCARD | CACHE_SYNC_WRITEBACK))) ClasspadOCacheFlushAll();
+        } else {
+            ClasspadCacheWriteback(addr, len);              // code written through the D-cache
+        }
+        if (wholeI) ClasspadICacheInvalidateAll();
+        else ClasspadICacheInvalidate(addr, len);
         if (ClasspadCanTrap()) ClasspadHcFlush(all ? 0 : (DWORD)pAddr, all ? 0 : dwLength);
     }
-
     if (dwFlags & CACHE_SYNC_FLUSH_TLB) {
         MMIO_W32(CCN_MMUCR, MMIO_R32(CCN_MMUCR) | MMUCR_TI);
         if (ClasspadCanTrap()) ClasspadHcTlbInval(all ? 0 : (DWORD)pAddr, all ? 0 : dwLength);
