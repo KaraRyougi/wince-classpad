@@ -183,3 +183,53 @@ _bench_frame:
         mov.l   @r15+, r9
         rts
         mov.l   @r15+, r8
+
+/* ldc sr with no change (interrupt enable/disable in a kernel): under the
+ * translator a helper call with a full context save per ldc */
+        .global _bench_ldcsr
+_bench_ldcsr:
+        HEAD
+1:      stc     sr, r0
+        ldc     r0, sr
+        add     #1, r7
+        dt      r4
+        bf      1b
+        TAIL
+
+/* indirect call alternating between two leaves through one call site: an
+ * inline-cache miss on every call (a C lookup under the translator) */
+        .global _bench_icmiss
+_bench_icmiss:
+        sts.l   pr, @-r15
+        HEAD
+        mov.l   .Lleafa, r6
+        mov.l   .Lleafb, r5
+1:      jsr     @r6
+        nop
+        mov     r6, r0
+        mov     r5, r6
+        mov     r0, r5
+        dt      r4
+        bf      1b
+        lds.l   @r15+, pr
+        TAIL
+leafa:  rts
+        nop
+leafb:  rts
+        nop
+
+/* a control-register load (EXPEVT) in device-aware code: the slow path of
+ * the device test, a fallback helper call per load under the translator */
+        .global _bench_devload
+_bench_devload:
+        HEAD
+        mov.l   .Lexpevt, r5
+1:      mov.l   @r5, r0
+        add     r0, r7
+        dt      r4
+        bf      1b
+        TAIL
+        .align 2
+.Lleafa:  .long leafa
+.Lleafb:  .long leafb
+.Lexpevt: .long 0xFF000024

@@ -462,6 +462,15 @@ On hardware, native code stalls on memory and the translated extra work is
 all register ALU, so memory-heavy ratios should come out a little lower than
 here; the 3-5x code expansion will cost instruction-cache misses instead.
 
+Helper paths (2026-11-03, `bench` kernels, 20000 iterations, TMU1 ticks;
+native = the same loop run big-endian by the translator image):
+
+| kernel | translated | native | slowdown | per call |
+|---|---|---|---|---|
+| `ldc sr` (no change: a helper with a full context save) | 329598 | 10988 | 30x | ~150 host instructions |
+| inline-cache miss (indirect call alternating two targets) | 123050 | 19778 | 6.2x | ~56 |
+| device load in device-aware code (fallback helper) | 1773203 | 8791 | 202x | ~800 |
+
 Optimizations, in order of payoff per effort:
 
 1. ~~**Branch chaining**~~ done (above).
@@ -491,6 +500,18 @@ idle; the emulator runs at roughly a quarter of real time):
 | kernel.dll InitModule | 290 | |
 | k.coredll memset / memcpy / sh3memcpy | 563 | |
 | nk.exe OEMCacheRangeFlush | 177 | |
+
+After the fixes below the same boot takes 15.5 s of emulated time (16 k
+translations). Reading that profile needs one caveat: a sample whose
+interrupt was taken in a stub window after a masked C call (`where=3`,
+60 % of the samples then) measures the time the kernel ran with
+interrupts disabled, attributed to the `ldc sr` helper that re-enabled
+them: guest work, not translator overhead. The helpers themselves are
+cheap (`bench` kernels, 2026-11-03): an `ldc sr` costs about 150 host
+instructions, an inline-cache miss about 56, a device-register load
+through the fallback about 800; at 59 k, 10 k and 24 k per boot that is
+under half a second. What remains is the translated code's own slowdown
+(the table above: 2.3-4.1x on memory and call-heavy code).
 
 So 18 % of the boot was the OAL's whole-cache walks: `OEMCacheRangeFlush`
 now walks the cache address arrays instead (1024 stores to 0xF4000000 /

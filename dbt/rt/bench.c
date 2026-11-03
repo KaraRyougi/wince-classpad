@@ -13,10 +13,12 @@
 typedef sf_u32 (*bench_fn)(sf_u32 n, void *buf);
 extern sf_u32 bench_alu(sf_u32, void *), bench_mem(sf_u32, void *), bench_copy(sf_u32, void *),
               bench_stack(sf_u32, void *), bench_branch(sf_u32, void *), bench_jsr(sf_u32, void *),
-              bench_bsr(sf_u32, void *), bench_callframe(sf_u32, void *);
+              bench_bsr(sf_u32, void *), bench_callframe(sf_u32, void *),
+              bench_ldcsr(sf_u32, void *), bench_icmiss(sf_u32, void *), bench_devload(sf_u32, void *);
 
 static const bench_fn kernels[] = { bench_alu, bench_mem, bench_copy, bench_stack,
-                                    bench_branch, bench_jsr, bench_bsr, bench_callframe };
+                                    bench_branch, bench_jsr, bench_bsr, bench_callframe,
+                                    bench_ldcsr, bench_icmiss, bench_devload };
 static sf_u32 bench_buf[64] __attribute__((aligned(16)));
 
 void dbt_bench_timer_init(void)

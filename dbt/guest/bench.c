@@ -10,7 +10,8 @@
 
 extern unsigned bench_alu(unsigned, void *), bench_mem(unsigned, void *), bench_copy(unsigned, void *),
                 bench_stack(unsigned, void *), bench_branch(unsigned, void *), bench_jsr(unsigned, void *),
-                bench_bsr(unsigned, void *), bench_callframe(unsigned, void *);
+                bench_bsr(unsigned, void *), bench_callframe(unsigned, void *),
+                bench_ldcsr(unsigned, void *), bench_icmiss(unsigned, void *), bench_devload(unsigned, void *);
 
 static const struct { const char *name; unsigned (*fn)(unsigned, void *); } kernels[] = {
     { "alu        ", bench_alu },
@@ -21,6 +22,9 @@ static const struct { const char *name; unsigned (*fn)(unsigned, void *); } kern
     { "call jsr   ", bench_jsr },
     { "call bsr   ", bench_bsr },
     { "call frame ", bench_callframe },
+    { "ldc sr     ", bench_ldcsr },
+    { "ic miss    ", bench_icmiss },
+    { "dev load   ", bench_devload },           /* run with the device range over the guest */
 };
 
 static unsigned buf[64] __attribute__((aligned(16)));
@@ -61,6 +65,7 @@ void guest_main(void)
     for (k = 0; k < sizeof kernels / sizeof kernels[0]; k++) {
         volatile unsigned reps = 2;                       /* volatile: an unrolled loop would give each pass its own return site */
         unsigned rep;
+        if (kernels[k].fn == bench_devload) hc_devrange(GUEST_RAM_LO, GUEST_RAM_LO + 0x100000u);   /* device-aware code from the next lookup on */
         /* the first timed pass also translates the block after this call site
          * (its return address differs from any warm-up call's), so time the
          * same call site twice and keep the second */
