@@ -92,12 +92,15 @@ static sf_u32 lit_of_movl(int at)
     return lit_at(addr);
 }
 
+#define R_(n)      (1u << (n))
 #define LDS_X0(r)  op_lds_slot(r, SLOT_X0)
 #define STS_X0(r)  op_sts_slot(SLOT_X0, r)
 #define LDS_X1(r)  op_lds_slot(r, SLOT_X1)
 #define STS_X1(r)  op_sts_slot(SLOT_X1, r)
 #define LDS_Y0(r)  op_lds_slot(r, SLOT_Y0)
 #define STS_Y0(r)  op_sts_slot(SLOT_Y0, r)
+#define LDS_A0(r)  op_lds_slot(r, SLOT_A0)
+#define STS_A0(r)  op_sts_slot(SLOT_A0, r)
 
 int main(void)
 {
@@ -106,11 +109,22 @@ int main(void)
     env.rt_lookup_link = 0x8CF00000; env.rt_lookup = 0x8CF00100; env.rt_rte = 0x8CF00200; env.rt_lookup_ic = 0x8CF00600;
     env.rt_fpu = 0x8CF00300; env.rt_fallback = 0x8CF00400; env.rt_ldc_sr = 0x8CF00500;
     env.shadow_vbr_addr = 0x8CF01000; env.shadow_md_addr = 0x8CF01004;
+    env.no_borrow = 1;      /* the spill paths first; the borrowed register has its own section below */
 
     /* 1. encodings of the DSP slot transfers */
     expect("lds r1,x0", LDS_X0(1) == 0x418A);
     expect("sts x0,r1", STS_X0(1) == 0x018A);
     expect("lds r3,y0", LDS_Y0(3) == 0x43AA);
+
+    /* 1b. decoder: GPR operands of the FPU indexed forms (the helper's scratch must avoid them) */
+    { sh_insn d;
+      sh4_decode(0xF127, &d);   /* fmov.s fr2,@(r0,r1) */
+      expect("dec fmov @(r0,rn)", d.kind == K_FPU && d.touched == (R_(0) | R_(1)) && d.defs == 0);
+      sh4_decode(0xF216, &d);   /* fmov.s @(r0,r1),fr2 */
+      expect("dec fmov @(r0,rm)", d.kind == K_FPU && d.touched == (R_(0) | R_(1)));
+      sh4_decode(0xF219, &d);   /* fmov.s @r1+,fr2 */
+      expect("dec fmov @rm+", d.touched == R_(1) && d.defs == R_(1));
+    }
 
     /* 2. pass-through ALU block of 3 insns, then fall-through jump */
     { sf_u32 ops[] = { 0x3C0C /* add r0,r12 */, 0xE105 /* mov #5,r1 */, 0x2208 /* tst r0,r2 */ };
@@ -119,11 +133,11 @@ int main(void)
       expect("alu status", r == DBT_OK);
       expect_seq("alu pass", 0, exp, 3);
       expect("alu meta", blk.nmeta == 3 && blk.meta[1].host_off == 2 && blk.meta[2].guest_off == 4 && blk.meta[3].host_off == 6 && blk.meta[3].guest_off == 6);
-      /* fall-through: lds r1,x0 ; mov.l lit,r1 ; jmp @r1 ; sts x0,r1 */
-      expect("alu tail", hbuf[3] == LDS_X0(1) && (hbuf[4] & 0xFF00) == 0xD100 && hbuf[5] == OP_JMP(1) && hbuf[6] == STS_X0(1));
+      /* fall-through: nop (no borrowed register) ; lds r1,x0 ; mov.l lit,r1 ; jmp @r1 ; sts x0,r1 */
+      expect("alu tail", hbuf[3] == OP_NOP && hbuf[4] == LDS_X0(1) && (hbuf[5] & 0xFF00) == 0xD100 && hbuf[6] == OP_JMP(1) && hbuf[7] == STS_X0(1));
       expect("alu link", blk.nlinks == 1 && blk.links[0].guest_target == GBASE + 6);
       /* the link literal initially points at the exit stub, which loads the guest target */
-      { sf_u32 stub = lit_of_movl(8); int so = stub - HBASE;
+      { sf_u32 stub = lit_of_movl(10); int so = stub - HBASE;
         expect("alu stub addr", so == blk.code_len);
         expect("alu stub code", hbuf[so / 2] == LDS_Y0(1) && hbuf[so / 2 + 2] == LDS_X0(1) && hbuf[so / 2 + 4] == LDS_X1(1) && hbuf[so / 2 + 6] == OP_JMP(1) && hbuf[so / 2 + 7] == STS_Y0(1));
         expect("alu stub target", lit_of_movl(so + 2) == GBASE + 6);
@@ -192,21 +206,21 @@ int main(void)
       expect("pcrel mova", (hbuf[2] & 0xFF00) == 0xD000 && lit_of_movl(4) == ((GBASE + 8) & ~3u) + 4);
     }
 
-    /* 8. bra with a slot: bra +8 ; nop   -> nop ; direct jump to GBASE+4+8 */
+    /* 8. bra with a slot: bra +8 ; nop   -> nop ; direct jump (nop, lds r1,x0 ...) to GBASE+4+8 */
     { sf_u32 ops[] = { 0xA004, 0x0009 };
-      sf_u32 exp[] = { 0x0009, LDS_X0(1) };
+      sf_u32 exp[] = { 0x0009, OP_NOP, LDS_X0(1) };
       translate(ops, 2, 4);
-      expect_seq("bra", 0, exp, 2);
+      expect_seq("bra", 0, exp, 3);
       expect("bra link", blk.nlinks == 1 && blk.links[0].guest_target == GBASE + 12 && blk.end_reason == END_BRANCH && blk.guest_len == 4);
       expect("bra meta", blk.nmeta == 2 && blk.meta[1].kind == META_TARGET_CONST && blk.meta[1].target == GBASE + 12 && blk.meta[1].host_off == 2 && blk.meta[2].guest_off == 4);
     }
 
     /* 9. bsr: PR = GBASE+4, slot executes after PR write */
     { sf_u32 ops[] = { 0xB010, 0x6213 /* mov r1,r2 */ };
-      sf_u32 exp[] = { LDS_Y0(3), 0xD300 /* mov.l lit,r3 (disp patched) */, OP_LDS_PR(3), STS_Y0(3), 0x6213, LDS_X0(1) };
+      sf_u32 exp[] = { LDS_Y0(3), 0xD300 /* mov.l lit,r3 (disp patched) */, OP_LDS_PR(3), STS_Y0(3), 0x6213, OP_NOP, LDS_X0(1) };
       translate(ops, 2, 4);
       exp[1] = hbuf[1];   /* displacement is pool-dependent; check the literal instead */
-      expect_seq("bsr", 0, exp, 6);
+      expect_seq("bsr", 0, exp, 7);
       expect("bsr pr", lit_of_movl(2) == GBASE + 4);
     }
 
@@ -259,31 +273,31 @@ int main(void)
 
     /* 13. bt +4 (no slot): bf over the jump, block continues */
     { sf_u32 ops[] = { 0x8902, 0x7101 /* add #1,r1 */ };
-      sf_u32 exp[] = { OP_BF(3), LDS_X0(1), 0, OP_JMP(1), STS_X0(1), 0x7101 };
+      sf_u32 exp[] = { OP_BF(4), OP_NOP, LDS_X0(1), 0, OP_JMP(1), STS_X0(1), 0x7101 };
       translate(ops, 2, 2);
-      exp[2] = hbuf[2];
-      expect_seq("bt", 0, exp, 6);
+      exp[3] = hbuf[3];
+      expect_seq("bt", 0, exp, 7);
       expect("bt links", blk.nlinks == 2 && blk.links[0].guest_target == GBASE + 8 && blk.links[1].guest_target == GBASE + 4);
     }
 
     /* 14. bt/s with a T-writing slot: bt/s +6 ; cmp/eq r1,r2 */
     { sf_u32 ops[] = { 0x8D03, 0x3120 };
       sf_u32 exp[] = { LDS_Y0(3), OP_MOVT(3), 0x3120, op_lds_slot(4, SLOT_Y1), OP_MOVT(4), OP_TST_RR(3,3), OP_BF(4),
-                       OP_SHLR(4), op_sts_slot(SLOT_Y1, 4), STS_Y0(3), OP_BRA(7), OP_NOP,
-                       OP_SHLR(4), op_sts_slot(SLOT_Y1, 4), STS_Y0(3), LDS_X0(1) };
+                       OP_SHLR(4), op_sts_slot(SLOT_Y1, 4), STS_Y0(3), OP_BRA(8), OP_NOP,
+                       OP_SHLR(4), op_sts_slot(SLOT_Y1, 4), STS_Y0(3), OP_NOP, LDS_X0(1) };
       translate(ops, 2, 4);
-      expect_seq("bt/s T", 0, exp, 16);
+      expect_seq("bt/s T", 0, exp, 17);
       /* bf(4) from offset 12 lands on offset 12+4+8 = 24 = taken path */
       expect("bt/s bf target", 12 + 4 + 4 * 2 == 24 && hbuf[12] == OP_SHLR(4));
-      /* bra(7) at offset 20 lands at 20+4+14 = 38, right after the 4-word jump at 30..37 */
-      expect("bt/s bra target", 20 + 4 + 7 * 2 == 38 && blk.meta[4].host_off == 38 && blk.meta[4].kind == META_INSN
+      /* bra(8) at offset 20 lands at 20+4+16 = 40, right after the 5-word jump at 30..39 */
+      expect("bt/s bra target", 20 + 4 + 8 * 2 == 40 && blk.meta[4].host_off == 40 && blk.meta[4].kind == META_INSN
              && blk.meta[1].kind == META_COND_REG && blk.meta[1].fix_reg == 3);
     }
 
     /* 14b. bt/s +6 ; nop : slot, COND boundary, inverted conditional, jump */
     { sf_u32 ops[] = { 0x8D03, 0x0009 };
       translate(ops, 2, 4);
-      expect("bt/s cond", hbuf[0] == 0x0009 && hbuf[1] == OP_BF(3) && blk.meta[1].kind == META_COND
+      expect("bt/s cond", hbuf[0] == 0x0009 && hbuf[1] == OP_BF(4) && blk.meta[1].kind == META_COND
              && blk.meta[1].target == GBASE + 4 + 6 && blk.meta[1].fallthrough == GBASE + 4 && blk.meta[1].host_off == 2);
     }
 
@@ -294,6 +308,9 @@ int main(void)
                         && (hbuf[3] & 0xFF00) == 0xD100 && hbuf[4] == LDS_X1(1) && (hbuf[5] & 0xFF00) == 0xD100
                         && hbuf[6] == OP_JMP(1) && hbuf[7] == STS_Y0(1) && hbuf[8] == 0x0009);
       expect("fpu lits", lit_of_movl(2) == 0xF120 && lit_of_movl(6) == HBASE + 16 && lit_of_movl(10) == env.rt_fpu);
+      /* the call commits the range at the jmp's delay slot (word 7): a resume at the return
+       * address (word 8) is "committed" and goes on with the next instruction */
+      expect("fpu commit", blk.meta[0].commit_rel == 14 && blk.meta[0].fix_kind == FIX_NONE && blk.meta[1].host_off == 16);
     }
 
     /* 16. privileged: ldc r3,vbr ; stc vbr,r4 ; ldc r5,sr (ends block) */
@@ -309,7 +326,7 @@ int main(void)
     /* 17. trapa ends the block and is followed by a jump to the next pc */
     { sf_u32 ops[] = { 0xC3F1, 0x0009 };
       translate(ops, 2, 4);
-      expect("trapa", hbuf[0] == 0xC3F1 && hbuf[1] == LDS_X0(1) && blk.end_reason == END_TRAP && blk.nlinks == 1 && blk.links[0].guest_target == GBASE + 2);
+      expect("trapa", hbuf[0] == 0xC3F1 && hbuf[1] == OP_NOP && hbuf[2] == LDS_X0(1) && blk.end_reason == END_TRAP && blk.nlinks == 1 && blk.links[0].guest_target == GBASE + 2);
       expect("trapa sentinel", blk.nmeta == 1 && blk.meta[1].host_off == 2 && blk.meta[1].guest_off == 2 && dbt_block_find(&blk, 4) == 1 && dbt_block_find(&blk, 0) == 0);
     }
 
@@ -363,7 +380,19 @@ int main(void)
           if (stspr_at < 0 && (hbuf[i] & 0xF0FF) == 0x002A) stspr_at = i;      /* sts pr,rT */
       }
       expect("rts helper slot order", jmp_at >= 0 && stspr_at > jmp_at && hbuf[stspr_at + 1] == op_lds_slot(2, SLOT_Y1));
-      expect("rts helper slot no commit", blk.meta[0].commit_rel == 0xFF && blk.meta[1].kind == META_TARGET_PR);
+      /* the helper call commits the branch range at its jmp's delay slot: an interrupt in the
+       * helper's exit tail resumes at the PR range, not by running the slot again */
+      expect("rts helper slot commit", blk.meta[0].commit_rel == (jmp_at + 1) * 2 && blk.meta[1].kind == META_TARGET_PR);
+    }
+
+    /* 21b. braf r3 ; fmov.s @r4+,fr0 : helper slot, resume = r3 + PC+4 from the slot on, X0 loaded after */
+    { sf_u32 ops[] = { 0x0323, 0xF049 };
+      int i, x0_at = -1;
+      translate(ops, 2, 2);
+      for (i = blk.meta[1].host_off / 2; i < blk.code_len / 2; i++) if (hbuf[i] == LDS_X0(1)) { x0_at = i; break; }
+      /* the helper call (words 0-7), then the register range starts with the X0 capture: lds r1,y0; mov.l; add r3,r1; lds r1,x0 */
+      expect("braf helper slot", blk.meta[1].kind == META_TARGET_REG && blk.meta[1].fix_reg == 3 && blk.meta[1].target == GBASE + 4
+             && blk.meta[1].host_off == 16 && x0_at == 11 && hbuf[10] == OP_ADD_RR(3, 1) && blk.meta[0].commit_rel == 14);
     }
 
     /* 22. jsr @r1 ; fmov.s @r1+,fr0 : helper slot writing the target register is rejected */
@@ -391,23 +420,39 @@ int main(void)
       }
     }
 
-    /* 26. branch chaining: form A within bra range, out of range, form B back edge */
+    /* 26. branch chaining: form A within bra range, out of range, form B back edge.
+     * The 5-word sequence: [0] restore or nop, [1] lds r1,x0, [2] mov.l, [3] jmp, [4] sts x0,r1 */
     { sf_u16 code[8]; sf_u32 from = 0; int n;
       memset(code, 0, sizeof code);
-      code[2] = LDS_X0(1); code[3] = 0xD100; code[4] = OP_JMP(1); code[5] = STS_X0(1);
-      n = dbt_chain_direct(&code[2], HBASE + 0x104, HBASE + 0x000, 0, 0, &from);     /* d = (0 - 0x108)/2 = -132 */
-      expect("chain A", n == 4 && from == HBASE + 0x104 && code[2] == (0xA000 | ((-132) & 0xFFF)) && code[3] == 0x0009 && code[4] == OP_JMP(1));
-      code[2] = LDS_X0(1); code[3] = 0xD100;
-      n = dbt_chain_direct(&code[2], HBASE + 0x104, HBASE + 0x104 + 4 + 2 * 2048, 0, 0, &from);
-      expect("chain out of range", n == 0 && code[2] == LDS_X0(1));
-      n = dbt_chain_direct(&code[2], HBASE + 0x104, HBASE + 0x104 + 4 + 2 * 2047, 0, 0, &from);
+      code[2] = OP_NOP; code[3] = LDS_X0(1); code[4] = 0xD100; code[5] = OP_JMP(1); code[6] = STS_X0(1);
+      n = dbt_chain_direct(&code[2], HBASE + 0x104, HBASE + 0x000, 0, 0, 0, &from);  /* d = (0 - 0x108)/2 = -132 */
+      expect("chain A", n == 4 && from == HBASE + 0x104 && code[2] == (0xA000 | ((-132) & 0xFFF)) && code[3] == 0x0009 && code[4] == 0xD100);
+      code[2] = STS_A0(5); code[3] = LDS_X0(1);                                        /* a borrowed r5: its restore moves into the slot */
+      n = dbt_chain_direct(&code[2], HBASE + 0x104, HBASE + 0x000, 0, 0, 0, &from);
+      expect("chain A restore", n == 4 && code[2] == (0xA000 | ((-132) & 0xFFF)) && code[3] == STS_A0(5) && code[4] == 0xD100);
+      code[2] = STS_A0(5); code[3] = LDS_X0(1);                                        /* self loop: the restore is dropped */
+      n = dbt_chain_direct(&code[2], HBASE + 0x104, HBASE + 0x000, 0, 0, 1, &from);
+      expect("chain A self", n == 4 && code[2] == (0xA000 | ((-132) & 0xFFF)) && code[3] == 0x0009 && code[4] == 0xD100);
+      code[2] = OP_NOP; code[3] = LDS_X0(1);
+      n = dbt_chain_direct(&code[2], HBASE + 0x104, HBASE + 0x104 + 4 + 2 * 2048, 0, 0, 0, &from);
+      expect("chain out of range", n == 0 && code[2] == OP_NOP && code[3] == LDS_X0(1));
+      n = dbt_chain_direct(&code[2], HBASE + 0x104, HBASE + 0x104 + 4 + 2 * 2047, 0, 0, 0, &from);
       expect("chain A max", n == 4 && code[2] == 0xA7FF);
-      code[1] = OP_BF(3); code[2] = LDS_X0(1); code[3] = 0xD100;                      /* bt target: inverted skip is bf */
-      n = dbt_chain_direct(&code[2], HBASE + 0x104, HBASE + 0x0F0, 1, 1, &from);      /* d8 = (0xF0 - 0x106)/2 = -11 */
-      expect("chain B", n == 6 && from == HBASE + 0x102 && code[1] == (0x8900 | ((-11) & 0xFF)) && code[2] == 0xA002 && code[3] == 0x0009);
-      code[1] = OP_BT(3); code[2] = LDS_X0(1); code[3] = 0xD100;                      /* bf target, too far for disp8: form A */
-      n = dbt_chain_direct(&code[2], HBASE + 0x104, HBASE + 0x104 - 300, 1, 1, &from);
-      expect("chain B too far -> A", n == 4 && code[1] == OP_BT(3) && code[2] == (0xA000 | ((-152) & 0xFFF)));
+      code[1] = OP_BF(4); code[2] = STS_A0(5); code[3] = LDS_X0(1); code[4] = 0xD100;  /* bt target: inverted skip is bf */
+      n = dbt_chain_direct(&code[2], HBASE + 0x104, HBASE + 0x0F0, 1, 1, 0, &from);   /* d8 = (0xF0 - 0x106)/2 = -11 */
+      expect("chain B", n == 8 && from == HBASE + 0x102 && code[1] == (0x8D00 | ((-11) & 0xFF)) /* bt/s */ && code[2] == STS_A0(5)
+             && code[3] == 0xA002 && code[4] == 0x0009 && code[5] == OP_JMP(1));
+      code[1] = OP_BF(4); code[2] = OP_NOP; code[3] = LDS_X0(1); code[4] = 0xD100;     /* no restore: plain bt, bra over 4 words */
+      n = dbt_chain_direct(&code[2], HBASE + 0x104, HBASE + 0x0F0, 1, 1, 0, &from);
+      expect("chain B plain", n == 6 && from == HBASE + 0x102 && code[1] == (0x8900 | ((-11) & 0xFF)) && code[2] == 0xA003
+             && code[3] == 0x0009 && code[4] == 0xD100);
+      code[1] = OP_BT(4); code[2] = OP_NOP; code[3] = LDS_X0(1); code[4] = 0xD100;     /* bf target, too far for disp8: form A */
+      code[1] = OP_BF(4); code[2] = STS_A0(5); code[3] = LDS_X0(1); code[4] = 0xD100;  /* self loop with a restore: plain form B */
+      n = dbt_chain_direct(&code[2], HBASE + 0x104, HBASE + 0x0F0, 1, 1, 1, &from);
+      expect("chain B self", n == 6 && code[1] == (0x8900 | ((-11) & 0xFF)) && code[2] == 0xA003 && code[3] == 0x0009 && code[4] == 0xD100);
+      code[1] = OP_BT(4); code[2] = OP_NOP; code[3] = LDS_X0(1); code[4] = 0xD100;
+      n = dbt_chain_direct(&code[2], HBASE + 0x104, HBASE + 0x104 - 300, 1, 1, 0, &from);
+      expect("chain B too far -> A", n == 4 && code[1] == OP_BT(4) && code[2] == (0xA000 | ((-152) & 0xFFF)) && code[3] == OP_NOP);
     }
 
     /* 27. link records: bt +4 is conditional and forward; a back edge is backward */
@@ -424,8 +469,8 @@ int main(void)
     { sf_u32 ops[] = { 0xA000 };
       translate(ops, 1, 1);
       expect("stub_off", blk.nlinks == 1 && blk.links[0].stub_off == blk.code_len);
-      expect("link words", blk.links[0].scratch == 1 && blk.links[0].w0 == LDS_X0(1) && blk.links[0].w1 == hbuf[blk.links[0].jump_off / 2 + 1]
-             && (blk.links[0].w1 & 0xF000) == 0xD000 && blk.links[0].skip_w == 0);
+      expect("link words", blk.links[0].w0 == OP_NOP && blk.links[0].w1 == LDS_X0(1)
+             && blk.links[0].w2 == hbuf[blk.links[0].jump_off / 2 + 2] && (blk.links[0].w2 & 0xF000) == 0xD000 && blk.links[0].skip_w == 0);
     }
 
     /* device-aware blocks: a 32-bit load tests its address for P4 without
@@ -455,7 +500,127 @@ int main(void)
             expect("dev slow path calls the fallback helper", found);
         }
         env.dev_lo = env.dev_hi = 0;
-        expect("plain load again without the range", translate(ops, 1, 0) == DBT_OK && blk.code_len < 20);
+        expect("plain load again without the range", translate(ops, 1, 0) == DBT_OK && blk.code_len < 22);
+    }
+
+
+    /* ---- the borrowed register: a GPR no instruction of the block touches,
+     * parked in A0 for the whole block, the stores' swap scratch ---- */
+    env.no_borrow = 0;
+
+    /* 30. stores: mov.l r0,@r4 ; mov.l r0,@(4,r4) ; mov.w r5,@r4 -> r1 borrowed; the second store
+     * of r0 reuses the swapped value (one instruction); then the fall-through restores r1 first */
+    { sf_u32 ops[] = { 0x2402, 0x1401, 0x2451 };
+      sf_u32 exp[] = { LDS_A0(1), OP_SWAPB(0,1), OP_SWAPW(1,1), OP_SWAPB(1,1), 0x2412,
+                       0x1411,
+                       OP_SWAPB(5,1), 0x2411,
+                       STS_A0(1), LDS_X0(2), 0, OP_JMP(2), STS_X0(2) };   /* scratches avoid the borrowed r1 */
+      translate(ops, 3, 3);
+      exp[10] = hbuf[10];
+      expect("borrow stores", blk.borrow == 1);
+      expect_seq("borrow stores seq", 0, exp, 13);
+      expect("borrow record", blk.nspills == 2 && blk.spills[0].gpr == 1 && blk.spills[0].slot == SLOT_A0 && blk.spills[0].start == 0 && blk.spills[0].end == 0xFFFF);
+      expect("borrow commits", blk.meta[0].commit_rel == 8 && blk.meta[1].commit_rel == 0 && blk.meta[2].commit_rel == 2);
+      { dbt_spill sp[4];
+        expect("borrow pending", dbt_block_pending_spills(&blk, 0, 4, sp, 4) == 1 && sp[0].gpr == 1 && sp[0].slot == SLOT_A0
+               && dbt_block_pending_spills(&blk, 0, 0, sp, 4) == 0
+               && dbt_block_pending_spills(&blk, 3, 20, sp, 4) == 2);      /* after the exit restore: still listed, harmless */
+      }
+      expect("borrow link words", blk.links[0].w0 == STS_A0(1) && blk.links[0].w1 == LDS_X0(2) && (blk.links[0].w2 & 0xF000) == 0xD000);
+    }
+
+    /* 31. the cache dies with its register and at conditional branches:
+     * mov.l r0,@r4 ; add #1,r0 ; mov.l r0,@r4 ; bt +2 ; mov.l r0,@r4 */
+    { sf_u32 ops[] = { 0x2402, 0x7001, 0x2402, 0x8901, 0x2402 };
+      translate(ops, 5, 5);
+      expect("borrow cache kill def", hbuf[5] == 0x7001 && hbuf[6] == OP_SWAPB(0,1) && hbuf[9] == 0x2412);
+      /* bf +4 ; sts a0,r1 ; lds r2,x0 ; mov.l ; jmp ; sts x0,r2 ; swap.b ... */
+      expect("borrow cond exit", hbuf[10] == OP_BF(4) && hbuf[11] == STS_A0(1) && hbuf[12] == LDS_X0(2) && hbuf[14] == OP_JMP(2)
+             && hbuf[15] == STS_X0(2) && hbuf[16] == OP_SWAPB(0,1) && hbuf[19] == 0x2412);
+      expect("borrow cond link", blk.links[0].cond == 1 && blk.links[0].jump_off == 22 && blk.links[0].w0 == STS_A0(1) && blk.links[0].skip_w == OP_BF(4));
+    }
+
+    /* 32. a helper call pauses the borrow: mov.l r0,@r4 ; fadd fr1,fr2 ; mov.l r0,@r4 */
+    { sf_u32 ops[] = { 0x2402, 0xF120, 0x2402 };
+      int i, resume = -1;
+      translate(ops, 3, 3);
+      expect("borrow helper", blk.borrow == 1 && hbuf[5] == STS_A0(1) && hbuf[6] == LDS_Y0(2));
+      for (i = 7; i < blk.code_len / 2; i++) if (hbuf[i] == LDS_A0(1)) { resume = i; break; }
+      expect("borrow helper resume", resume > 0 && hbuf[resume - 1] == STS_Y0(2) && hbuf[resume + 1] == OP_SWAPB(0,1) && hbuf[resume + 4] == 0x2412);
+      expect("borrow helper records", blk.nspills == 4 && blk.spills[0].slot == SLOT_A0 && blk.spills[0].end == 10
+             && blk.spills[1].slot == SLOT_Y0 && blk.spills[2].slot == SLOT_A0 && blk.spills[2].start == resume * 2 && blk.spills[2].end == 0xFFFF);
+      { dbt_spill sp[4];
+        expect("borrow helper pending", dbt_block_pending_spills(&blk, 0, 20, sp, 4) == 1 && sp[0].slot == SLOT_Y0
+               && dbt_block_pending_spills(&blk, 0, (sf_u32)resume * 2 + 4, sp, 4) == 1 && sp[0].slot == SLOT_A0);
+      }
+      expect("borrow helper return", lit_of_movl(18) == HBASE + (sf_u32)resume * 2);
+    }
+
+    /* 33. not worth it: one store and a helper; nothing to borrow for; every register touched */
+    { sf_u32 ops[] = { 0x2402, 0xF120 };
+      translate(ops, 2, 2);
+      expect("borrow score helper", blk.borrow == -1 && hbuf[0] == LDS_X0(1));
+    }
+    { sf_u32 ops[] = { 0x7001, 0x6212 };
+      translate(ops, 2, 2);
+      expect("borrow score none", blk.borrow == -1 && hbuf[0] == 0x7001);
+    }
+    { sf_u32 ops[] = { 0x2402, 0x3C1C, 0x3D2C, 0x3E3C, 0x3F4C, 0x3B5C, 0x3A6C, 0x397C, 0x388C };   /* add pairs touching r1..r15 */
+      translate(ops, 9, 9);
+      expect("borrow all touched", blk.borrow == -1 && hbuf[0] == LDS_X0(1));
+    }
+
+    /* 34. indirect exit restores before the inline cache: mov.l r0,@r4 ; mov.l r5,@r4 ; rts ; nop */
+    { sf_u32 ops[] = { 0x2402, 0x2452, 0x000B, 0x0009 };
+      translate(ops, 4, 4);
+      expect("borrow rts", blk.borrow == 1 && hbuf[9] == 0x0009 && hbuf[10] == STS_A0(1) && hbuf[11] == LDS_Y0(2) && hbuf[12] == OP_STS_PR(2)
+             && blk.meta[3].kind == META_TARGET_PR && blk.meta[3].host_off == 20);
+    }
+
+    /* 34b. jsr @r4 ; mov.l r0,@r5 ; (next block) : the PR scratch kept across the slot is restored by the
+     * inline cache after the exit restore, so it must not be the borrowed register (r1 here) */
+    { sf_u32 ops[] = { 0x2502, 0x2502, 0x440B, 0x2502 };
+      int i, bad = 0;
+      translate(ops, 4, 4);
+      /* park; swaps; store; store (cached); lds r2,y0; mov.l; lds r2,pr; store (cached); sts a0,r1; cache... */
+      expect("borrow jsr kept scratch", blk.borrow == 1 && hbuf[5] == 0x2512 && hbuf[6] == LDS_Y0(2) && hbuf[8] == OP_LDS_PR(2)
+             && hbuf[9] == 0x2512 && hbuf[10] == STS_A0(1) && hbuf[12] == OP_CMPEQ_RR(4, 2));
+      for (i = 0; i < blk.code_len / 2; i++) if (hbuf[i] == LDS_Y0(1) || hbuf[i] == LDS_X0(1) || hbuf[i] == op_lds_slot(1, SLOT_Y1) || hbuf[i] == LDS_X1(1)) bad = 1;
+      expect("borrow never spilled elsewhere", !bad);
+    }
+
+    /* 34c. a trapa (hypercall or the guest's) keeps the borrow: the exception path restores the slots */
+    { sf_u32 ops[] = { 0x2402, 0x2452, 0xC3F3 };                   /* mov.l r0,@r4 ; mov.l r5,@r4 ; trapa #0xF3 */
+      translate(ops, 3, 3);
+      expect("borrow trapa", blk.borrow == 1 && hbuf[9] == 0xC3F3 && hbuf[10] == STS_A0(1) && blk.spills[0].end == 0xFFFF);
+    }
+
+    /* 35. control-register forms and the pre-decrement of the data register itself:
+     * sts.l pr,@-r15 ; mov.l r14,@-r15 ; mov.l r4,@-r4 */
+    { sf_u32 ops[] = { 0x4F22, 0x2FE6, 0x2446 };
+      sf_u32 exp[] = { LDS_A0(1), OP_STS_PR(1), OP_SWAPB(1,1), OP_SWAPW(1,1), OP_SWAPB(1,1), OP_MOVL_PREDEC(1,15),
+                       OP_SWAPB(14,1), OP_SWAPW(1,1), OP_SWAPB(1,1), OP_MOVL_PREDEC(1,15),
+                       OP_MOV_RR(4,1), OP_ADD_IMM(-4,1), OP_SWAPB(1,1), OP_SWAPW(1,1), OP_SWAPB(1,1), 0x2416 };
+      translate(ops, 3, 3);
+      expect_seq("borrow ctrl", 0, exp, 16);
+      expect("borrow ctrl commits", blk.meta[0].commit_rel == 10 && blk.meta[1].commit_rel == 6 && blk.meta[2].commit_rel == 10);
+    }
+
+    /* 36. device-aware access with a borrowed register: the P4 test needs no spill, a nop fills the slot */
+    { sf_u32 ops[] = { 0x5211 };                                   /* mov.l @(4,r1),r2 */
+      env.dev_lo = GBASE; env.dev_hi = GBASE + 0x1000;
+      translate(ops, 1, 0);
+      expect("borrow dev", blk.borrow == 3 && hbuf[0] == LDS_A0(3) && hbuf[1] == OP_MOV_RR(1,3) && hbuf[2] == OP_ADD_IMM(4,3)
+             && hbuf[12] == OP_BRAF(3) && hbuf[13] == OP_NOP && (hbuf[14] & 0xF000) == 0xA000 && hbuf[16] == 0x5211);
+      env.dev_lo = env.dev_hi = 0;
+    }
+
+    /* 37. the stc.l sr,@-rn slot of an indirect branch used A0 as its third slot: now Y0 */
+    { sf_u32 ops[] = { 0x422B, 0x4203 };                           /* jmp @r2 ; stc.l sr,@-r2 */
+      int i, a0 = 0;
+      translate(ops, 2, 2);
+      for (i = 0; i < blk.code_len / 2; i++) if ((hbuf[i] & 0xF0FF) == 0x407A || (hbuf[i] & 0xF0FF) == 0x007A) a0 = 1;
+      expect("slot_x0 third slot is y0", blk.borrow == -1 && !a0);
     }
 
     printf("%d checks, %d failures\n", checks, failures);

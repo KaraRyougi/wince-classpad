@@ -39,5 +39,6 @@ make -C dbt GUEST=lcd screenshot   # same, dumping the emulated LCD to dbt/build
 make -C dbt NKBIN=path/NK.bin RUN_SECS=300 run  # run a Windows CE .bin image from emulated flash for 5 minutes (docs/05)
 python3 tools/cesym.py NK.bin RELDIR 8c186010  # guest address -> module!symbol (needs the build's .map files)
 make -C dbt GUEST=nkimg nkrun      # loader self-test with a synthetic CE-format image
+make -C dbt BUILD=build-x ...      # a private build directory per run: runs (and emulators) can go in parallel
 python3 tools/nkbin.py path/to/NK.bin
 ```

@@ -24,9 +24,9 @@ Guest memory holds exactly the bytes a little-endian SH-4 would hold. Hence:
 |---|---|
 | `mov.b` any form | unchanged |
 | `mov.w @X,Rn` | load; `swap.b Rn,Rn`; `exts.w Rn,Rn` |
-| `mov.w Rm,@X` | spill rT; `swap.b Rm,rT`; store rT; restore rT |
+| `mov.w Rm,@X` | `swap.b Rm,rX`; store rX (rX = the block's borrowed register, see below; without one: spill rT, swap into rT, store, restore) |
 | `mov.l @X,Rn` | load; `swap.b`; `swap.w`; `swap.b` on Rn |
-| `mov.l Rm,@X` | spill rT; `swap.b Rm,rT`; `swap.w rT,rT`; `swap.b rT,rT`; store rT; restore rT |
+| `mov.l Rm,@X` | `swap.b Rm,rX`; `swap.w rX,rX`; `swap.b rX,rX`; store rX; a second store of the same Rm reuses rX (1 instruction) |
 | `mov.w/l @(disp,PC),Rn`, `mova` | resolved at translation time (guest literal, guest PC) |
 | `sts.l pr,@-Rn` / `lds.l @Rm+,pr`, `stc.l`/`ldc.l` | expand to register form plus the swapped 32-bit access |
 | `movca.l` | as a 32-bit store, emitted with `movca.l` |
@@ -59,6 +59,31 @@ never pass through (they are routed to the FPU emulation anyway).
 A translated guest instruction may spill at most two GPRs. The metadata for
 that instruction records (gpr, slot) pairs so the exception handler can undo
 the spill if a fault hits inside the sequence (see "Exceptions").
+
+**Borrowed register** (2026-11-03): most blocks leave several GPRs untouched,
+so the translator's pre-pass (which also decodes the block ahead and keeps
+the opcodes) picks the lowest of r1-r14 that no instruction of the block
+reads or writes and parks it in A0 for the whole block: `lds rX,A0` is the
+block's first instruction, one spill record spans the block, and every exit
+(direct jump, inline cache, `rte`) restores it first. Stores, `sts.l/stc.l`
+and `lds.l/ldc.l`, and the device-aware address test then use rX without
+a spill of their own, and the translator remembers which register's
+byte-swapped value rX holds (killed when that register is written, at
+conditional branches, and across helper calls), so repeated stores of one
+register cost a single instruction each (`ZeroPage`: four `mov.l r0,@..`
+per iteration, 24 host instructions before, 7 after). Helper calls pause the
+borrow (restore before, park again after): helpers want the exact guest
+registers, and their exception deliveries take the stub context as it is.
+A0 is therefore the borrowed register's slot alone (the third scratch of a
+`stc.l sr` in an indirect branch's slot moved to Y0), and no other sequence
+ever picks the borrowed register as a scratch: the `jsr` fast form keeps
+its PR scratch spilled across the slot and restores it in the inline
+cache's delay slot, after the exit's restore, which with rX as that scratch
+put the swap value back over the guest value (found as a Release boot that
+reached idle in a third of the time, with the registry hashing gone). The pre-pass only
+borrows when it pays: two instructions per user against the entry, two per
+helper call and one for an indirect exit. `dbt_block.borrow` names the
+register, -1 for none; `dbt_env.no_borrow` turns it off for tests.
 
 Fallback if a target lacks the DSP registers: push/pop on the guest stack
 (`mov.l rT,@-r15` / `mov.l @r15+,rT`), slower and only valid when r15 is a
@@ -166,6 +191,24 @@ interrupted.
 
 Exceptions in a block's exit stubs (the first execution of each direct
 branch) resume at the link's target, with r1 restored from Y0.
+
+A helper call commits its range at the call (the jmp's delay slot): the
+return address now carries the borrow's re-park, a word of the helper's own
+range, so without the commit an interrupt in the helper's exit tail
+(resumed at the return address) would run the helper instruction again:
+`fmov @Rm+`, `mac`, a device access. Committed, it goes on with the next
+range; the helper prologue window resumes at X1 - 2, before the commit, and
+restarts it as before. For `braf`/`bsrf` with a helper slot the range after
+the slot is `META_TARGET_REG` with the PC offset in `target` (resume =
+Rn + PC + 4), since X0 is loaded only after the slot.
+
+The borrowed register is just another spill record, open from the block's
+first instruction to its end: an exception anywhere in the block puts the
+guest value back from A0. The record is not closed at the exits' restores
+(the block goes on along the other path of a conditional exit), and an undo
+after a restore has already run is harmless since A0 keeps the value. The
+only thing that must never meet a borrow is a helper's own exception
+delivery, hence the pause around helper calls.
 
 The real `rte` in the stubs has a `nop` slot: SH-4 switches the register
 bank before the slot executes, so an `sts A0,r2` there writes the *guest's*
@@ -380,24 +423,31 @@ charges one TMU tick per four executed instructions regardless of type, so
 these are *instruction-count* ratios; the per-iteration counts below were
 read from the translated blocks and agree with the measurements.
 
-| kernel | per iteration | native ticks | baseline | + branch chaining | + inline caches | + cheaper calls | host insns / guest insns (now) |
-|---|---|---|---|---|---|---|---|
-| alu | 5 ALU + `dt` + `bf` | 15382 | 27723 (1.80x) | 15390 (**1.00x**) | 15390 | 15388 (**1.00x**) | 7 / 7 |
-| mem mixed | 4 longword, 2 word, 2 byte accesses, 2 ALU, loop | 26369 | 81308 (3.08x) | 72519 (2.75x) | 72519 | 72518 (2.75x) | 37 / 12 |
-| mem copy | 2 post-increment loads, 2 stores, pointer wrap, loop | 29391 | 81033 (2.76x) | 68400 (2.33x) | 68399 | 68398 (2.33x) | |
-| stack | push r1, r2, PR; pop them; loop | 19777 | 90096 (4.56x) | 81309 (4.11x) | 81307 | 81307 (4.11x) | 37 / 9 |
-| branch | 3 data-dependent `bt`/`bf` (half taken), loop | 25270 | 47249 (1.87x) | 31869 (1.26x) | 33516 | 33515 (1.33x) | |
-| call jsr | `jsr @r6; nop` to a 3-instruction leaf | 17580 | 156016 (8.87x) | 156017 (8.87x) | 76914 (4.38x) | 54941 (**3.13x**) | 25 / 8 |
-| call bsr | `bsr leaf; nop` | 17580 | 105479 (6.00x) | 96690 (5.50x) | 57139 (3.25x) | 48349 (**2.75x**) | |
-| call frame | `jsr` to a function that pushes/pops r8, r9, PR | 35159 | 235117 (6.69x) | 235119 (6.69x) | 156016 (4.44x) | 134042 (**3.81x**) | |
+| kernel | per iteration | native ticks | baseline | + branch chaining | + inline caches | + cheaper calls | + borrowed register (2026-11-03) | host insns / guest insns (now) |
+|---|---|---|---|---|---|---|---|---|
+| alu | 5 ALU + `dt` + `bf` | 15382 | 27723 (1.80x) | 15390 (**1.00x**) | 15390 | 15388 (**1.00x**) | 15388 (**1.00x**) | 7 / 7 |
+| mem mixed | 4 longword, 2 word, 2 byte accesses, 2 ALU, loop | 26369 | 81308 (3.08x) | 72519 (2.75x) | 72519 | 72518 (2.75x) | 63729 (**2.42x**) | 29 / 12 |
+| mem copy | 2 post-increment loads, 2 stores, pointer wrap, loop | 29391 | 81033 (2.76x) | 68400 (2.33x) | 68399 | 68398 (2.33x) | 61532 (**2.09x**) | |
+| stack | push r1, r2, PR; pop them; loop | 19777 | 90096 (4.56x) | 81309 (4.11x) | 81307 | 81307 (4.11x) | 63729 (**3.22x**) | 29 / 9 |
+| branch | 3 data-dependent `bt`/`bf` (half taken), loop | 25270 | 47249 (1.87x) | 31869 (1.26x) | 33516 | 33515 (1.33x) | 33515 (1.33x) | |
+| call jsr | `jsr @r6; nop` to a 3-instruction leaf | 17580 | 156016 (8.87x) | 156017 (8.87x) | 76914 (4.38x) | 54941 (**3.13x**) | 54941 (3.13x) | 25 / 8 |
+| call bsr | `bsr leaf; nop` | 17580 | 105479 (6.00x) | 96690 (5.50x) | 57139 (3.25x) | 48349 (**2.75x**) | 48349 (2.75x) | |
+| call frame | `jsr` to a function that pushes/pops r8, r9, PR | 35159 | 235117 (6.69x) | 235119 (6.69x) | 156016 (4.44x) | 134042 (**3.81x**) | 120858 (**3.44x**) | |
 
 **Branch chaining** (done 2026-10-22, `dbt_chain_direct`): when the runtime
 links a direct jump and the target is within the 12-bit `bra` range, the
-first word of the 4-word jump sequence becomes `bra target` and the second
-a `nop` (form A: a taken branch costs 3 instead of 5). For a conditional
+first word of the jump sequence becomes `bra target` and the second its
+delay slot (form A: a taken branch costs 3 instead of 5). For a conditional
 *back edge* within the 8-bit range the inverted skip word itself becomes the
 real `bt/bf target` and the jump's first word a `bra` over the rest (form B:
-loop branches cost 1, like native). Blocks are allocated in translation
+loop branches cost 1, like native). Since the borrowed register (2026-11-03)
+the sequence is 5 words with the register's restore (or a nop) first: form A
+moves that word into the `bra`'s delay slot, and form B, when there is a
+restore, makes the skip a `bt/s | bf/s target` whose slot it is (a block
+without a borrow keeps the plain `bt/bf`: casio-emu charges the slot as an
+instruction, hardware would hide it in the branch bubble), so a chained exit
+costs no extra instruction; the restore then also runs on the not-taken
+path, which is why the swap cache dies at every conditional branch. Blocks are allocated in translation
 order, so loop targets are almost always in range (`chained` in the stats
 counts rewrites). Pure ALU loops now run at native speed; what remains is
 memory-op expansion and the indirect-branch path. Two things had to change
@@ -451,10 +501,11 @@ Where the cycles go:
 - **Indirect branches** (`jsr`, `rts`, `jmp`): about 10 instructions in the
   block (PR literal with spill/restore, target to X0, lookup jump) plus 19
   in the lookup stub's hash-hit path, twice per call/return pair.
-- **Stores**: spill + 3 swaps + store + restore = 6 (byte stores 1); loads:
-  4 (word loads 3). `sts.l pr,@-r15` is 7. SH-4 has no byte-swap
-  instruction, so 3 swaps per longword is the floor; the spill/restore pair
-  costs the other 2.
+- **Stores**: 3 swaps + store = 4 with the borrowed register (6 with a
+  spill/restore pair when the block has no free register; byte stores 1),
+  and 1 for a repeated store of the same register; loads: 4 (word loads 3).
+  `sts.l pr,@-r15` is 5. SH-4 has no byte-swap instruction, so 3 swaps per
+  longword is the floor for a value stored once.
 - FPU and `mac` go through C helpers (not measured here; hundreds of
   instructions each, as planned).
 
@@ -471,13 +522,31 @@ native = the same loop run big-endian by the translator image):
 | inline-cache miss (indirect call alternating two targets) | 123050 | 19778 | 6.2x | ~56 |
 | device load in device-aware code (fallback helper) | 1773203 | 8791 | 202x | ~800 |
 
+**Borrowed register** (done 2026-11-03, "Scratch registers" above): stores
+and `sts.l/lds.l` lose their spill/restore pair, repeated stores of one
+register their swaps too, and a block's back edge to itself is chained past
+the park (`link_direct`), so a loop keeps the register borrowed. The
+translator's pre-pass that picks the register decodes every instruction
+once and keeps the decoding for the main loop: decoding twice cost a tenth
+of a CE boot (first measured with the double decode, the Release boot was
+13% slower in spite of the cheaper stores). Costs on the way: a helper call
+now commits its range at the call (the re-park word at the return address
+would otherwise restart the helper on an interrupt in its exit tail), and
+no scratch is ever the borrowed register. Release boot to first idle:
+16231 -> 15973 ticks; the `flush` guest (6000 translations of 2-3
+instruction blocks per pass) is 5% slower per pass, the pre-pass' fixed
+cost per block. Most of a CE boot's block time is in loops without stores
+(the OAL's line-by-line cache walk, 30% of the samples), where nothing
+changes.
+
 Optimizations, in order of payoff per effort:
 
 1. ~~**Branch chaining**~~ done (above).
 2. ~~**Inline caches for indirect branches**~~ done (above).
 3. ~~**Cheaper PR writes**~~ done (above); `bsr` still pays 4 + the direct jump.
-4. **Spill avoidance for stores** when a dead register is provably available
-   (needs liveness across blocks; only after the above).
+4. ~~**Spill avoidance for stores**~~ done (2026-11-03) as the borrowed
+   register ("Scratch registers" above): no liveness needed, a register the
+   block never touches is free for the whole block.
 
 ### Profiling a CE boot (2026-11-03)
 

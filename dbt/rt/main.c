@@ -88,7 +88,10 @@ void dbt_main(void)
     cfg.cache_base = CACHE_BASE; cfg.cache_size = CACHE_SIZE;
     cfg.guest_ram_lo = GUEST_LOAD; cfg.guest_ram_hi = GUEST_RAM_HI;
     cfg.dev_lo = info.kernel_lo; cfg.dev_hi = info.kernel_hi;      /* kernel.dll reaches the CCN registers directly */
-    cfg.rom_lo = info.physfirst & 0x1FFFFFFFu; cfg.rom_hi = info.physlast & 0x1FFFFFFFu;   /* XIP code in it never changes */
+    cfg.rom_lo = info.physfirst & 0x1FFFFFFFu; cfg.rom_hi = info.physlast & 0x1FFFFFFFu;
+#ifdef DBT_NO_ROMKEEP
+    cfg.rom_lo = cfg.rom_hi = 0;         /* experiments: whole-cache flushes drop the ROM blocks too */
+#endif   /* XIP code in it never changes */
     dbt_rt_init(&cfg);
     dbt_shadow_vbr = 0;
     dbt_shadow_md = SR_MD;

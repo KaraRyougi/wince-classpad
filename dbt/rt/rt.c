@@ -194,10 +194,10 @@ static void reset_ic(dbt_block *o)
 static void unchain(dbt_block *o, int k)
 {
     sf_u16 *w = (sf_u16 *)(o->host_base + (sf_u32)o->links[k].jump_off);
-    w[0] = o->links[k].w0; w[1] = o->links[k].w1;
+    w[0] = o->links[k].w0; w[1] = o->links[k].w1; w[2] = o->links[k].w2;
     if (o->links[k].cond) w[-1] = o->links[k].skip_w;
     *(volatile sf_u32 *)(o->host_base + (sf_u32)o->links[k].lit_off) = o->host_base + (sf_u32)o->links[k].stub_off;
-    dbt_sync_code(o->host_base + (sf_u32)o->links[k].jump_off - 2, 8);
+    dbt_sync_code(o->host_base + (sf_u32)o->links[k].jump_off - 2, 10);
     dbt_stat.unchained++;
 }
 
@@ -428,6 +428,9 @@ void dbt_rt_init(const dbt_rt_config *cfg)
     g_env.shadow_vbr_addr = (sf_u32)&dbt_shadow_vbr;
     g_env.shadow_md_addr = (sf_u32)&dbt_shadow_md;
     g_env.max_insns = DBT_MAX_INSNS;
+#ifdef DBT_NO_BORROW
+    g_env.no_borrow = 1;                 /* experiments: translate without the borrowed register */
+#endif
     g_env.dev_lo = cfg->dev_lo; g_env.dev_hi = cfg->dev_hi;
 #ifdef DBT_TRACE_EXEC
     g_env.exec_ctl = (sf_u32)&g_exec_ctl; g_env.exec_ring = (sf_u32)g_exec_ring;   /* after the memset above */
@@ -554,7 +557,12 @@ static void link_direct(sf_u32 link_lit, sf_u32 host)
     for (k = 0; k < b->nlinks; k++) {
         if (b->host_base + (sf_u32)b->links[k].lit_off == link_lit) {
             sf_u32 jaddr = b->host_base + (sf_u32)b->links[k].jump_off, from;
-            int n = dbt_chain_direct((sf_u16 *)jaddr, jaddr, host, b->links[k].cond, b->links[k].backward, &from);
+            /* a block's back edge to itself enters past the borrowed
+             * register's park (its first word) and skips the restore: the
+             * register stays borrowed across iterations. Not under the
+             * execution trace, whose prologue comes first. */
+            int self = b->borrow >= 0 && host == b->host_base && !g_env.exec_ring;
+            int n = dbt_chain_direct((sf_u16 *)jaddr, jaddr, self ? host + 2 : host, b->links[k].cond, b->links[k].backward, self, &from);
             if (n) { dbt_sync_code(from, (sf_u32)n); dbt_stat.chained++; }
 #ifdef DBT_TRACE_LINK
             dbt_puts("[dbt] link blk="); dbt_puthex(b->guest_pc); dbt_puts(" jump="); dbt_puthex(jaddr);
@@ -761,7 +769,7 @@ static sf_u32 meta_start_pc(const dbt_block *b, int idx, const dbt_gctx *ctx)
     case META_INSN:         return b->guest_pc + m->guest_off;
     case META_TARGET_CONST: return m->target;
     case META_TARGET_X0:    return ctx->slots[SLOT_X0];
-    case META_TARGET_REG:   return ctx->r[m->fix_reg];         /* register not written in the range, never spilled */
+    case META_TARGET_REG:   return ctx->r[m->fix_reg] + m->target;   /* register not written in the range, never spilled; + PC offset for braf/bsrf */
     case META_TARGET_PR:    return ctx->pr;
     case META_COND:         return (ctx->ssr & 1) ? m->target : m->fallthrough;
     case META_COND_REG:     return (ctx->r[m->fix_reg] & 1) ? m->target : m->fallthrough;   /* before the undo */

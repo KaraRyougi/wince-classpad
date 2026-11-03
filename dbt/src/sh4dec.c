@@ -50,7 +50,8 @@ void sh4_decode(sf_u32 op, sh_insn *d)
         case 0x4: d->touched |= R(m); if ((op & 0xF) == 0x6 || (op & 0xF) == 0x2) d->defs |= R(m); break;
         case 0xF:
             switch (op & 0xF) {
-            case 0x6: case 0x7: d->touched |= R(0); /* fallthrough */
+            case 0x6: d->touched |= R(0) | R(m); break;                   /* fmov @(r0,rm),frn */
+            case 0x7: d->touched |= R(0) | R(n); break;                   /* fmov frm,@(r0,rn) */
             case 0x8: case 0x9: d->touched |= R(m); if ((op & 0xF) == 0x9) d->defs |= R(m); break;
             case 0xA: case 0xB: d->touched |= R(n); if ((op & 0xF) == 0xB) d->defs |= R(n); break;
             case 0x4: case 0x5: d->writes_t = 1; break;

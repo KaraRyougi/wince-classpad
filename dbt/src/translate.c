@@ -22,13 +22,27 @@ typedef struct {
     int err;
     sf_u32 fault;
     int    slot_x0;          /* translating the delay slot of a branch whose target sits in X0 */
+    /* Borrowed register (dbt_block.borrow): bx = -1 or a GPR no instruction
+     * of the block touches, parked in A0 for the whole block. Stores swap
+     * into it without a spill, and cache_reg/cache_size record that it
+     * holds swapN(cache_size, r[cache_reg]) (cache_reg -1: nothing), so a
+     * store of the same register again costs one instruction. */
+    int    bx;
+    int    cache_reg, cache_size;
+    /* instructions the pre-pass decoded, from the block's guest pc on
+     * (g_pre: one translation at a time; an abandoned one never resumes) */
+    int    pre_n;
 } tctx;
 
+static sh_insn g_pre[DBT_MAX_INSNS * 2 + 2];
+
 /* DSP slots for scratch spills. Inside the delay slot of an indirect branch
- * X0 holds the target, so the slots shift: X0->X1, X1->Y1, Y1->A0. */
+ * X0 holds the target, so the slots shift: X0->X1, X1->Y1, Y1->Y0 (Y0 is
+ * free during such a slot: target_to_x0 and set_pr are done with it). A0
+ * belongs to the borrowed register alone. */
 static int SA(const tctx *t) { return t->slot_x0 ? SLOT_X1 : SLOT_X0; }
 static int SB(const tctx *t) { return t->slot_x0 ? SLOT_Y1 : SLOT_X1; }
-static int SC(const tctx *t) { return t->slot_x0 ? SLOT_A0 : SLOT_Y1; }
+static int SC(const tctx *t) { return t->slot_x0 ? SLOT_Y0 : SLOT_Y1; }
 
 /* Mark the memory operation about to be emitted as the range's commit point. */
 static void commit(tctx *t, int fix_kind, int fix_reg)
@@ -41,9 +55,14 @@ static void commit(tctx *t, int fix_kind, int fix_reg)
 
 /* ------------------------------------------------------------ helpers */
 
-static int pick_scratch(sf_u32 avoid)
+/* A scratch to spill: never the borrowed register, whose spill records
+ * would then interleave with the borrow's (a scratch spilled while it held
+ * the swap value and restored after an exit's restore would overwrite the
+ * guest value just put back). */
+static int pick_scratch(const tctx *t, sf_u32 avoid)
 {
     int r;
+    if (t->bx >= 0) avoid |= R(t->bx);
     for (r = 1; r <= 14; r++) if (!(avoid & R(r))) return r;
     return -1;
 }
@@ -86,6 +105,39 @@ static void swapN(tctx *t, int size, int src, int dst)
 {
     if (size == 4) swap32(t, src, dst);
     else emit16(&t->em, OP_SWAPB(src, dst));
+}
+
+/* --- the borrowed register --- */
+
+static void cache_kill(tctx *t) { t->cache_reg = -1; }
+
+/* bx = swapN(size, r[src]), unless it holds that already */
+static void bx_swap(tctx *t, int size, int src)
+{
+    if (t->cache_reg == src && t->cache_size == size) return;
+    swapN(t, size, src, t->bx);
+    t->cache_reg = src; t->cache_size = size;
+}
+
+/* Restore the borrowed register before control leaves the block. The spill
+ * record stays open: on a conditional exit the block goes on along the other
+ * path, and an undo after the restore is harmless (A0 keeps the value). */
+static void exit_restore(tctx *t)
+{
+    if (t->bx >= 0) emit16(&t->em, op_sts_slot(SLOT_A0, t->bx));
+    cache_kill(t);
+}
+
+/* Around a helper call: helpers want the exact guest registers (their
+ * exception deliveries take the stub context as it is) and own all slots. */
+static void borrow_pause(tctx *t)
+{
+    if (t->bx >= 0) restore(t, t->bx, SLOT_A0);
+    cache_kill(t);
+}
+static void borrow_resume(tctx *t)
+{
+    if (t->bx >= 0) spill(t, t->bx, SLOT_A0);
 }
 
 /* control register <-> GPR (non-privileged ones) */
@@ -169,11 +221,12 @@ static void begin_meta_kind(tctx *t, int kind, sf_u32 guest_off, sf_u32 target, 
 static void tr_mem_dev(tctx *t, const sh_insn *d)
 {
     emitter *e = &t->em;
-    int rT = pick_scratch(d->touched);
+    int own = t->bx < 0;                  /* no borrowed register: spill one */
+    int rT = own ? pick_scratch(t, d->touched) : t->bx;
     int bra_slow, bra_done, slow, done;
     sf_u32 goff = t->gpc - t->blk->guest_pc;
     dbt_imeta parent = *t->cur;           /* a branch range when this is a delay slot */
-    spill(t, rT, SA(t));
+    if (own) spill(t, rT, SA(t)); else cache_kill(t);
     emit16(e, OP_MOV_RR(d->base, rT));
     if (d->am == AM_PREDEC) emit16(e, OP_ADD_IMM(-4, rT));
     else if (d->am == AM_DISP && d->disp) emit16(e, OP_ADD_IMM(d->disp, rT));
@@ -188,7 +241,7 @@ static void tr_mem_dev(tctx *t, const sh_insn *d)
     emit16(e, OP_SHLR8(rT));              /* 0 or 1 */
     emit16(e, OP_SHLL2(rT));              /* 0 (P4: fall into bra slow) or 4 (skip it) */
     emit16(e, OP_BRAF(rT));
-    restore(t, rT, SA(t));                /* delay slot */
+    if (own) restore(t, rT, SA(t)); else emit16(e, OP_NOP);   /* delay slot */
     bra_slow = emit_pos(e); emit16(e, OP_BRA(0)); emit16(e, OP_NOP);
     tr_mem_plain(t, d);
     bra_done = emit_pos(e); emit16(e, OP_BRA(0)); emit16(e, OP_NOP);
@@ -198,6 +251,7 @@ static void tr_mem_dev(tctx *t, const sh_insn *d)
     call_helper(t, t->env->rt_fallback, 0, 2, d->op, d->touched);
     done = emit_pos(e);
     emit_patch16(e, bra_done, OP_BRA((done - (bra_done + 4)) / 2));
+    cache_kill(t);                        /* the two paths join */
     if (parent.kind != META_INSN) {
         /* inside a branch: what follows (target capture, the jump) must keep
          * the branch range's resume rule, not restart the branch */
@@ -216,8 +270,9 @@ static void tr_mem_plain(tctx *t, const sh_insn *d)
     emitter *e = &t->em;
     if (d->ctrl != CR_NONE) {
         /* sts.l/stc.l CR,@-Rn  or  lds.l/ldc.l @Rm+,CR */
-        int rT = pick_scratch(R(d->base));
-        spill(t, rT, SA(t));
+        int own = t->bx < 0;
+        int rT = own ? pick_scratch(t, R(d->base)) : t->bx;
+        if (own) spill(t, rT, SA(t)); else cache_kill(t);
         if (d->is_store) {
             emit16(e, op_read_cr(d->ctrl, d->ctrl_bank, rT));
             swap32(t, rT, rT);
@@ -229,7 +284,7 @@ static void tr_mem_plain(tctx *t, const sh_insn *d)
             swap32(t, rT, rT);
             emit16(e, op_write_cr(d->ctrl, d->ctrl_bank, rT));
         }
-        restore(t, rT, SA(t));
+        if (own) restore(t, rT, SA(t));
         return;
     }
     if (d->size == 1) { emit16(e, d->op); return; }
@@ -242,8 +297,23 @@ static void tr_mem_plain(tctx *t, const sh_insn *d)
     }
     /* stores: everything before the store itself is undone by the spill
      * records, so an exception before the commit point restarts cleanly */
+    if (!store_data_is_fixed_r0(d) && t->bx >= 0) {
+        /* borrowed register: no spill; the swapped value stays cached */
+        int rT = t->bx;
+        if (d->am == AM_PREDEC && d->data == d->base) {
+            cache_kill(t);
+            emit16(e, OP_MOV_RR(d->data, rT));
+            emit16(e, OP_ADD_IMM(-d->size, rT));
+            swapN(t, d->size, rT, rT);
+        } else {
+            bx_swap(t, d->size, d->data);
+        }
+        commit(t, FIX_NONE, 0);
+        emit16(e, store_with_data(d, rT));
+        return;
+    }
     if (!store_data_is_fixed_r0(d)) {
-        int rT = pick_scratch(d->touched);
+        int rT = pick_scratch(t, d->touched);
         spill(t, rT, SA(t));
         if (d->am == AM_PREDEC && d->data == d->base) {
             /* SH stores the decremented register value */
@@ -269,7 +339,7 @@ static void tr_mem_plain(tctx *t, const sh_insn *d)
     }
     /* base is r0 too: materialize the address in a scratch */
     if (d->movca) {
-        int rA = pick_scratch(R(0));
+        int rA = pick_scratch(t, R(0));
         spill(t, rA, SA(t));
         emit16(e, OP_MOV_RR(0, rA));
         spill(t, 0, SB(t));                 /* r0 is swapped in place: keep it restorable */
@@ -281,8 +351,8 @@ static void tr_mem_plain(tctx *t, const sh_insn *d)
         return;
     }
     {
-        int rA = pick_scratch(R(0));
-        int rV = pick_scratch(R(0) | R(rA));
+        int rA = pick_scratch(t, R(0));
+        int rV = pick_scratch(t, R(0) | R(rA));
         sh_insn s2;
         spill(t, rA, SA(t));
         emit16(e, OP_MOV_RR(0, rA));
@@ -328,8 +398,9 @@ static void tr_pcrel(tctx *t, const sh_insn *d)
 static void call_helper(tctx *t, sf_u32 helper, sf_u32 arg_reg, int arg_mode, sf_u32 arg_imm, sf_u32 avoid)
 {
     emitter *e = &t->em;
-    int rT = pick_scratch(avoid);
+    int rT = pick_scratch(t, avoid);
     int ret_lit;
+    borrow_pause(t);
     if (arg_mode == 1) emit16(e, op_lds_slot((int)arg_reg, SLOT_X0));
     spill(t, rT, SLOT_Y0);
     if (arg_mode == 2) { emit_mov_imm(e, rT, arg_imm); emit16(e, op_lds_slot(rT, SLOT_X0)); }
@@ -337,28 +408,39 @@ static void call_helper(tctx *t, sf_u32 helper, sf_u32 arg_reg, int arg_mode, sf
     emit16(e, op_lds_slot(rT, SLOT_X1));
     emit_mov_lit(e, rT, helper, TAG_NONE);
     emit16(e, OP_JMP(rT));
+    /* The call is the range's commit point (at its delay slot): an exception
+     * resuming at the return address, where the guest instruction is
+     * complete (an interrupt in the helper's exit tail), goes on with the
+     * next range instead of running the helper again, while the helper
+     * prologue window, which resumes at X1 - 2, still restarts it. Needed
+     * since the borrow's re-park below put a word of this range at the
+     * return address. ldc.l @rm+,sr has committed at its load already. */
+    if (t->cur->commit_rel == 0xFF) commit(t, FIX_NONE, 0);
     restore(t, rT, SLOT_Y0);
     if (ret_lit >= 0) e->lits[ret_lit].value = t->blk->host_base + (sf_u32)emit_pos(e);
+    borrow_resume(t);
 }
 
 /* ------------------------------------------------------------- branches */
 
-/* Jump to a guest target known at translation time, through a link literal. */
+/* Jump to a guest target known at translation time, through a link literal:
+ * the 5-word sequence of dbt_chain_direct, the borrowed register's restore
+ * (or a nop) first. */
 /* cond: the word just emitted is the inverted bt/bf skip over this jump */
 static void jump_direct(tctx *t, sf_u32 guest_target, sf_u32 avoid, int cond)
 {
     emitter *e = &t->em;
     dbt_block *b = t->blk;
-    int rT = pick_scratch(avoid);
+    int rT = pick_scratch(t, avoid);
     int k = b->nlinks;
     if (k >= DBT_MAX_LINKS) { t->err = DBT_ERR_OVERFLOW; return; }
     b->links[k].guest_target = guest_target;
     b->links[k].lit_off = 0xFFFF;
     b->links[k].jump_off = (sf_u16)emit_pos(e);
-    b->links[k].scratch = (sf_u8)rT;
     b->links[k].cond = (sf_u8)cond;
     b->links[k].backward = (sf_u8)(guest_target <= t->gpc);
     b->nlinks++;
+    if (t->bx >= 0) exit_restore(t); else { emit16(e, OP_NOP); cache_kill(t); }
     spill(t, rT, SLOT_X0);
     emit_mov_lit(e, rT, 0, TAG_LINK(k));                     /* host target; initially the exit stub */
     emit16(e, OP_JMP(rT));
@@ -385,7 +467,7 @@ static void ic_miss_tail(tctx *t, int rT)
 static void jump_indirect_ic_reg(tctx *t, int reg, int rT_kept)
 {
     emitter *e = &t->em;
-    int rT = rT_kept >= 0 ? rT_kept : pick_scratch(R(reg));
+    int rT = rT_kept >= 0 ? rT_kept : pick_scratch(t, R(reg));
     if (rT_kept < 0) spill(t, rT, SLOT_Y0);
     emit_mov_lit(e, rT, 1, TAG_IC_G);
     emit16(e, OP_CMPEQ_RR(reg, rT));
@@ -402,7 +484,7 @@ static void jump_indirect_ic_reg(tctx *t, int reg, int rT_kept)
 static void jump_indirect_ic_pr(tctx *t)
 {
     emitter *e = &t->em;
-    int rT = pick_scratch(0), rU = pick_scratch(R(rT));
+    int rT = pick_scratch(t, 0), rU = pick_scratch(t, R(rT));
     spill(t, rT, SLOT_Y0);
     emit16(e, OP_STS_PR(rT));
     spill(t, rU, SLOT_Y1);
@@ -430,7 +512,7 @@ static void jump_indirect_ic_pr(tctx *t)
 static void jump_indirect_ic(tctx *t)
 {
     emitter *e = &t->em;
-    int rT = pick_scratch(0), rU = pick_scratch(R(rT));
+    int rT = pick_scratch(t, 0), rU = pick_scratch(t, R(rT));
     spill(t, rT, SLOT_Y0);                               /* w0 */
     emit16(e, op_sts_slot(SLOT_X0, rT));                 /* w1 rT = guest target */
     spill(t, rU, SLOT_Y1);                               /* w2 */
@@ -456,7 +538,7 @@ static void target_to_x0(tctx *t, int reg, int from_pr, sf_u32 add_const, sf_u32
     emitter *e = &t->em;
     if (!from_pr && add_const == 0) { emit16(e, op_lds_slot(reg, SLOT_X0)); return; }
     {
-        int rT = pick_scratch(avoid);
+        int rT = pick_scratch(t, avoid);
         spill(t, rT, SLOT_Y0);
         if (from_pr) emit16(e, OP_STS_PR(rT));
         else { emit_mov_imm(e, rT, add_const); emit16(e, OP_ADD_RR(reg, rT)); }
@@ -470,7 +552,7 @@ static void target_to_x0(tctx *t, int reg, int from_pr, sf_u32 add_const, sf_u32
 static int set_pr(tctx *t, sf_u32 value, sf_u32 avoid, int keep)
 {
     emitter *e = &t->em;
-    int rT = pick_scratch(avoid);
+    int rT = pick_scratch(t, avoid);
     spill(t, rT, SLOT_Y0);
     emit_mov_imm(e, rT, value);
     emit16(e, OP_LDS_PR(rT));
@@ -537,8 +619,22 @@ static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
     case BR_BRAF:
     case BR_BSRF:
         if (d->br == BR_BSRF) set_pr(t, next, avoid | R(d->br_reg), 0);
-        indirect_slot(t, slot, d->br_reg, 0, next, avoid | R(d->br_reg), R(d->br_reg));
-        begin_meta_kind(t, META_TARGET_X0, goff, 0, 0);
+        if (is_helper(t, slot)) {
+            /* a helper slot owns every DSP slot, so the target reaches X0
+             * only after it; from the slot on the resume rule is the
+             * register itself plus PC+4 (it is not written by the slot),
+             * valid before X0 is loaded (an interrupt in the helper's exit
+             * tail resumes at the committed call's next range) */
+            if (slot->defs & R(d->br_reg)) { t->err = DBT_ERR_UNSUPPORTED; return; }
+            tr_insn(t, slot, 1);
+            begin_meta_kind(t, META_TARGET_REG, goff, next, 0);
+            t->cur->fix_reg = (sf_u8)d->br_reg;
+            target_to_x0(t, d->br_reg, 0, next, avoid | R(d->br_reg));
+        } else {
+            indirect_slot(t, slot, d->br_reg, 0, next, avoid | R(d->br_reg), R(d->br_reg));
+            begin_meta_kind(t, META_TARGET_X0, goff, 0, 0);
+        }
+        exit_restore(t);
         jump_indirect_ic(t);
         return;
     case BR_JMP:
@@ -548,6 +644,7 @@ static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
             if (d->br == BR_JSR) set_pr(t, next, avoid | R(d->br_reg), 0);
             indirect_slot(t, slot, d->br_reg, 0, 0, 0, R(d->br_reg));
             begin_meta_kind(t, META_TARGET_X0, goff, 0, 0);
+            exit_restore(t);
             jump_indirect_ic(t);
         } else {
             /* fast form: the inline cache compares the register itself. The
@@ -558,6 +655,7 @@ static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
             if (slot) tr_insn(t, slot, 1);
             begin_meta_kind(t, META_TARGET_REG, goff, 0, 0);
             t->cur->fix_reg = (sf_u8)d->br_reg;
+            exit_restore(t);
             jump_indirect_ic_reg(t, d->br_reg, rT);
         }
         return;
@@ -565,10 +663,12 @@ static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
         if (slot_writes_pr(slot)) {
             indirect_slot(t, slot, -1, 1, 0, avoid, 0);
             begin_meta_kind(t, META_TARGET_X0, goff, 0, 0);
+            exit_restore(t);
             jump_indirect_ic(t);
         } else {
             if (slot) tr_insn(t, slot, 1);
             begin_meta_kind(t, META_TARGET_PR, goff, 0, 0);
+            exit_restore(t);
             jump_indirect_ic_pr(t);
         }
         return;
@@ -576,7 +676,8 @@ static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
         int rT;
         if (slot) tr_insn(t, slot, 1);
         begin_meta_kind(t, META_RTE, goff, 0, 0);
-        rT = pick_scratch(0);
+        exit_restore(t);
+        rT = pick_scratch(t, 0);
         spill(t, rT, SLOT_Y0);
         emit_mov_lit(e, rT, t->env->rt_rte, TAG_NONE);
         emit16(e, OP_JMP(rT));
@@ -585,8 +686,8 @@ static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
     }
     case BR_BT:
     case BR_BF:
-        /* inverted conditional over the 4-instruction direct jump */
-        emit16(e, d->br == BR_BT ? OP_BF(3) : OP_BT(3));
+        /* inverted conditional over the 5-word direct jump */
+        emit16(e, d->br == BR_BT ? OP_BF(4) : OP_BT(4));
         jump_direct(t, target, 0, 1);
         return;
     case BR_BTS:
@@ -598,15 +699,15 @@ static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
             if (!slot || !slot->writes_t) {
                 if (slot) tr_insn(t, slot, 1);
                 begin_meta_kind(t, META_COND, goff, pc_t1, pc_t0);
-                emit16(e, d->br == BR_BTS ? OP_BF(3) : OP_BT(3));
+                emit16(e, d->br == BR_BTS ? OP_BF(4) : OP_BT(4));
                 jump_direct(t, target, 0, 1);
                 return;
             } else {
                 /* slot writes T: branch on the old T (kept in rA), leave the
                  * slot's T visible. Each path after the split has its own
                  * resume range since rA is restored inside it. */
-                int rA = pick_scratch(avoid);
-                int rB = pick_scratch(avoid | R(rA));
+                int rA = pick_scratch(t, avoid);
+                int rB = pick_scratch(t, avoid | R(rA));
                 spill(t, rA, SLOT_Y0);
                 emit16(e, OP_MOVT(rA));
                 tr_insn(t, slot, 1);
@@ -621,7 +722,7 @@ static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
                 emit16(e, OP_SHLR(rB));                  /* T = slot's T */
                 emit16(e, op_sts_slot(SLOT_Y1, rB));
                 emit16(e, op_sts_slot(SLOT_Y0, rA));
-                emit16(e, OP_BRA(7));                    /* over: shlr, 2 restores, 4-word jump */
+                emit16(e, OP_BRA(8));                    /* over: shlr, 2 restores, 5-word jump */
                 emit16(e, OP_NOP);
                 /* taken */
                 begin_meta_kind(t, META_TARGET_CONST, goff, target, 0);
@@ -642,7 +743,7 @@ static void tr_priv(tctx *t, const sh_insn *d)
     emitter *e = &t->em;
     if (d->ctrl == CR_VBR) {
         if (d->priv_mem) {
-            int rT = pick_scratch(R(d->base)), rU = pick_scratch(R(d->base) | R(rT));
+            int rT = pick_scratch(t, R(d->base)), rU = pick_scratch(t, R(d->base) | R(rT));
             if (d->is_store) {                                  /* stc.l vbr,@-rn */
                 spill(t, rT, SA(t));
                 emit_mov_lit(e, rT, t->env->shadow_vbr_addr, TAG_NONE);
@@ -661,7 +762,7 @@ static void tr_priv(tctx *t, const sh_insn *d)
                 restore(t, rU, SB(t)); restore(t, rT, SA(t));
             }
         } else if ((d->op & 0xF0FF) == 0x402E) {                /* ldc rm,vbr */
-            int rm = (d->op >> 8) & 0xF, rT = pick_scratch(R(rm));
+            int rm = (d->op >> 8) & 0xF, rT = pick_scratch(t, R(rm));
             spill(t, rT, SA(t));
             emit_mov_lit(e, rT, t->env->shadow_vbr_addr, TAG_NONE);
             emit16(e, OP_MOVL_STORE(rm, rT));
@@ -675,7 +776,7 @@ static void tr_priv(tctx *t, const sh_insn *d)
     }
     /* CR_SR */
     if (d->priv_mem && !d->is_store) {                          /* ldc.l @rm+,sr */
-        int rT = pick_scratch(R(d->base));
+        int rT = pick_scratch(t, R(d->base));
         spill(t, rT, SLOT_X1);
         commit(t, FIX_CR_BASE + CR_SR, rT);                     /* after this point: not resumable (BL=1 code) */
         emit16(e, OP_MOVL_POSTINC(d->base, rT));
@@ -692,9 +793,9 @@ static void tr_priv(tctx *t, const sh_insn *d)
     {
         /* stc sr,rn / stc.l sr,@-rn : read SR, patch MD from shadow */
         int rn = d->priv_mem ? -1 : (int)((d->op >> 8) & 0xF);
-        int dst = d->priv_mem ? pick_scratch(R(d->base)) : rn;
-        int rT = pick_scratch(R(dst) | (d->priv_mem ? R(d->base) : 0));
-        int rU = pick_scratch(R(dst) | R(rT) | (d->priv_mem ? R(d->base) : 0));
+        int dst = d->priv_mem ? pick_scratch(t, R(d->base)) : rn;
+        int rT = pick_scratch(t, R(dst) | (d->priv_mem ? R(d->base) : 0));
+        int rU = pick_scratch(t, R(dst) | R(rT) | (d->priv_mem ? R(d->base) : 0));
         if (d->priv_mem) spill(t, dst, SC(t));
         spill(t, rT, SA(t)); spill(t, rU, SB(t));
         emit16(e, OP_STC_SR(dst));
@@ -717,7 +818,7 @@ static void tr_priv(tctx *t, const sh_insn *d)
 static void trace_prologue(tctx *t)
 {
     emitter *e = &t->em;
-    int rT = pick_scratch(0), rU = pick_scratch(R(rT));
+    int rT = pick_scratch(t, 0), rU = pick_scratch(t, R(rT));
     spill(t, rT, SA(t)); spill(t, rU, SB(t));
     emit_mov_lit(e, rT, t->env->exec_ctl, TAG_NONE);
     emit16(e, OP_MOVL_LOAD(rT, rU));
@@ -738,6 +839,8 @@ static void tr_insn(tctx *t, const sh_insn *d, int in_slot)
     if (t->err) return;
     switch (d->kind) {
     case K_PASS: case K_TRAP: case K_ILLEGAL:
+        /* (a hypercall trapa resumes inside the block: the exception path
+         * restores the DSP slots, so the borrow survives it) */
         emit16(&t->em, d->op); break;
     case K_MEM:   tr_mem(t, d); break;
     case K_PCREL: tr_pcrel(t, d); break;
@@ -746,6 +849,10 @@ static void tr_insn(tctx *t, const sh_insn *d, int in_slot)
     case K_PRIV:  tr_priv(t, d); break;
     case K_BRANCH: /* handled by caller */ break;
     }
+    /* the cached swap dies with its register; anything but plain code,
+     * memory and pc-relative ops is a helper or trap and kills it too */
+    if (t->cache_reg >= 0 && ((d->defs & R(t->cache_reg)) || (d->kind != K_PASS && d->kind != K_MEM && d->kind != K_PCREL)))
+        cache_kill(t);
 }
 
 static void begin_meta_kind(tctx *t, int kind, sf_u32 guest_off, sf_u32 target, sf_u32 fallthrough)
@@ -768,10 +875,71 @@ static void begin_meta(tctx *t, sf_u32 guest_off) { begin_meta_kind(t, META_INSN
 
 static int fetch(tctx *t, sf_u32 gpc, sh_insn *d)
 {
-    sf_u32 op;
+    sf_u32 op, i = (gpc - t->blk->guest_pc) / 2;
+    if (i < (sf_u32)t->pre_n) { *d = g_pre[i]; return 1; }          /* decoded by the pre-pass */
     if (t->env->fetch16(t->env->ctx, gpc, &op)) { t->err = DBT_ERR_FETCH; t->fault = gpc; return 0; }
     sh4_decode(op, d);
     return 1;
+}
+
+/* Would this instruction use the borrowed register? (stores with a free
+ * data field, control-register memory forms, device-aware accesses) */
+static int borrow_user(const tctx *t, const sh_insn *d)
+{
+    if (d->kind != K_MEM) return 0;
+    if (d->ctrl != CR_NONE) return 1;
+    if (d->is_store && d->size > 1 && !store_data_is_fixed_r0(d)) return 1;
+    return dev_candidate(t, d);
+}
+
+/* Pre-pass: decode the block ahead under the main loop's end conditions
+ * (the loop may still stop earlier, never later) to pick the borrowed
+ * register, a GPR no instruction touches, when the block profits: two
+ * instructions per user against the entry, two per helper call (which
+ * pauses the borrow) and one for an indirect exit. The decoded
+ * instructions are kept for the main loop, which decodes nothing twice
+ * (the second decode cost a tenth of a CE boot). */
+static void prepass(tctx *t, sf_u32 guest_pc, int max)
+{
+    sf_u32 gpc = guest_pc, touched = 0;
+    int n = 0, score = -1, r;
+    t->bx = -1; t->cache_reg = -1; t->pre_n = 0;
+    while (n < max) {
+        sh_insn *d = &g_pre[t->pre_n];
+        sf_u32 op;
+        if (t->env->fetch16(t->env->ctx, gpc, &op)) break;
+        t->pre_n++;
+        sh4_decode(op, d);
+        touched |= d->touched;
+        t->gpc = gpc;
+        n++;
+        gpc += 2;
+        if (d->kind == K_BRANCH) {
+            if (d->has_slot) {
+                sh_insn *sl = &g_pre[t->pre_n];
+                if (t->env->fetch16(t->env->ctx, gpc, &op)) break;
+                t->pre_n++;
+                sh4_decode(op, sl);
+                touched |= sl->touched;
+                gpc += 2;
+                if (!sh4_slot_legal(sl)) break;
+                if (borrow_user(t, sl)) score += 2;
+                if (sl->kind == K_FPU || sl->kind == K_FALLBACK) score -= 2;
+            }
+            if (d->br != BR_BT && d->br != BR_BF && d->br != BR_BTS && d->br != BR_BFS) {
+                if (d->br != BR_BRA && d->br != BR_BSR) score -= 1;
+                break;
+            }
+            continue;
+        }
+        if (borrow_user(t, d)) score += 2;
+        if (d->kind == K_FPU || d->kind == K_FALLBACK || (d->kind == K_PRIV && d->ctrl == CR_SR && !d->is_store)) score -= 2;
+        if (d->kind == K_TRAP && (d->op & 0xFF00) == 0xC300) break;
+        if (d->kind == K_PRIV && d->ctrl == CR_SR && !d->is_store) break;
+        if (d->kind == K_ILLEGAL) break;
+    }
+    if (t->env->no_borrow || score <= 0) return;
+    for (r = 1; r <= 14; r++) if (!(touched & R(r))) { t->bx = r; return; }
 }
 
 int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
@@ -792,6 +960,8 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
     t.env = env; t.blk = b;
     emit_init(&t.em, buf, cap);
     b->guest_pc = guest_pc; b->host_base = host_base; b->end_reason = END_FULL; b->ic_off = -1;
+    prepass(&t, guest_pc, max);
+    b->borrow = t.bx;
 
     while (!ended && n < max && !t.err) {
         sh_insn d, s;
@@ -801,6 +971,7 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
         if (!fetch(&t, gpc, &d)) break;
         begin_meta(&t, gpc - guest_pc);
         if (n == 0 && env->exec_ring) trace_prologue(&t);
+        if (n == 0 && t.bx >= 0) spill(&t, t.bx, SLOT_A0);        /* park the borrowed register */
         n++;
         if (d.kind == K_BRANCH) {
             const sh_insn *slot = 0;
@@ -882,6 +1053,7 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
         /* original jump words, for unchaining when the target block dies */
         b->links[k].w0 = t.em.buf[b->links[k].jump_off / 2];
         b->links[k].w1 = t.em.buf[b->links[k].jump_off / 2 + 1];
+        b->links[k].w2 = t.em.buf[b->links[k].jump_off / 2 + 2];
         b->links[k].skip_w = b->links[k].cond ? t.em.buf[b->links[k].jump_off / 2 - 1] : 0;
     }
     b->host_len = emit_pos(&t.em);
@@ -889,7 +1061,7 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
     return DBT_OK;
 }
 
-int dbt_chain_direct(sf_u16 *code, sf_u32 host, sf_u32 target, int cond, int backward, sf_u32 *from)
+int dbt_chain_direct(sf_u16 *code, sf_u32 host, sf_u32 target, int cond, int backward, int no_restore, sf_u32 *from)
 {
     sf_i32 d = (sf_i32)(target - (host + 4));
     if (d & 1) return 0;
@@ -898,16 +1070,26 @@ int dbt_chain_direct(sf_u16 *code, sf_u32 host, sf_u32 target, int cond, int bac
     if (cond && backward) {
         sf_i32 d8 = (sf_i32)(target - (host - 2 + 4)) >> 1;
         if (d8 >= -128 && d8 <= 127) {
-            /* skip word: flip the sense (bit 9) and point it at the target */
-            code[-1] = (sf_u16)(((code[-1] ^ 0x0200u) & 0xFF00u) | ((sf_u32)d8 & 0xFFu));
-            code[0] = 0xA002;                  /* not taken: bra over the 3 remaining words */
-            code[1] = 0x0009;
+            if (code[0] == 0x0009 || no_restore) {
+                /* nothing to restore: the skip word, flipped (bit 9), becomes
+                 * the real branch; word 0 a bra over the 4 remaining words */
+                code[-1] = (sf_u16)(((code[-1] ^ 0x0200u) & 0xFF00u) | ((sf_u32)d8 & 0xFFu));
+                code[0] = 0xA003;
+                code[1] = 0x0009;
+                *from = host - 2;
+                return 6;
+            }
+            /* skip word: flip the sense (bit 9), delay it (bit 10, word 0
+             * becomes its slot) and point it at the target */
+            code[-1] = (sf_u16)((((code[-1] ^ 0x0200u) | 0x0400u) & 0xFF00u) | ((sf_u32)d8 & 0xFFu));
+            code[1] = 0xA002;                  /* not taken: bra over the 3 remaining words */
+            code[2] = 0x0009;
             *from = host - 2;
-            return 6;
+            return 8;
         }
     }
+    code[1] = no_restore ? 0x0009 : code[0];   /* the restore (or nop) is the delay slot */
     code[0] = (sf_u16)(0xA000u | ((sf_u32)d & 0xFFFu));
-    code[1] = 0x0009;
     *from = host;
     return 4;
 }

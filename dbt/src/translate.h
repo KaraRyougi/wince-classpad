@@ -43,6 +43,8 @@ typedef struct {
      * its guest pc to a 64 KiB ring. exec_ctl = address of the byte index
      * (16-bit wrap), exec_ring = the ring. 0 = off. */
     sf_u32 exec_ctl, exec_ring;
+    /* 1: never borrow a register (see dbt_block.borrow); for tests */
+    int no_borrow;
 } dbt_env;
 
 typedef struct {
@@ -56,7 +58,7 @@ typedef struct {
 enum { META_INSN = 0,        /* guest_pc + guest_off (restart the instruction) */
        META_TARGET_CONST,    /* a branch whose slot has executed: resume at target */
        META_TARGET_X0,       /* same, target is in the X0 slot */
-       META_TARGET_REG,      /* same, target is guest register fix_reg (not written in the range) */
+       META_TARGET_REG,      /* same, target is guest register fix_reg (not written in the range) + `target` (braf/bsrf: PC+4) */
        META_TARGET_PR,       /* same, target is the guest PR (rts) */
        META_COND,            /* bt/s, bf/s after the slot: SSR.T ? target : fallthrough */
        META_COND_REG,        /* same, but the deciding T bit is bit 0 of r[fix_reg] (slot wrote T) */
@@ -103,16 +105,20 @@ typedef struct {
         sf_u16 lit_off;          /* host offset of the link literal (patched by the runtime) */
         sf_u16 stub_off;         /* host offset of the exit stub */
         sf_u16 jump_off;         /* host offset of the 4-word jump sequence (lds rT,X0 ...) */
+        sf_u16 w0, w1, w2, skip_w; /* original words 0-2 of the sequence (and the skip), to undo chaining */
         sf_u8 cond;              /* the word before jump_off is the inverted bt/bf skip */
         sf_u8 backward;          /* guest target is at or before the branch (loop back edge) */
-        sf_u8 scratch;           /* register the jump sequence spills */
-        sf_u8 pad;
-        sf_u16 w0, w1, skip_w;   /* original words of the sequence (and the skip), to undo chaining */
-        sf_u32 guest_target;
+        sf_u32 guest_target;     /* (20 bytes: 4096 blocks keep 8 of these each) */
     } links[DBT_MAX_LINKS];
     int    nlinks;
     int    ic_off;           /* host offset of the inline cache {guest pc, host} literal pair, or -1 */
     int    end_reason;       /* enum below */
+    /* Register borrowed for the whole block (-1: none): a GPR no instruction
+     * of the block touches, parked in A0 by the block's first instruction and
+     * restored before every exit. Stores byte-swap into it without a spill
+     * of their own, and it caches the swapped value of the last register
+     * stored (see translate.c, "borrowed register"). */
+    int    borrow;
 } dbt_block;
 
 enum { END_BRANCH, END_TRAP, END_PRIV, END_FULL, END_ILLEGAL, END_FAULT };
@@ -125,16 +131,25 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
                         sf_u16 *buf, int cap, dbt_block *out, sf_u32 *fault_addr);
 
 /* Branch chaining, done by the runtime when it links a direct jump: rewrite
- * the 4-word jump sequence at `code` (host address `host`) into native
- * branches when `target` is in range. Form A (any direct jump within the
- * 12-bit `bra` range): word 0 = `bra target`, word 1 = `nop`. Form B (a
- * conditional back edge whose target is within the 8-bit range): the skip
- * word before the sequence becomes the real `bt/bf target` and word 0 a
- * `bra` over the rest, so a taken loop branch costs one instruction. Returns
- * the number of bytes rewritten (0: out of range) and sets *from to the
- * first rewritten address. The resume metadata stays valid: the rewritten
- * words are either range starts or delay slots. */
-int dbt_chain_direct(sf_u16 *code, sf_u32 host, sf_u32 target, int cond, int backward, sf_u32 *from);
+ * the 5-word jump sequence at `code` (host address `host`) into native
+ * branches when `target` is in range. The sequence is
+ *   [0] sts A0,rX (the borrowed register's restore) or nop
+ *   [1] lds rT,X0 ; [2] mov.l lit,rT ; [3] jmp @rT ; [4] sts X0,rT
+ * Form A (any direct jump within the 12-bit `bra` range): word 0 = `bra
+ * target`, word 1 = the old word 0 (its delay slot). Form B (a conditional
+ * back edge whose target is within the 8-bit range): the skip word before
+ * the sequence becomes the real `bt/bf target` and word 0 a `bra` over the
+ * rest when there is nothing to restore, so a taken loop branch costs one
+ * instruction; with a restore the skip becomes `bt/s | bf/s target` with
+ * word 0 as its delay slot, word 1 the `bra` and word 2 a nop. With
+ * `no_restore` the restore word is left out of the rewritten forms (the
+ * runtime chains a block's back edge to itself past its park, so the
+ * register stays borrowed across iterations). Returns the number of
+ * bytes rewritten (0: out of range) and sets *from to the first rewritten
+ * address. The resume metadata stays valid: the rewritten words are either
+ * range starts or delay slots, and a borrowed register's restore that has
+ * not run yet is applied by the spill undo. */
+int dbt_chain_direct(sf_u16 *code, sf_u32 host, sf_u32 target, int cond, int backward, int no_restore, sf_u32 *from);
 
 /* Map a host byte offset inside a block to its guest instruction. Returns
  * the meta index or -1. */

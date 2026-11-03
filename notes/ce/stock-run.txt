@@ -43,3 +43,30 @@ ClassPad NK-release.bin (Release configuration, COMPRESSION=OFF, 1.1 MB; ~/Downl
     CLASSPAD OAL: SH7305 under the translator / CLASSPAD OAL: POSTINIT (kernel initialised) / CLASSPAD OAL: first idle
   so a silent retail image can be judged by the OAL's own markers; cesym needs that directory's .map files now.
 
+
+Translator: borrowed register (2026-11-03, dbt commit after 94ad947):
+  Stores and sts.l/lds.l swap through a GPR the block never touches (parked in A0), repeated stores of one register
+  cost one instruction, self-loop back edges keep it borrowed. Bench: stack 4.11x -> 3.22x, mem copy 2.33x -> 2.09x,
+  mem mixed 2.75x -> 2.42x, call frame 3.81x -> 3.44x; Release boot to first idle 16231 -> 15973 ticks (prof15.txt);
+  14 guests + nkimg pass; the Debug image boots to "booted 1 times" with it (3 of 3 runs).
+  Two bugs found on the way, both fixed: a scratch spilled across a jsr slot restored over the borrowed register
+  (Release idle in a third of the time with the registry hashing gone), and the re-park word at a helper's return
+  address made an interrupt in the helper's exit tail run the helper instruction again (double fmov/mac; FPU
+  context saves) -- helper ranges now commit at the call. The pre-pass decoding every instruction twice cost 13%
+  of the boot (first profiles were slower than before the change); it now decodes once.
+Open, intermittent (2026-11-03): the Debug image sometimes dies after "FILESYS: Launching apps" with
+  "Faulted in KCall": a TLB miss (EXPEVT 0x040, TEA 0) reported at a block start pc (OAL ClasspadCacheWriteback+0xa,
+  or NKSleep+0x74 which is a bra), the nested fault in KCall+0x2c being mov.b @r1 with r1 = 0 right after a literal
+  load into r1. Seen with the committed translator (speed round, 4096 blocks) once, and with the borrow at 2048
+  blocks (-DMAX_BLOCKS=2048) once in two runs; not with the exception trace on, not with the pre-speed-round
+  translator (cc494f5) in one run, not with the borrow off. casio-emu's RTC edges are host-time based, so runs are
+  not deterministic. Every C path on the translation path that touches guest memory was checked (code probes,
+  literal reads, debug ring: bounded, P1/P2); the flush path (cache_flush_all masked, invalidate_all_but_rom) is
+  the suspect by correlation with flush frequency. Knobs: -DDBT_NO_BORROW, -DDBT_NO_ROMKEEP, -DMAX_BLOCKS=n.
+GWES image (/Users/kokutou/Downloads/ClasspadUI, 2.4 MB, 27 modules incl. gwes.dll, classpad_ddi.dll, classpad_hello.exe),
+  2026-11-03, make BUILD=build-gwes NKBIN=... nkshot: kernel to POSTINIT, then
+  "Exception 'Access Violation' PC=gwes.dll!WBITMAP::WBITMAP(GdiObjectHandle_t, Driver_t*)+0x2c BVA=00000104"
+  (a null Driver_t), first idle, no "CLASSPAD DDI:" line ever, no frame. (The TOC load offsets of the platform
+  drivers lie above the ROM end, but those are virtual load addresses, gwes.dll's own is nowhere near its sections
+  either, and every section of classpad_ddi.dll is in the image: .text at 8c309000.) Open: whether GWES loaded the
+  DLL at all (no RETAILMSG from any DLL has been seen in a Release image yet) -- next: a block trace of the run.
