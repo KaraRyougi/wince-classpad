@@ -337,12 +337,21 @@ via hypercall 0xF1):
   the handler which of r0-r3 are still parked in the DSP slots.
 - Known v1 limits: FPU memory operands and guest code must be in unmapped
   (P1) memory; a TLB miss inside C code halts unless it is the translator's
-  own code probe. SR.FD is not emulated yet: FPU instructions run whatever
-  FD says, so the CE kernel's lazy FPU context switch (EXPEVT 0x800) never
-  triggers (notes/ce/kernel-sh-notes.md section 6). Device registers
-  accessed by kernel.dll itself (CCN at 0xFF000000) are byte-swapped like
-  memory; the plan is device-aware translation of kernel.dll's blocks
-  (docs/05).
+  own code probe. (SR.FD and the CCN registers used by kernel.dll are
+  handled now: see "FPU disable" below and the device-aware blocks.)
+- FPU disable (SR.FD): the FPU helper reads the guest SR saved by its stub
+  and, when FD is set, raises the FPU-disable exception instead of
+  executing: EXPEVT 0x800, or 0x820 for an instruction in a delay slot
+  (the translator passes the slot flag in bit 16 of the helper argument),
+  SPC = the instruction, or the branch owning the slot (the branch is
+  re-executed, as on the SH-4 and as the translator's own slot-fault rule
+  already does). The guest pc comes from the helper's return address (X1)
+  through the block's instruction ranges; the registers are exact in
+  dbt_ctx_rt since nothing has run. The CE kernel runs every thread with
+  FD=1 and takes the FPU on this exception (SwitchFPUOwner: save the owner's
+  registers with fmov, restore the new thread's, clear FD in the saved
+  SR), so the emulated register file is switched by the kernel's own
+  lazy-FPU logic. `fpudis` guest; getstat 8 counts them.
 
 ## Performance (casio-emu, 2026-10-22)
 
@@ -471,6 +480,7 @@ Status 2026-10-22: all four guests pass under the emulator.
 | `bank` | register bank 1 across the translator: values parked in r4/r5/r7_bank1 (the CE kernel's pCurThread, context pointer, SH3CTL_BASE) survive hypercalls from bank 0, translation of new code, a trapa handled in bank 1, a hypercall issued from bank 1 with BL cleared (both banks intact), a synthetic address error returning through PR, and 50 more exceptions; the handler sees the interrupted bank-0 registers | PASS (14 checks) |
 | `devmem` | device-aware translation: a value written to TEA pre-swapped reads back unswapped once the guest is translated device-aware, plain round trips, a pre-swapped accessor is now wrong, ordinary memory keeps its LE view, T survives device and memory loads, device access in `bra` and `jsr` delay slots, `@Rm+`, `@-Rn`, `@(r0,Rm)` forms, a PTEH store switches the ASID, MMUCR.TI goes through the device path, accesses counted | PASS (17 checks) |
 | `tlbdata` | every memory addressing form (byte/word/long; @Rm, @Rm+, @-Rn, @(disp,Rm), @(r0,Rm), @(disp,GBR), movca, base = data, base = r0, load-modify-store) with a synchronous TLB miss on the access itself: the data page is mapped only by the miss handler and the TLB is flushed before each form, so the translated sequence faults at its memory op, the handler refills, the instruction restarts; exactly one miss per form and the little-endian result checked through the physical alias | PASS (55 checks; casio-emu adds 4 to the raw loaded word for `mov.l @Rm+,Rn` with m = n, where the SH manual increments only for m != n: accepted) |
+| `fpudis` | SR.FD: FPU instruction (lds/sts fpul, sts fpscr, fsts/flds) with FD=1 raises 0x800 at the instruction, 0x820 with SPC = the branch for a slot of bra, jsr and bt/s; the handler clears FD in SSR and the instruction or the whole branch is re-executed once; FD=0 never faults | PASS (19 checks) |
 | `flush` | code-cache pressure: 3000 indirect calls and a 3000-block direct chain, three passes, 9 full flushes with links and inline caches resolved across them; the sums must not change | PASS (the hazard above is not reproduced: after a flush the stale literal lies in cache memory the new block does not reuse) |
 | `tmu` | TMU0 programmed through pre-swapped MMIO, IMASK/BL and IMR masking, INTEVT, `rte` restoring SR, `sleep` wake-up; register probe across `trapa`; 15 one-construct hot loops (loads, stores of every form, `bt/s` with a T-writing slot, `jsr` with a store in the slot, push/pop, pc-relative) plus a compiled loop, each run with ~3000 interrupts landing at arbitrary host instructions and compared with an interrupt-free run | PASS (34 checks) |
 

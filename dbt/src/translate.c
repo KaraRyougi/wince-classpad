@@ -735,14 +735,13 @@ static void trace_prologue(tctx *t)
 
 static void tr_insn(tctx *t, const sh_insn *d, int in_slot)
 {
-    (void)in_slot;
     if (t->err) return;
     switch (d->kind) {
     case K_PASS: case K_TRAP: case K_ILLEGAL:
         emit16(&t->em, d->op); break;
     case K_MEM:   tr_mem(t, d); break;
     case K_PCREL: tr_pcrel(t, d); break;
-    case K_FPU:   call_helper(t, t->env->rt_fpu, 0, 2, d->op, d->touched); break;
+    case K_FPU:   call_helper(t, t->env->rt_fpu, 0, 2, d->op | (in_slot ? 0x10000u : 0), d->touched); break;   /* bit 16: delay slot (FPU-disable raises 0x820 there) */
     case K_FALLBACK: call_helper(t, t->env->rt_fallback, 0, 2, d->op, d->touched); break;
     case K_PRIV:  tr_priv(t, d); break;
     case K_BRANCH: /* handled by caller */ break;

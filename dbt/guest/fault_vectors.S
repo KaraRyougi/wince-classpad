@@ -46,7 +46,11 @@ _guest_vectors:
         mov.l   .Lbl, r2
         or      r2, r1
         ldc     r1, sr                 /* BL=1 again before touching SPC/SSR */
-        ldc.l   @r15+, ssr
+        mov.l   @r15+, r2              /* saved SSR, masked with fault_ssr_and (a C handler clears FD) */
+        mov.l   .Lssr_and, r1
+        mov.l   @r1, r1
+        and     r1, r2
+        ldc     r2, ssr
         ldc.l   @r15+, spc
         tst     r3, r3
         bt      2f
@@ -60,6 +64,11 @@ _guest_vectors:
 .Lexpevt:   .long 0xFF000024
 .Ltea:      .long 0xFF00000C
 .Lhandler:  .long _guest_fault
+.Lssr_and:  .long _fault_ssr_and
 .Lfault_pr: .long _fault_pr
 .Lnotbl:    .long 0xEFFFFFFF
 .Lbl:       .long 0x10000000
+        .data
+        .align 2
+        .global _fault_ssr_and
+_fault_ssr_and: .long 0xFFFFFFFF

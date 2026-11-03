@@ -69,6 +69,7 @@ GUEST_EXTRA_aspace := guest/fault_vectors.S
 GUEST_EXTRA_bank := guest/bank_vectors.S
 GUEST_EXTRA_devmem := guest/devmem_asm.S
 GUEST_EXTRA_tlbdata := guest/fault_vectors.S guest/tlbdata_asm.S
+GUEST_EXTRA_fpudis := guest/fault_vectors.S guest/fpudis_asm.S
 GUEST_EXTRA     := $(GUEST_EXTRA_$(GUEST))
 GUEST_START_nkimg := guest/nkimg_start.S
 GUEST_START     := $(or $(GUEST_START_$(GUEST)),guest/start.S)

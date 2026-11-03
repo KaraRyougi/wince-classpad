@@ -28,7 +28,17 @@ kernel's illegal-instruction path becomes an FPU emulator.
 rounding modes (20 000 samples per op/mode, plus special values and
 cancellation cases) and runs decoder tests with a fake memory.
 
-## Kernel integration (to do, Platform Builder side)
+## Under the translator (done, 2026-11-03)
+
+The DBT route needs none of the kernel-side steps below: every FPU
+instruction is already a helper call into `fpuemu`, and the kernel's lazy
+FPU switch works unchanged because the translator emulates SR.FD (the
+helper raises EXPEVT 0x800/0x820 at the instruction when FD is set; the
+kernel's SwitchFPUOwner then moves the emulated register file with fmov
+and clears FD). docs/04 "FPU disable". The section below is the plan for
+a native big-endian kernel port, kept for reference.
+
+## Kernel integration (the native-kernel route, not needed with the DBT)
 
 1. In the SH4 kernel's exception dispatch, before the generic illegal
    instruction path, check `fpuemu_is_fpu_op(*SPC)`.

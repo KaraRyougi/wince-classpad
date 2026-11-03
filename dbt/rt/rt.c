@@ -565,7 +565,7 @@ void dbt_invalidate(sf_u32 lo, sf_u32 hi)
 #define HC_SYNTH  0xF8                  /* translator-internal: deliver a synthetic exception (r4 = guest pc, r5 = EXPEVT) */
 #define HC_TLB_INVAL 0xF9               /* kernel: user mappings in [r4, r4+r5) changed (r5 = 0: all) */
 #define HC_ASID   0xFA                  /* kernel: address space switched to ASID r4 */
-#define HC_GETSTAT 0xFB                 /* r4 = index -> r0 (0 translations, 1 blocks, 2 invalidations, 3 asid switches, 4 ic misses, 5 debug-ring bytes, 6 device accesses, 7 full flushes) */
+#define HC_GETSTAT 0xFB                 /* r4 = index -> r0 (0 translations, 1 blocks, 2 invalidations, 3 asid switches, 4 ic misses, 5 debug-ring bytes, 6 device accesses, 7 full flushes, 8 FPU-disable exceptions) */
 #define HC_DEVRANGE 0xFC                /* tests: translate [r4, r5) device-aware from now on (drops all translations at the next lookup) */
 
 #define REG_EXPEVT (*(volatile sf_u32 *)0xFF000024u)
@@ -604,6 +604,7 @@ static void print_stats(void)
     dbt_puts(" lookups_c="); dbt_puthex(dbt_stat.lookups_c);
     dbt_puts(" exceptions="); dbt_puthex(dbt_stat.exceptions);
     dbt_puts(" fpu="); dbt_puthex(dbt_stat.fpu_ops);
+    dbt_puts(" fpudis="); dbt_puthex(dbt_stat.fpu_disabled);
     dbt_puts(" chained="); dbt_puthex(dbt_stat.chained);
     dbt_puts(" evicted="); dbt_puthex(dbt_stat.hash_evicted);
     dbt_puts(" ic_miss_c="); dbt_puthex(dbt_stat.ic_misses_c);
@@ -662,6 +663,7 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
         case 5: v = dbt_stat.dbgring_bytes; break;
         case 6: v = dbt_stat.dev_accesses; break;
         case 7: v = dbt_stat.flushes; break;
+        case 8: v = dbt_stat.fpu_disabled; break;
         }
         ctx->r[0] = v;
         return RT_ACT_RESUME;
@@ -1082,10 +1084,35 @@ int dbt_ldc_sr_c(dbt_gctx *ctx, sf_u32 newsr)
 
 /* -------------------------------------------------------------- helpers */
 
-void dbt_fpu_c(dbt_gctx *ctx, sf_u32 opcode)
+void dbt_fpu_c(dbt_gctx *ctx, sf_u32 arg)
 {
     fpu_mem mem;
     int r;
+    sf_u32 opcode = arg & 0xFFFFu;
+    if (ctx->sr & SR_FD) {
+        /* SR.FD: the FPU is disabled. The CE kernel runs every thread with
+         * FD=1 and gives it the FPU on this exception (lazy context switch,
+         * SwitchFPUOwner): general FPU disable 0x800, or 0x820 when the
+         * instruction sits in a delay slot (bit 16 of the argument, set by
+         * the translator), with SPC = the instruction, or the branch whose
+         * slot it is: the branch is re-executed. The guest registers are
+         * exact in dbt_ctx_rt (the helper stub saved them before anything
+         * ran); the call site's instruction range names the guest pc. X1
+         * still holds the return address at this point. */
+        register sf_u32 ret __asm__("r0");
+        sf_u32 off, gpc;
+        dbt_block *b;
+        int idx;
+        __asm__ volatile (".word 0x009A" : "=r"(ret));          /* sts x1,r0 (DSP register code 9, as STSX in stubs.S) */
+        b = block_of_host(ret - 4);                               /* the jmp of the call sequence */
+        if (!b) dbt_halt("fpu helper return address not in a block");
+        off = ret - 4 - b->host_base;
+        idx = dbt_block_find(b, off);
+        if (idx < 0 || b->meta[idx].kind != META_INSN) dbt_halt("fpu helper outside an instruction range");
+        gpc = b->guest_pc + b->meta[idx].guest_off;
+        dbt_stat.fpu_disabled++;
+        deliver_synthetic(gpc, (arg & 0x10000u) ? 0x820 : 0x800);
+    }
     mem.read32 = fpu_read32; mem.write32 = fpu_write32; mem.fetch16 = 0; mem.ctx = 0;
     dbt_stat.fpu_ops++;
     r = fpuemu_exec(&g_fpu, ctx->r, &ctx->sr, opcode, &mem);

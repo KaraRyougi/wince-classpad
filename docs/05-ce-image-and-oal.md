@@ -187,8 +187,12 @@ What the kernel sources settled (2026-11-02, notes/ce/kernel-sh-notes.md):
   the effective address and take an unswapped helper for 0xFF, which also
   observes PTEH/MMUCR writes (`devmem` guest). The loader prints the range
   it found ("[nk] kernel.dll ... (device-aware translation)").
-- **SR.FD must be emulated** for the kernel's lazy FPU switch: an FPU
-  instruction with FD=1 has to raise EXPEVT 0x800 instead of executing.
+- **SR.FD is emulated** for the kernel's lazy FPU switch: the FPU helper
+  checks the guest SR and, with FD=1, raises EXPEVT 0x800 (0x820 in a
+  delay slot, SPC = the branch) through the translator's synthetic
+  exception instead of executing; the kernel's SwitchFPUOwner then saves
+  and restores the emulated registers with ordinary FPU instructions and
+  clears FD (`fpudis` guest, docs/04).
 - The OAL's debug output cannot trap while BL=1 (SHInit/OEMInit): debug ring.
 - The stock HARP image cannot be loaded as-is (records at 0x8C001000, RAM to
   0x90000000): `config.bib` of the ClassPad BSP places NK at 0x8C101000 and
@@ -221,8 +225,8 @@ What the kernel sources settled (2026-11-02, notes/ce/kernel-sh-notes.md):
    device-aware range was taken from kernel.dll's code sections instead of
    load..load+vsize (ROMIMAGE had put the Release kernel's text, with the
    exception vectors, below its load address). A retail kernel prints
-   nothing, so the OAL marks POSTINIT and the first idle. Still open:
-   SR.FD, display.
+   nothing, so the OAL marks POSTINIT and the first idle. SR.FD is
+   emulated (2026-11-03). Still open: display.
 4. `make -C dbt NKBIN=NK.bin run`: expect the kernel banner on stdout,
    then the first scheduler tick. Fix what breaks.
 5. Memory: ~~compact block metadata; move the translator region down and

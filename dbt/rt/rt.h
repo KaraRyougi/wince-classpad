@@ -17,6 +17,7 @@
 #define SR_MD   0x40000000u
 #define SR_RB   0x20000000u
 #define SR_BL   0x10000000u
+#define SR_FD   0x00008000u
 #define SR_DSP  0x00001000u
 #define SR_IMASK 0x000000F0u
 
@@ -108,6 +109,7 @@ void dbt_halt(const char *why) __attribute__((noreturn));
 /* statistics */
 typedef struct {
     sf_u32 blocks, translations, flushes, lookups_c, exceptions, hypercalls, fpu_ops, invalidations;
+    sf_u32 fpu_disabled;                 /* FPU instructions turned into EXPEVT 0x800/0x820 (SR.FD set) */
     sf_u32 resumes, resumes_committed;
     sf_u32 chained;                      /* direct jumps rewritten into native branches */
     sf_u32 hash_evicted;                 /* lookups that found the block only in the block table */
