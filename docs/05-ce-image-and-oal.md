@@ -237,7 +237,8 @@ What the kernel sources settled (2026-11-02, notes/ce/kernel-sh-notes.md):
    window app; registry and bib entries; `make nkshot` for a screenshot of
    a CE image). First GWES image (2026-11-03, `ClasspadUI`, 27 modules):
    the kernel initialises, then GWES dies in `WBITMAP::WBITMAP` with a null
-   `Driver_t` and the driver never logs `DisplayInit` (its sections are in
-   the image; whether GWES loaded it is the open question, see
-   `notes/ce/stock-run.txt`). Keyboard and touch are being written in
-   their own session.
+   `Driver_t`: the kernel refused the driver's 65 KB data copy for low
+   memory, the RAM file system having half of the 9 MiB RAM (block trace
+   in `notes/ce/stock-run.txt`); `config.bib` now gives it 12.5%
+   (`FSRAMPERCENT=20202020`), to be verified with a remade image. Keyboard
+   and touch are being written in their own session.

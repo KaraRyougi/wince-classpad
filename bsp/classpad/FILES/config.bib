@@ -20,3 +20,9 @@ CONFIG
 ; the image is a few hundred KB larger (the window has 11.5 MiB).
     COMPRESSION=OFF
     ROMFLAGS=00
+; RAM file system (object store) share of RAM: 32 of 256 (12.5%) in every
+; 2 MiB band instead of the default 128 (50%). With 9 MiB of RAM the
+; default left ~90 free pages after the boot, and the kernel refused the
+; display driver's data copy (AllocationExceedLowMemThreshold in
+; InitModule), so GWES started without a driver (2026-11-03).
+    FSRAMPERCENT=20202020

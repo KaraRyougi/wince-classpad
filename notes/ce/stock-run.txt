@@ -68,5 +68,11 @@ GWES image (/Users/kokutou/Downloads/ClasspadUI, 2.4 MB, 27 modules incl. gwes.d
   "Exception 'Access Violation' PC=gwes.dll!WBITMAP::WBITMAP(GdiObjectHandle_t, Driver_t*)+0x2c BVA=00000104"
   (a null Driver_t), first idle, no "CLASSPAD DDI:" line ever, no frame. (The TOC load offsets of the platform
   drivers lie above the ROM end, but those are virtual load addresses, gwes.dll's own is nowhere near its sections
-  either, and every section of classpad_ddi.dll is in the image: .text at 8c309000.) Open: whether GWES loaded the
-  DLL at all (no RETAILMSG from any DLL has been seen in a Release image yet) -- next: a block trace of the run.
+  either, and every section of classpad_ddi.dll is in the image: .text at 8c309000.) The block trace (-DDBT_TRACE_BLOCKS,
+  symbolised with cesym) shows GWES's Driver_t::InitMainDriver -> LoadDriver -> kernel InitModule -> ReadSection ->
+  HoldPages -> DoVMAlloc -> AllocationExceedLowMemThreshold -> DecommitExe / FreeModuleMemory / CloseExe: the driver's
+  65 KB .data copy was refused for low memory (the Debug boot prints PageFreeCount = 0x5a, 360 KB, at that stage), no
+  block of classpad_ddi.dll was ever translated, and GWES went on to WBITMAP::New with a null Driver_t. Cause: the
+  ROM header's FS RAM percent 0x80808080 gives the RAM file system half of the 9.2 MiB RAM region (loader.c
+  CalcFSPages: pages * byte / 256 per 2 MiB band). config.bib now sets FSRAMPERCENT=20202020 (12.5%); the image needs
+  only "Make Run-Time Image" to pick it up.
