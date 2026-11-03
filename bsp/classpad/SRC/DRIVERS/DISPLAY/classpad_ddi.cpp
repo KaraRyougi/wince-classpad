@@ -23,6 +23,21 @@
 
 static ULONG g_bitMasks[] = { 0xF800, 0x07E0, 0x001F };
 
+// gpe.lib's debug zones live in the driver. The gpe.h macro only expands in
+// DEBUG builds; the retail library still links against dpCurSettings.
+#ifdef DEBUG
+INSTANTIATE_GPE_ZONES(0x3, "ClasspadDDI", "unused1", "unused2")
+#else
+DBGPARAM dpCurSettings = {
+    TEXT("ClasspadDDI"),
+    { TEXT("Errors"), TEXT("Warnings"), TEXT("Performance"), TEXT("Temporary tests"),
+      TEXT("Enter,Exit"), TEXT("Initialize"), TEXT("Blt Calls"), TEXT("Blt Verbose"),
+      TEXT("Line Calls"), TEXT("Line Verbose"), TEXT("Surface"), TEXT("Flip"),
+      TEXT("Poly"), TEXT("Cursor"), TEXT("unused1"), TEXT("unused2") },
+    0x3
+};
+#endif
+
 // in gpe.lib, declared by every GPE driver itself
 extern "C" BOOL GPEEnableDriver(ULONG engineVersion, ULONG cj, DRVENABLEDATA *data, PENGCALLBACKS engineCallbacks);
 
@@ -252,8 +267,4 @@ GPE *GetGPE(void)
     return g_pGPE;
 }
 
-BOOL WINAPI DllMain(HANDLE hInstance, DWORD dwReason, LPVOID lpReserved)      // declared by windows.h: no C linkage here
-{
-    if (dwReason == DLL_PROCESS_ATTACH) DisableThreadLibraryCalls((HMODULE)hInstance);
-    return TRUE;
-}
+// DllMain comes from gpe.lib (ddi_if.obj).
