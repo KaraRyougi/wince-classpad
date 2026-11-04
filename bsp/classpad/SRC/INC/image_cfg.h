@@ -13,7 +13,7 @@
 #define IMAGE_SHARE_ARGS_SIZE           0x00001000
 
 // Kernel image start (config.bib NK)
-#define IMAGE_WINCE_CODE_PA             0x8C101000
+#define IMAGE_WINCE_CODE_PA             0x81000000      // NK region: XIP in the NOR (config.bib)
 
 // Translator debug ring: the last page of the window, excluded from RAM in
 // config.bib. Layout (little-endian words): +0 write count, +4 read count

@@ -22,9 +22,21 @@ Where the image comes from (`dbt/rt/main.c`):
    This is the layout the real device will use (the CE image lives in the
    32 MiB XIP flash; Casio's OS occupies the first few MiB). In casio-emu
    the add-in window is only 2 MiB, so a CE image cannot travel inside the
-   `.g3a`; instead `HLE_OSROM=<file> HLE_OSROM_PAD=0x01000000` places the
-   file into the emulated NOR at that offset:
-   `make -C dbt NKBIN=path/to/NK.bin run`.
+   `.g3a`; instead `HLE_OSROM=<file> HLE_OSROM_PAD=<offset>` places a file
+   into the emulated NOR, and `tools/nkflash.py` (run by the Makefile for
+   `make -C dbt NKBIN=/abs/NK.bin run`) decides what and where:
+   - a **ROMIMAGE** build (`config.bib` since 2026-11-03: `NK 81000000
+     ROMIMAGE`, `ROMSTART=81000000`) has its image start in the NOR's P1
+     range; the `.bin` is flattened to the bytes the NOR holds and written
+     at `start - 0x80000000`. The runtime finds the `ECEC` marker at
+     `NK_FLASH + 0x40`, reads the ROMHDR (RAM range, kernel.dll's code
+     range, nk.exe's entry) and jumps: the kernel executes in place, only
+     its RAM range (the whole guest window) is in RAM, nothing is copied.
+     Translation reads guest code from the NOR through P1; the translated
+     host code lives in the RAM code cache as before.
+   - a **RAMIMAGE** build (image start inside the guest window, the first
+     images) is written as is at the 16 MiB offset; the runtime copies its
+     records into RAM and takes the entry from the terminator record.
 2. The **embedded blob** when it is a `.bin` (small test images).
 3. Otherwise the blob is a raw little-endian binary at `0x8C100000`
    (the hello/exc/fpu/tmu/bench/lcd guests).
@@ -32,26 +44,33 @@ Where the image comes from (`dbt/rt/main.c`):
 `tools/mkbin.py` wraps a flat binary as a `.bin` (256-byte records in the
 test, all-zero runs skipped like ROMIMAGE does); `make -C dbt GUEST=nkimg
 nkrun` builds a guest that carries a ROMHDR like ROMIMAGE output, wraps it,
-runs it through the flash path and checks `.data`, `.bss`, the marker and
-the ROMHDR fields. casio-emu copies flash files in 32-bit units and
-scrambles a trailing partial word, so the Makefile pads the image to a
-multiple of 4 bytes before handing it to `HLE_OSROM`.
+runs it through the copy path and checks `.data`, `.bss`, the marker and
+the ROMHDR fields; `make -C dbt GUEST=nkxip nkrun` does the same for the
+XIP path with a guest linked at the NOR address (`guest/guest_xip.ld`:
+code and rodata in flash, data and bss in RAM, the start code copying
+`.data` as the kernel's copy entries do) and checks that it runs from
+flash. casio-emu copies flash files in 32-bit units and scrambles a
+trailing partial word, so `nkflash.py` pads the file to a multiple of 4
+bytes before handing it to `HLE_OSROM`.
 
 ### Memory budget on a 16 MiB device
 
 | range | use | size |
 |---|---|---|
 | 0x8C000000-0x8C0FFFFF | left to the launcher / Casio OS workspace in the emulator | 1 MiB |
-| 0x8C100000-0x8CC7FFFF | guest: CE image (RAMIMAGE) + CE RAM | 11.5 MiB |
-| 0x8CC80000-0x8CDFFFFF | translator text/data/bss (~1.3 MiB: 2048 block headers 416 KiB, metadata arena 640 KiB, hash 64 KiB) + C stack | 1.5 MiB |
-| 0x8CE00000-0x8CFFFFFF | code cache | 2 MiB |
+| 0x81000000-0x817FFFFF | NOR: the CE image, executed in place (XIP); on the device the first 16 MiB of the chip hold Casio's OS | 8 MiB |
+| 0x8C100000-0x8CC7FFFF | guest: CE RAM (the whole window; a RAMIMAGE build puts its image here too) | 11.5 MiB |
+| 0x8CC80000-0x8CEFFFFF | translator text/data/bss (~2.3 MiB: 4096 block headers, 1.25 MiB metadata arena, hash 64 KiB) + C stack | 2.5 MiB |
+| 0x8CF00000-0x8CFFFFFF | code cache | 1 MiB |
 
 The layout is defined once in `dbt/Makefile` (`GUEST_RAM_*`, `IMAGE_BASE`,
 `CACHE_*`) and reaches the C code, the launcher and the linker script from
 there; the linker script asserts that the image leaves 128 KiB for its stack.
 
-A headless CE 6.0 kernel image is 2-4 MiB, so RAMIMAGE leaves 7.5-9.5 MiB
-of CE RAM: enough to boot to a shell, probably not for GWES. The block
+A headless CE 6.0 kernel image is 2-4 MiB, so a RAMIMAGE left 7.5-9.5 MiB
+of CE RAM, half of which the RAM file system took by default: the first
+GWES image ran out of pages before the display driver loaded. The image is
+XIP since 2026-11-03 (above), giving CE the whole 11.5 MiB window. The block
 table was compacted on 2026-10-22 (fixed per-block arrays became a shared
 metadata arena: bss 2.3 MiB -> 1.2 MiB while the block limit rose from 768
 to 2048) and the translator region shrunk from 3 MiB to 1.5 MiB. The other
@@ -93,15 +112,18 @@ tools are still obtainable, so everything is built there.
   `IMGNODEBUGGER=1`, `IMGNOSHELL=0` once a console exists. Add
   `IMGRAM32=1`-style memory settings as needed. Build output:
   `OSDesigns\<name>\RelDir\CLASSPAD_SH4_Release\NK.bin`.
-- **config.bib** (first iteration, RAMIMAGE):
+- **config.bib** (XIP, the current one in `bsp/classpad/FILES`):
   ```
   MEMORY
-      NK      8C100000  00400000  RAMIMAGE
-      RAM     8C500000  00600000  RAM
+      NK      81000000  00800000  ROMIMAGE
+      RAM     8C101000  00B7E000  RAM
   CONFIG
-      ROMSTART=8C100000  ROMWIDTH=32  ROMSIZE=00400000
-      AUTOSIZE=ON  KERNELFIXUPS=ON  PROFILE=OFF
+      ROMSTART=81000000  ROMWIDTH=32  ROMSIZE=00800000
+      AUTOSIZE=OFF  KERNELFIXUPS=ON  PROFILE=OFF  COMPRESSION=OFF
+      FSRAMPERCENT=20202020
   ```
+  (the first images were a RAMIMAGE inside the guest window with
+  AUTOSIZE=ON; the loader still accepts those)
   (`AUTOSIZE` lets ROMIMAGE move the RAM start up to the real image end.)
   Second iteration: `NK 81000000 ... ROMIMAGE` with RAM at `8C100000`.
 - **Debug output**: `OEMInitDebugSerial` does nothing, `OEMWriteDebugByte`

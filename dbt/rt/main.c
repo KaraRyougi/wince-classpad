@@ -7,9 +7,12 @@
  *   0x8CE00000 .. 0x8CFFFFFF  code cache
  * Guest sources, in order of preference:
  *   1. a Windows CE .bin image in flash at NK_FLASH (P1 alias of the NOR;
- *      casio-emu: HLE_OSROM=NK.bin HLE_OSROM_PAD=<offset>), records copied
- *      into guest RAM, entry from the terminator record;
- *   2. the embedded blob, either a .bin (same loader) or a raw little-endian
+ *      casio-emu: HLE_OSROM=... HLE_OSROM_PAD=<offset>, tools/nkflash.py
+ *      places it), records copied into guest RAM, entry from the terminator
+ *      record (a RAMIMAGE build);
+ *   2. a flat ROMIMAGE at NK_FLASH: the kernel executes in place from the
+ *      NOR, only its RAM range is in the guest window (XIP: nothing copied);
+ *   3. the embedded blob, either a .bin (same loader) or a raw little-endian
  *      binary linked at GUEST_LOAD.
  */
 #include "rt.h"
@@ -77,6 +80,16 @@ void dbt_main(void)
 
     if (nkbin_is_image((const sf_u8 *)NK_FLASH)) {
         entry = load_nk((const sf_u8 *)NK_FLASH, NK_FLASH_MAX, "flash", &info);
+    } else if (nkbin_is_xip(NK_FLASH, NK_FLASH, NK_FLASH + NK_FLASH_MAX)) {
+        int r = nkbin_xip(NK_FLASH, NK_FLASH, NK_FLASH + NK_FLASH_MAX, &info);
+        if (r != NKBIN_OK) dbt_halt("XIP image: ROMHDR unreadable");
+        nkbin_print(&info);
+        if (info.cpu_type != 0x01A6) dbt_puts("[nk] WARNING: ROMHDR CPU type is not SH4 (0x01A6)\n");
+        if (info.ram_end > GUEST_RAM_HI || info.ram_start < GUEST_LOAD)
+            dbt_puts("[nk] WARNING: ROMHDR RAM range leaves the guest window; the kernel would overwrite the translator\n");
+        if (info.physlast > NK_FLASH + NK_FLASH_MAX)
+            dbt_puts("[nk] WARNING: the ROM image runs past the readable flash span\n");
+        entry = info.entry;
     } else if (n >= 7 && nkbin_is_image(guest_blob_start)) {
         entry = load_nk(guest_blob_start, n, "embedded blob", &info);
     } else {

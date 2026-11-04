@@ -10,12 +10,14 @@ the equivalent flat memory image (what a loader must place at `image start`).
 
 ## Where the image lives
 
-- **RAM image** (development): all records are written to SDRAM. 16 MiB is
-  enough for a headless kernel (about 2 MiB) and tight but workable for a
-  GWES image (5-8 MiB) plus runtime.
-- **XIP image** (route B): `ROMSTART` in `config.bib` points into flash at
-  0x80xxxxxx; code executes from flash, RAM holds data and the object store.
-  Requires flashing, so it is only for the strapped-device route.
+- **RAM image** (the first images): all records are written to SDRAM. 16 MiB
+  is enough for a headless kernel (about 2 MiB) but a GWES image plus the
+  RAM file system ran out of pages (docs/05).
+- **XIP image** (current, in the emulator too): `ROMSTART` in `config.bib`
+  points into the NOR at 0x81000000; code executes from flash, RAM holds
+  data and the object store. casio-emu places the flat image with
+  `HLE_OSROM`; on the device it has to be flashed (the first 16 MiB of the
+  32 MiB chip hold Casio's OS, the offset is a parameter to revisit).
 
 ## Boot paths by route
 

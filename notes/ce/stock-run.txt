@@ -76,3 +76,13 @@ GWES image (/Users/kokutou/Downloads/ClasspadUI, 2.4 MB, 27 modules incl. gwes.d
   ROM header's FS RAM percent 0x80808080 gives the RAM file system half of the 9.2 MiB RAM region (loader.c
   CalcFSPages: pages * byte / 256 per 2 MiB band). config.bib now sets FSRAMPERCENT=20202020 (12.5%); the image needs
   only "Make Run-Time Image" to pick it up.
+
+XIP (2026-11-04): config.bib now builds a ROMIMAGE at NOR P1 0x81000000 (ROMSTART/ROMSIZE 8 MiB, AUTOSIZE=OFF) with
+  RAM = the whole guest window 0x8C101000..0x8CC7EFFF; tools/nkflash.py flattens such a .bin into the emulated NOR at
+  start - 0x80000000 (a RAMIMAGE .bin is still padded and copied as before), and dbt/rt/main.c + nkbin.c take the XIP
+  path when NK_FLASH holds no B000FF header but the ECEC marker at +0x40: ROMHDR read from flash, entry = nk.exe's
+  e32_entryrva (fallback: the image start), nothing copied. The CE image then costs no RAM (2.5 MiB before, 4.5 MiB
+  with a shell). Tests: make GUEST=nkxip nkrun (guest linked at the NOR address, code checked to run from 0x81.., data
+  copied to RAM by its start code) and GUEST=nkimg nkrun (copy path) both pass. The first XIP CE image is to be built
+  in the VM (Make Run-Time Image after copying config.bib). On the device the 16 MiB offset is a parameter: Casio's OS
+  holds the first MiBs of the 32 MiB chip and the storage area has to be avoided.

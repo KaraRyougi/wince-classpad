@@ -1,7 +1,7 @@
 ;;-----------------------------------------------------------------------------
 ;;  startup.src - CLASSPAD image entry
 ;;
-;;  The translator loads NK.bin into RAM and jumps here with MD=1. Nothing
+;;  The translator finds the image in the NOR (XIP) and jumps here with MD=1. Nothing
 ;;  board-level is needed (no SDRAM or watchdog setup: the calculator's own
 ;;  boot code and the translator's launcher already ran). KernelStart (nkldr)
 ;;  sets its own SR and turns the caches off.

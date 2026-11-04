@@ -32,14 +32,17 @@ GUEST_CFLAGS := -ml -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-sta
 RT_SRC := rt/crt0.S rt/stubs.S rt/main.c rt/rt.c rt/nkbin.c rt/bench.c bench/loops.S src/sh4dec.c src/sh4emit.c src/translate.c \
           ../fpuemu/src/fpuemu.c ../fpuemu/src/softfloat.c
 
-# A Windows CE .bin to run instead of the embedded guest: placed in the emulated
-# NOR flash at NK_FLASH_OFF (P1 address 0x80000000 + offset), where the runtime
-# looks for it first. Example: make NKBIN=path/to/NK.bin run
+# A Windows CE .bin to run instead of the embedded guest, placed in the emulated
+# NOR flash by tools/nkflash.py: a RAMIMAGE build (image inside the guest
+# window) goes as is to NK_FLASH_OFF (P1 address 0x80000000 + offset), where
+# the runtime finds and copies it; a ROMIMAGE build (image start in the NOR's
+# P1 range) is flattened to the bytes the NOR holds at its own address and
+# runs in place (XIP). Example: make NKBIN=/abs/path/NK.bin run
 NKBIN       ?=
 NK_FLASH_OFF ?= 0x01000000
-# casio-emu copies flash files in 32-bit units, so the image is padded to a multiple of 4 first
-NK_PADDED = $(BUILD)/nk-padded.bin
-NK_ENV = $(if $(NKBIN),HLE_OSROM=$(abspath $(NK_PADDED)) HLE_OSROM_PAD=$(NK_FLASH_OFF),)   # recursive: nkrun sets NKBIN per target
+NK_PADDED = $(BUILD)/nk-flash.bin
+NK_OFF_FILE = $(BUILD)/nk-flash.off
+NK_ENV = $(if $(NKBIN),HLE_OSROM=$(abspath $(NK_PADDED)) HLE_OSROM_PAD=$$(cat $(NK_OFF_FILE)),)   # recursive: nkrun sets NKBIN per target
 # casio-emu remembers the last machine profile (model.txt); the translator is an
 # fx-CG100 add-in, so pin the profile or a remembered ClassPad refuses to boot
 EMU_ENV = CALCEMU_MODEL=fx-cg100
@@ -48,7 +51,7 @@ RUN_SECS ?= 20
 # make DEVALL=1 GUEST=x run: the guest asks for device-aware translation of its whole code (start.S)
 GUEST_CFLAGS += $(if $(filter 1,$(DEVALL)),-DDEVAWARE_ALL,)
 define NK_PAD
-python3 -c 'import sys;d=open(sys.argv[1],"rb").read();open(sys.argv[2],"wb").write(d+b"\0"*(-len(d)%4))' $(NKBIN) $(NK_PADDED)
+mkdir -p $(BUILD) && python3 ../tools/nkflash.py $(NKBIN) $(NK_PADDED) $(NK_FLASH_OFF) > $(NK_OFF_FILE) && echo "flash offset $$(cat $(NK_OFF_FILE))"
 endef
 
 .PHONY: all clean run nkrun nkshot screenshot disasm
@@ -73,7 +76,10 @@ GUEST_EXTRA_tlbdata := guest/fault_vectors.S guest/tlbdata_asm.S
 GUEST_EXTRA_fpudis := guest/fault_vectors.S guest/fpudis_asm.S
 GUEST_EXTRA     := $(GUEST_EXTRA_$(GUEST))
 GUEST_START_nkimg := guest/nkimg_start.S
+GUEST_START_nkxip := guest/nkxip_start.S
 GUEST_START     := $(or $(GUEST_START_$(GUEST)),guest/start.S)
+GUEST_LD_nkxip  := guest/guest_xip.ld
+GUEST_LD        := $(or $(GUEST_LD_$(GUEST)),guest/guest.ld)
 
 # guests are rebuilt when DEVALL changes (the flag lives in a stamp file name)
 DEVALL_STAMP := $(BUILD)/.devall-$(if $(filter 1,$(DEVALL)),1,0)
@@ -81,12 +87,14 @@ $(DEVALL_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.devall-*
 	touch $@
 
-$(BUILD)/$(GUEST).elf: $(GUEST_START) guest/$(GUEST).c $(GUEST_EXTRA) guest/hyper.h guest/mmio.h guest/guest.ld $(DEVALL_STAMP) | $(BUILD)
-	$(CC) $(GUEST_CFLAGS) -T guest/guest.ld -o $@ $(GUEST_START) guest/$(GUEST).c $(GUEST_EXTRA)
+$(BUILD)/$(GUEST).elf: $(GUEST_START) guest/$(GUEST).c $(GUEST_EXTRA) guest/hyper.h guest/mmio.h $(GUEST_LD) $(DEVALL_STAMP) | $(BUILD)
+	$(CC) $(GUEST_CFLAGS) -T $(GUEST_LD) -o $@ $(GUEST_START) guest/$(GUEST).c $(GUEST_EXTRA)
 
-# the guest wrapped as a CE .bin (records + ROMHDR pointer) for the loader test
+# the guest wrapped as a CE .bin (records + ROMHDR pointer) for the loader test;
+# nkxip is linked at the NOR address and tools/nkflash.py puts it back flat
+NK_IMG_BASE := $(if $(filter nkxip,$(GUEST)),0x81000000,0x8C100000)
 $(BUILD)/$(GUEST).nk.bin: $(BUILD)/$(GUEST).bin ../tools/mkbin.py
-	python3 ../tools/mkbin.py $< 0x8C100000 0x8C100000 $@ --chunk 256
+	python3 ../tools/mkbin.py $< $(NK_IMG_BASE) $(NK_IMG_BASE) $@ --chunk 256
 
 $(BUILD)/$(GUEST).bin: $(BUILD)/$(GUEST).elf
 	$(OBJCOPY) -O binary $< $@
