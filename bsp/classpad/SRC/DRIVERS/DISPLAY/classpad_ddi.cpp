@@ -199,10 +199,26 @@ SCODE ClasspadGPE::BltPrepare(GPEBltParms *pParms)
 
 SCODE ClasspadGPE::WrappedBlt(GPEBltParms *pParms)
 {
+    static int logged;
     SCODE sc = EmulatedBlt(pParms);
     if (pParms->pDst == m_pPrimarySurface) {
         if (pParms->prclDst) Dirty(pParms->prclDst->top, pParms->prclDst->bottom);
         else Dirty(0, m_nScreenHeight);
+    }
+    // Diagnostic (2026-11-04): exact-colour fills and lines reach the frame
+    // buffer, blits with a dithered brush or a glyph mask seem not to. Log
+    // the first blits: what GWES asks for and what EmulatedBlt says.
+    if (logged < 48) {
+        logged++;
+        RETAILMSG(1, (TEXT("CLASSPAD DDI: blt rop4=%04X dst=%d,%d-%d,%d %s src=%d mask=%d brush=%d flags=%08X color=%08X -> %08X\r\n"),
+                      (UINT)pParms->rop4,
+                      pParms->prclDst ? pParms->prclDst->left : -1, pParms->prclDst ? pParms->prclDst->top : -1,
+                      pParms->prclDst ? pParms->prclDst->right : -1, pParms->prclDst ? pParms->prclDst->bottom : -1,
+                      pParms->pDst == m_pPrimarySurface ? TEXT("screen") : TEXT("offscreen"),
+                      pParms->pSrc ? (int)pParms->pSrc->Format() : -1,
+                      pParms->pMask ? (int)pParms->pMask->Format() : -1,
+                      pParms->pBrush ? (int)pParms->pBrush->Format() : -1,
+                      (UINT)pParms->bltFlags, (UINT)pParms->solidColor, (UINT)sc));
     }
     return sc;
 }

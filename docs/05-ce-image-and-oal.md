@@ -262,8 +262,17 @@ What the kernel sources settled (2026-11-02, notes/ce/kernel-sh-notes.md):
    the kernel initialises, then GWES dies in `WBITMAP::WBITMAP` with a null
    `Driver_t`: the kernel refused the driver's 65 KB data copy for low
    memory, the RAM file system having half of the 9 MiB RAM (block trace
-   in `notes/ce/stock-run.txt`); `config.bib` now gives it 12.5%
-   (`FSRAMPERCENT=20202020`), to be verified with a remade image.
+   in `notes/ce/stock-run.txt`); `config.bib` gives it 12.5% now and the
+   image is XIP. **Verified 2026-11-04** with the XIP GWES image: GWES
+   loads the driver (`DisplayInit`, 384x216 frame buffer), the hello
+   window appears in the emulator's screenshot (colour bars, orange
+   frame), its timer ticks and the driver keeps pushing dirty rows; the
+   keyboard driver is up with its interrupt, the touch driver finds no
+   panel on the fx-CG100 profile. Two translator bugs fell out of it:
+   faults in helper C code are delivered to the guest, and the
+   inline-cache refill race (docs/04). Open: the grey field and the text
+   are missing from the frame (exact-colour fills and lines land, blits
+   with a dithered brush or a glyph mask do not).
 7. Keyboard and touch (written 2026-11-03, not yet compiled):
    `SRC\DRIVERS\KEYBD` is the Layout Manager MDD with a PDD that programs
    the SH7305 KEYSC like the fx-CG100 OS does, requests a SYSINTR for its
