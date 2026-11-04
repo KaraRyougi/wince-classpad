@@ -77,7 +77,8 @@ GWES image (/Users/kokutou/Downloads/ClasspadUI, 2.4 MB, 27 modules incl. gwes.d
   CalcFSPages: pages * byte / 256 per 2 MiB band). config.bib now sets FSRAMPERCENT=20202020 (12.5%); the image needs
   only "Make Run-Time Image" to pick it up.
 
-XIP (2026-11-04): config.bib now builds a ROMIMAGE at NOR P1 0x81000000 (ROMSTART/ROMSIZE 8 MiB, AUTOSIZE=OFF) with
+XIP (2026-11-04): config.bib now builds the image at NOR P1 0x81000000 (type RAMIMAGE, the only image type the tool
+  accepts: "Invalid memory type 'ROMIMAGE'"; ROMSTART/ROMSIZE 8 MiB, AUTOSIZE=OFF) with
   RAM = the whole guest window 0x8C101000..0x8CC7EFFF; tools/nkflash.py flattens such a .bin into the emulated NOR at
   start - 0x80000000 (a RAMIMAGE .bin is still padded and copied as before), and dbt/rt/main.c + nkbin.c take the XIP
   path when NK_FLASH holds no B000FF header but the ECEC marker at +0x40: ROMHDR read from flash, entry = nk.exe's

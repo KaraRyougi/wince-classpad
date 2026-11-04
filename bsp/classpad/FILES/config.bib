@@ -11,7 +11,7 @@ MEMORY
 ;   Name        Start     Size      Type
 ;   -------     --------  --------  ----
     BOOTARGS    8C100000  00001000  RESERVED    ; OAL argument page (unused for now)
-    NK          81000000  00800000  ROMIMAGE    ; 8 MiB of NOR, run in place
+    NK          81000000  00800000  RAMIMAGE    ; 8 MiB of NOR, run in place (RAMIMAGE is the only image type; XIP follows from the address)
     RAM         8C101000  00B7E000  RAM         ; up to 0x8CC7F000
     DBGRING     8CC7F000  00001000  RESERVED    ; translator debug ring (image_cfg.h CLASSPAD_DBG_RING_PA)
 

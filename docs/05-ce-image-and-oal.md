@@ -25,8 +25,9 @@ Where the image comes from (`dbt/rt/main.c`):
    `.g3a`; instead `HLE_OSROM=<file> HLE_OSROM_PAD=<offset>` places a file
    into the emulated NOR, and `tools/nkflash.py` (run by the Makefile for
    `make -C dbt NKBIN=/abs/NK.bin run`) decides what and where:
-   - a **ROMIMAGE** build (`config.bib` since 2026-11-03: `NK 81000000
-     ROMIMAGE`, `ROMSTART=81000000`) has its image start in the NOR's P1
+   - an **XIP** build (`config.bib` since 2026-11-03: `NK 81000000 ...
+     RAMIMAGE`, the only image type ROMIMAGE knows, with
+     `ROMSTART=81000000`) has its image start in the NOR's P1
      range; the `.bin` is flattened to the bytes the NOR holds and written
      at `start - 0x80000000`. The runtime finds the `ECEC` marker at
      `NK_FLASH + 0x40`, reads the ROMHDR (RAM range, kernel.dll's code
@@ -115,7 +116,7 @@ tools are still obtainable, so everything is built there.
 - **config.bib** (XIP, the current one in `bsp/classpad/FILES`):
   ```
   MEMORY
-      NK      81000000  00800000  ROMIMAGE
+      NK      81000000  00800000  RAMIMAGE
       RAM     8C101000  00B7E000  RAM
   CONFIG
       ROMSTART=81000000  ROMWIDTH=32  ROMSIZE=00800000
