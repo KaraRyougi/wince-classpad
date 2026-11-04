@@ -55,6 +55,24 @@ static sf_u32    g_cache_used;              /* bytes */
 static fpu_state g_fpu;
 static int       g_translating;             /* guest pc being translated or 0 */
 static sf_u32    g_translating_pc;
+/* Host return address (X1) of the helper call being served in C, 0 outside
+ * helpers: a helper's own guest memory access (fmov, mac) can miss the TLB
+ * like the instruction it emulates would, and the fault is then delivered
+ * at that instruction's guest pc, found from the return address, so the
+ * kernel maps the page and the instruction runs again (the helpers read
+ * before they post-increment). */
+static sf_u32    g_helper_ret;
+
+/* X1: the helper call's return address (the word after the call's delay slot). */
+static sf_u32 helper_return_address(void)
+{
+    register sf_u32 ret __asm__("r0");
+    __asm__ volatile (".word 0x009A" : "=r"(ret));              /* sts x1,r0 (DSP register code 9, as STSX in stubs.S) */
+    return ret;
+}
+
+/* Guest pc of the instruction a helper serves, from its return address. */
+static sf_u32 helper_guest_pc(sf_u32 ret, int *in_insn_range);
 static int guest_pc_fetchable(sf_u32 gpc);
 static void deliver_synthetic(sf_u32 gpc, sf_u32 expevt);
 static void print_stats(void);
@@ -682,7 +700,7 @@ static void print_stats(void)
     dbt_puts(" chained="); dbt_puthex(dbt_stat.chained);
     dbt_puts(" evicted="); dbt_puthex(dbt_stat.hash_evicted);
     dbt_puts(" ic_miss_c="); dbt_puthex(dbt_stat.ic_misses_c);
-    dbt_puts(" probe_faults="); dbt_puthex(dbt_stat.probe_faults);
+    dbt_puts(" probe_faults="); dbt_puthex(dbt_stat.probe_faults); dbt_puts("/"); dbt_puthex(dbt_stat.helper_faults);
     dbt_puts(" synth="); dbt_puthex(dbt_stat.synth_exceptions);
     dbt_puts("\n[dbt] inval="); dbt_puthex(dbt_stat.invalidations);
     dbt_puts(" dev="); dbt_puthex(dbt_stat.dev_accesses);
@@ -1073,6 +1091,18 @@ static int exc_c_body(dbt_gctx *ctx)
                 take_stub_context(ctx);
                 dbt_stat.probe_faults++;
                 trace_exc(ctx->host_spc, 0, 0, 0, 0, guest_pc, ctx->vec_off, 4);   /* 4: in the translator's C code (host = its pc) */
+            } else if (g_helper_ret) {
+                /* a helper's guest memory access faulted (TLB miss on a page
+                 * the kernel has not mapped yet, address error): deliver it
+                 * at the instruction the helper serves, as the hardware
+                 * would; the stub context is exact, the helper reads before
+                 * it writes back */
+                int insn;
+                guest_pc = helper_guest_pc(g_helper_ret, &insn);
+                g_helper_ret = 0;
+                take_stub_context(ctx);
+                dbt_stat.helper_faults++;
+                trace_exc(ctx->host_spc, 0, 0, 0, 0, guest_pc, ctx->vec_off, 5);   /* 5: in a helper's C code */
             } else {
                 dbt_puts("[dbt] exception outside translated code: spc="); dbt_puthex(ctx->host_spc);
                 dbt_puts(" expevt="); dbt_puthex(ctx->expevt); dbt_puts(" vec="); dbt_puthex(ctx->vec_off);
@@ -1171,6 +1201,7 @@ void dbt_fpu_c(dbt_gctx *ctx, sf_u32 arg)
     fpu_mem mem;
     int r;
     sf_u32 opcode = arg & 0xFFFFu;
+    g_helper_ret = helper_return_address();
     if (ctx->sr & SR_FD) {
         /* SR.FD: the FPU is disabled. The CE kernel runs every thread with
          * FD=1 and gives it the FPU on this exception (lazy context switch,
@@ -1181,23 +1212,17 @@ void dbt_fpu_c(dbt_gctx *ctx, sf_u32 arg)
          * exact in dbt_ctx_rt (the helper stub saved them before anything
          * ran); the call site's instruction range names the guest pc. X1
          * still holds the return address at this point. */
-        register sf_u32 ret __asm__("r0");
-        sf_u32 off, gpc;
-        dbt_block *b;
-        int idx;
-        __asm__ volatile (".word 0x009A" : "=r"(ret));          /* sts x1,r0 (DSP register code 9, as STSX in stubs.S) */
-        b = block_of_host(ret - 4);                               /* the jmp of the call sequence */
-        if (!b) dbt_halt("fpu helper return address not in a block");
-        off = ret - 4 - b->host_base;
-        idx = dbt_block_find(b, off);
-        if (idx < 0 || b->meta[idx].kind != META_INSN) dbt_halt("fpu helper outside an instruction range");
-        gpc = b->guest_pc + b->meta[idx].guest_off;
+        int insn;
+        sf_u32 gpc = helper_guest_pc(g_helper_ret, &insn);
+        if (!insn) dbt_halt("fpu helper outside an instruction range");
         dbt_stat.fpu_disabled++;
+        g_helper_ret = 0;
         deliver_synthetic(gpc, (arg & 0x10000u) ? 0x820 : 0x800);
     }
     mem.read32 = fpu_read32; mem.write32 = fpu_write32; mem.fetch16 = 0; mem.ctx = 0;
     dbt_stat.fpu_ops++;
     r = fpuemu_exec(&g_fpu, ctx->r, &ctx->sr, opcode, &mem);
+    g_helper_ret = 0;
     if (r != FPU_OK) {
         dbt_puts("[dbt] fpu op "); dbt_puthex(opcode); dbt_puts(" status "); dbt_puthex((sf_u32)r); dbt_puts("\n");
         if (r != FPU_EXCEPTION) dbt_halt("fpu emulation failed");
@@ -1237,10 +1262,11 @@ void dbt_fallback_c(dbt_gctx *ctx, sf_u32 opcode)
     int n = (opcode >> 8) & 0xF, m = (opcode >> 4) & 0xF;
     sf_u64 acc;
     if (opcode == 0x0038) { tlb_hook(); return; }           /* ldtlb */
+    g_helper_ret = helper_return_address();
     if ((opcode & 0xF00F) != 0x000F && (opcode & 0xF00F) != 0x400F) {
         sh_insn d;
         sh4_decode(opcode, &d);
-        if (d.kind == K_MEM) { dev_mem(ctx, &d); return; }
+        if (d.kind == K_MEM) { dev_mem(ctx, &d); g_helper_ret = 0; return; }
     }
     acc = ((sf_u64)ctx->mach << 32) | ctx->macl;
     if ((opcode & 0xF00F) == 0x000F) {                       /* mac.l */
@@ -1253,4 +1279,18 @@ void dbt_fallback_c(dbt_gctx *ctx, sf_u32 opcode)
         acc += (sf_u64)((sf_i64)(sf_i32)(sf_i32)(short)a * (sf_i64)(sf_i32)(short)b);
     }
     ctx->mach = (sf_u32)(acc >> 32); ctx->macl = (sf_u32)acc;
+    g_helper_ret = 0;
+}
+
+static sf_u32 helper_guest_pc(sf_u32 ret, int *in_insn_range)
+{
+    dbt_block *b = block_of_host(ret - 4);                      /* the jmp of the call sequence */
+    sf_u32 off;
+    int idx;
+    if (!b) dbt_halt("helper return address not in a block");
+    off = ret - 4 - b->host_base;
+    idx = dbt_block_find(b, off);
+    if (idx < 0) dbt_halt("helper return address outside the block's code");
+    *in_insn_range = b->meta[idx].kind == META_INSN;
+    return meta_start_pc(b, idx, &dbt_ctx_rt);
 }

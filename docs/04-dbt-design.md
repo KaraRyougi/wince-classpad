@@ -216,6 +216,15 @@ r2 (found the hard way with the TMU test).
 
 If SPC is inside translator C code (translation in progress), the exception
 can only be a TLB miss from the code probe; longjmp out and deliver as above.
+The same for a helper's own guest memory access (`fmov`, `mac`, the
+device-aware fallback): `dbt_fpu_c`/`dbt_fallback_c` note their return
+address (X1) in `g_helper_ret`, and a fault with SPC in C while it is set
+is delivered at the instruction the helper serves (found through the
+return address like the FPU-disable exception), with the hardware's
+EXPEVT/TEA and the exact stub context: the kernel maps the page and the
+instruction runs again (the helpers read before they post-increment).
+First hit by GWES's font metrics touching an unmapped page of gwes.dll
+(2026-11-04); counted as `probe_faults=a/b`, b being helper faults.
 
 ## Memory layout on the device
 
