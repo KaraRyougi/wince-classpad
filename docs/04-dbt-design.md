@@ -474,7 +474,17 @@ hit path: compare the guest target (parked in X0) with a cached guest pc held
 in a literal, and `jmp` to the cached host address held in the next literal.
 A miss goes to `dbt_lookup_ic` with X1 = address of the literal pair; the stub
 refills both words (data writes, read back through the operand cache) from
-its asm hash probe or, failing that, from C (`dbt_resolve_ic`). Both
+its asm hash probe or, failing that, from C (`dbt_resolve_ic`). The asm
+refill runs with interrupts live and a handler may execute the same site,
+so it writes pc = 1 (never matches), then the host, then the pc
+(2026-11-04): with pc first, an interrupt between the two stores left
+{new pc, old host}, a hit into the previous target or into host 0. Every
+run of a given binary failed or passed deterministically (the tick lands
+at the same instruction), which looked like a layout-sensitive bug; the
+intermittent "Faulted in KCall" of the Debug image was this too, the RTC
+edges being host-time based. Rule: a multi-word update that translated
+code can read must be ordered so that no interleaving pairs new with old,
+or run masked (C runs masked). Both
 literals start as {1, 0}, so the first execution always misses. A
 `jsr`/`rts` pair now costs about 29 host instructions instead of ~57 (the
 remaining cost: 4 for the PR literal, 1 to park the target, 10 per inline

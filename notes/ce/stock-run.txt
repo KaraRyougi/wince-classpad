@@ -63,6 +63,8 @@ Open, intermittent (2026-11-03): the Debug image sometimes dies after "FILESYS: 
   not deterministic. Every C path on the translation path that touches guest memory was checked (code probes,
   literal reads, debug ring: bounded, P1/P2); the flush path (cache_flush_all masked, invalidate_all_but_rom) is
   the suspect by correlation with flush frequency. Knobs: -DDBT_NO_BORROW, -DDBT_NO_ROMKEEP, -DMAX_BLOCKS=n.
+  Found 2026-11-04 (see below): the inline-cache refill in the lookup_ic stub wrote pc then host with interrupts
+  live; a tick between the stores and a handler running the same site jumped to the old host. Fixed in stubs.S.
 GWES image (/Users/kokutou/Downloads/ClasspadUI, 2.4 MB, 27 modules incl. gwes.dll, classpad_ddi.dll, classpad_hello.exe),
   2026-11-03, make BUILD=build-gwes NKBIN=... nkshot: kernel to POSTINIT, then
   "Exception 'Access Violation' PC=gwes.dll!WBITMAP::WBITMAP(GdiObjectHandle_t, Driver_t*)+0x2c BVA=00000104"
@@ -94,3 +96,11 @@ First XIP GWES image (2026-11-04, ~/Downloads/ClasspadUI/RelDir, 2.5 MB ROM at 0
   (colour bars, frame). Then "[dbt] exception outside translated code: spc=fpu_read32 expevt=00000040 tea=c010056c"
   (gwes.dll!bIFIMetricsToTextMetricW2: the font metrics use the FPU and the helper's read of an unmapped gwes.dll page
   missed the TLB in C). Helper faults are now delivered at the helper's instruction (docs/04, "Exceptions").
+IC refill race (2026-11-04): the XIP GWES image with the helper-fault change died deterministically after POSTINIT
+  (reset loop or a jump to host 0), while without the two added instructions in dbt_fallback_c it ran on; a padding
+  variant with the same code size failed the same way, the bss layout was identical, so it was tick timing: the
+  extra instructions per fallback call shift every later tick. The traced run ended with "exception outside
+  translated code: spc=00000000" right after interrupt windows. Cause: dbt_lookup_ic's asm refill (hash hit)
+  stored the guest pc before the host; an interrupt in between, with the handler executing the same call site,
+  hit {new pc, old host}: host 0 after reset_ic, or the previous target (silent wrong return, the Debug image's
+  "Faulted in KCall"). The refill now writes pc=1, host, pc.

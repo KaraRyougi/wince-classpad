@@ -163,9 +163,17 @@ _dbt_\name:
         mov.l   r1, @r2                /* patch the link literal */
         .endif
         .if \ic
+        /* Refill the inline cache. Interrupts are live here, and a handler
+         * may run this very site: write the pair so that no interleaving
+         * can pair the new pc with the old host (the halt at host 0, or a
+         * silent jump into the wrong block): pc = 1 (never matches), then
+         * the host, then the pc. r0 is reloaded from X0 afterwards. */
         STSX    SLOT_X1, 2
-        mov.l   r0, @r2                /* refill the inline cache: guest pc, host */
+        mov     #1, r0
+        mov.l   r0, @r2
         mov.l   r1, @(4, r2)
+        STSX    SLOT_X0, 0
+        mov.l   r0, @r2
         .endif
         bra     _dbt_tail_hit
         nop
