@@ -19,7 +19,9 @@ static int g_touchX = -1, g_touchY = -1, g_touchDown;
 
 static void Log(HWND hWnd, LPCTSTR text)
 {
-    lstrcpyn(g_log[g_logCount % LOG_LINES], text, 64);
+    TCHAR *line = g_log[g_logCount % LOG_LINES];
+    wcsncpy(line, text, 63);            // CE's coredll has no lstrcpyn
+    line[63] = 0;
     g_logCount++;
     RETAILMSG(1, (TEXT("CLASSPAD HELLO: %s\r\n"), text));
     InvalidateRect(hWnd, NULL, FALSE);
