@@ -75,7 +75,7 @@ XIP since 2026-11-03 (above), giving CE the whole 11.5 MiB window. The block
 table was compacted on 2026-10-22 (fixed per-block arrays became a shared
 metadata arena: bss 2.3 MiB -> 1.2 MiB while the block limit rose from 768
 to 2048) and the translator region shrunk from 3 MiB to 1.5 MiB. The other
-lever is building the OS as a **ROMIMAGE** executing in place from flash
+lever is building the OS as an **XIP image** executing in place from flash
 (ROMSTART in the `0x81xxxxxx` P1 flash range), which the translator already
 supports since guest code may live anywhere it can fetch from; only the
 copy entries (`.data`) and the kernel's RAM then use guest RAM.
@@ -126,7 +126,7 @@ tools are still obtainable, so everything is built there.
   (the first images were a RAMIMAGE inside the guest window with
   AUTOSIZE=ON; the loader still accepts those)
   (`AUTOSIZE` lets ROMIMAGE move the RAM start up to the real image end.)
-  Second iteration: `NK 81000000 ... ROMIMAGE` with RAM at `8C100000`.
+  Second iteration (done 2026-11-04): `NK 81000000 ... RAMIMAGE` with `ROMSTART=81000000` and RAM at `8C101000`.
 - **Debug output**: `OEMInitDebugSerial` does nothing, `OEMWriteDebugByte`
   issues the translator's `trapa #0xF3` hypercall (one byte in r4) when
   SR.BL is clear. The kernel calls `OEMInitDebugSerial`, the sign-on string
@@ -253,8 +253,8 @@ What the kernel sources settled (2026-11-02, notes/ce/kernel-sh-notes.md):
 4. `make -C dbt NKBIN=NK.bin run`: expect the kernel banner on stdout,
    then the first scheduler tick. Fix what breaks.
 5. Memory: ~~compact block metadata; move the translator region down and
-   widen the guest window~~ (done, 11.5 MiB guest window); move to ROMIMAGE
-   in flash.
+   widen the guest window~~ (done, 11.5 MiB guest window); ~~move to XIP
+   in flash~~ (done 2026-11-04, the first XIP CE image pending a VM build).
 6. Display driver (written 2026-11-03: `bsp/classpad/SRC/DRIVERS/DISPLAY`,
    GPE with a RAM frame buffer and a push thread to the R61524; a hello
    window app; registry and bib entries; `make nkshot` for a screenshot of
