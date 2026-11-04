@@ -637,7 +637,7 @@ static void invalidate_all_but_rom(void)
 #define HC_SYNTH  0xF8                  /* translator-internal: deliver a synthetic exception (r4 = guest pc, r5 = EXPEVT) */
 #define HC_TLB_INVAL 0xF9               /* kernel: user mappings in [r4, r4+r5) changed (r5 = 0: all) */
 #define HC_ASID   0xFA                  /* kernel: address space switched to ASID r4 */
-#define HC_GETSTAT 0xFB                 /* r4 = index -> r0 (0 translations, 1 blocks, 2 invalidations, 3 asid switches, 4 ic misses, 5 debug-ring bytes, 6 device accesses, 7 full flushes, 8 FPU-disable exceptions) */
+#define HC_GETSTAT 0xFB                 /* r4 = index -> r0 (0 translations, 1 blocks, 2 invalidations, 3 asid switches, 4 ic misses, 5 debug-ring bytes, 6 device accesses, 7 full flushes, 8 FPU-disable exceptions, 9/10 device-aware range lo/hi) */
 #define HC_DEVRANGE 0xFC                /* tests: translate [r4, r5) device-aware from now on (drops all translations at the next lookup) */
 
 #define REG_EXPEVT (*(volatile sf_u32 *)0xFF000024u)
@@ -739,6 +739,8 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
         case 6: v = dbt_stat.dev_accesses; break;
         case 7: v = dbt_stat.flushes; break;
         case 8: v = dbt_stat.fpu_disabled; break;
+        case 9: v = g_env.dev_lo; break;
+        case 10: v = g_env.dev_hi; break;
         }
         ctx->r[0] = v;
         return RT_ACT_RESUME;

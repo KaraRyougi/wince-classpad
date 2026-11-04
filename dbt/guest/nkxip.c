@@ -21,12 +21,27 @@ struct romhdr {                        /* ROMHDR, CE 6.0 layout */
 
 #define ROM_BASE 0x81000000u
 
-const struct romhdr nk_romhdr = {
-    0, 0, ROM_BASE, (unsigned)rom_end_, 0,
-    GUEST_RAM_LO, (unsigned)bss_end_, GUEST_RAM_HI, 0, 0,
-    0, 0, 0, 0, 0, 0, 0,
-    0x01A6, 0,                         /* SH4 */
-    0, 0, 0
+/* A module table with one entry, "kernel.dll", whose single code section
+ * lies below its load address (as ROMIMAGE lays out a Release kernel.dll):
+ * the loader must make exactly that section device-aware, not
+ * load..load+vsize. The runtime reports its range through getstat 9/10. */
+struct tocentry { unsigned attrs, tlo, thi, fsize, name, e32, o32, load; };
+struct e32_rom { unsigned short objcnt, imageflags; unsigned entryrva, vbase; unsigned short subsysmajor, subsysminor;
+                 unsigned stackmax, vsize, sect14rva, sect14size, timestamp; unsigned unit[18]; };
+struct o32_rom { unsigned vsize, rva, psize, dataptr, realaddr, flags; };
+#define KCODE_LO (ROM_BASE + 0x100)
+#define KCODE_HI (ROM_BASE + 0x300)
+static const char kname[] = "kernel.dll";
+static const struct e32_rom k_e32 = { 1, 0, 0, ROM_BASE + 0x2000, 0, 0, 0, 0x1000, 0, 0, 0, { 0 } };
+static const struct o32_rom k_o32[1] = { { KCODE_HI - KCODE_LO, 0x1000, KCODE_HI - KCODE_LO, 0, KCODE_LO, 0x60000020u } };
+
+const struct { struct romhdr h; struct tocentry toc[1]; } nk_romhdr = {
+    { 0, 0, ROM_BASE, (unsigned)rom_end_, 1,
+      GUEST_RAM_LO, (unsigned)bss_end_, GUEST_RAM_HI, 0, 0,
+      0, 0, 0, 0, 0, 0, 0,
+      0x01A6, 0,                         /* SH4 */
+      0, 0, 0 },
+    { { 0, 0, 0, 0, (unsigned)kname, (unsigned)&k_e32, (unsigned)k_o32, ROM_BASE + 0x2000 } }
 };
 
 static int fails;
@@ -55,10 +70,12 @@ void guest_main(void)
     check(".bss is zero", nz == 0);
     check("ECEC marker at image+0x40", marker[0] == 0x43454345u);    /* "ECEC" little-endian */
     h = (const struct romhdr *)marker[1];
-    check("ROMHDR pointer", h == &nk_romhdr && ((unsigned)h & 0xFF000000u) == 0x81000000u);
+    check("ROMHDR pointer", h == &nk_romhdr.h && ((unsigned)h & 0xFF000000u) == 0x81000000u);
     check("ROMHDR fields", h->usCPUType == 0x01A6 && h->physfirst == ROM_BASE && h->ulRAMEnd == GUEST_RAM_HI);
     data_probe[2] = 0x55;                                              /* RAM is writable, flash was not touched */
     check("RAM data writable", data_probe[2] == 0x55);
+    check("kernel.dll code range from its sections", hc_getstat(9) == KCODE_LO && hc_getstat(10) == KCODE_HI);
+    hc_puts("dev range "); hc_puthex(hc_getstat(9)); hc_puts(".."); hc_puthex(hc_getstat(10)); hc_putc('\n');
     hc_puts("physlast "); hc_puthex(h->physlast); hc_puts(" pc "); hc_puthex(pc); hc_putc('\n');
     hc_stats();
     hc_puts(fails ? "RESULT: FAIL\n" : "RESULT: PASS\n");
