@@ -18,9 +18,8 @@ int nkbin_is_image(const sf_u8 *p)
  * [lo, hi) (guest RAM after a .bin load, the NOR for an XIP image). */
 static void parse_rom(sf_u32 start, sf_u32 lo, sf_u32 hi, nkbin_info *out)
 {
-{
-    const sf_u8 *m = (const sf_u8 *)(out->start + 0x40);
-    if (out->start + 0x48 <= hi && out->start >= lo && m[0] == 'E' && m[1] == 'C' && m[2] == 'E' && m[3] == 'C') {
+    const sf_u8 *m = (const sf_u8 *)(start + 0x40);
+    if (start + 0x48 <= hi && start >= lo && m[0] == 'E' && m[1] == 'C' && m[2] == 'E' && m[3] == 'C') {
         const sf_u8 *h;
         out->romhdr = le32(m + 4);
         if (out->romhdr >= lo && out->romhdr + 0x60 <= hi) {
@@ -48,16 +47,15 @@ static void parse_rom(sf_u32 start, sf_u32 lo, sf_u32 hi, nkbin_info *out)
                          * IMAGE_SCN_CNT_CODE 0x20): ROMIMAGE places them
                          * anywhere, a Release kernel.dll's text starts below
                          * its load address. Fallback: load .. load+e32_vsize */
-                        sf_u32 o32 = le32(te + 24), nobj = le16((const sf_u8 *)e32), j, lo = 0xFFFFFFFF, hi = 0;
-                        (void)load;
+                        sf_u32 o32 = le32(te + 24), nobj = le16((const sf_u8 *)e32), j, clo = 0xFFFFFFFF, chi = 0;
                         for (j = 0; j < nobj && j < 32 && o32 >= lo && o32 + 24 <= hi; j++, o32 += 24) {
                             const sf_u8 *o = (const sf_u8 *)o32;
                             sf_u32 vsize = le32(o), real = le32(o + 16), flags = le32(o + 20);
                             if (!(flags & 0x20) || !vsize) continue;
-                            if (real < lo) lo = real;
-                            if (real + vsize > hi) hi = real + vsize;
+                            if (real < clo) clo = real;
+                            if (real + vsize > chi) chi = real + vsize;
                         }
-                        if (hi) { out->kernel_lo = lo; out->kernel_hi = hi; }
+                        if (chi) { out->kernel_lo = clo; out->kernel_hi = chi; }
                         else { out->kernel_lo = load; out->kernel_hi = load + le32((const sf_u8 *)e32 + 20); }
                         break;
                     }
@@ -65,7 +63,6 @@ static void parse_rom(sf_u32 start, sf_u32 lo, sf_u32 hi, nkbin_info *out)
             }
         }
     }
-}
 }
 
 int nkbin_load(const sf_u8 *bin, sf_u32 maxlen, sf_u32 ram_lo, sf_u32 ram_hi, nkbin_info *out)
