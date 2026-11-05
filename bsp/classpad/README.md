@@ -115,14 +115,15 @@ fires but the key is up again before the IST or the 20 ms poll reads the
 matrix, so they show nothing with this driver. The tick count is a guide:
 the window is up well before tick 1.2 million in a Release image.
 
-The same works on the emulator's ClassPad profile (`EMU_MODEL=fx-cp400`,
-needs `dbt/emu-patch/add_classpad_addin.py` applied to casio-emu; the
-320x528 panel, the IIC0 sensor and INTC priorities), which also takes a
-headless stylus press:
+The emulator's ClassPad profile is the target and `dbt/Makefile`'s default
+since 2026-11-05 (`EMU_MODEL=fx-cp400`, needs `dbt/emu-patch/add_classpad_addin.py`
+applied to casio-emu; the 320x528 panel, the IIC0 sensor and INTC
+priorities; fx-CG100 runs are no longer part of the workflow). It also
+takes a headless stylus press:
 
     HLE_CB_CHORD=72,74 HLE_CB_CHORD_AT=1200000 HLE_CB_CHORD_HOLD=30000 \
     HLE_CB_TOUCH=160,264 HLE_CB_TOUCH_AT=1350000 HLE_CB_TOUCH_HOLD=30000 \
-        make -C dbt EMU_MODEL=fx-cp400 NKBIN=/abs/NK.bin RUN_SECS=400 nkshot
+        make -C dbt NKBIN=/abs/NK.bin RUN_SECS=400 nkshot
 
 (`[INJECTTOUCH down] 160 264 at tick ...` on the emulator side). The
 2026-11-05 image boots there to the same hello window and key events, but

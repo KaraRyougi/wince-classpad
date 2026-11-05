@@ -350,8 +350,10 @@ build`) changes three things:
   packet, Port R bit 5, INTEVT 0x700 on the down edge. It prints
   `[INJECTTOUCH down] x y at tick N` and `[INJECTTOUCH up]`.
 
-`dbt/Makefile` has `EMU_MODEL ?= fx-cg100`; `EMU_MODEL=fx-cp400` selects
-the ClassPad profile for `run`, `nkrun`, `nkshot` and `screenshot`:
+`dbt/Makefile` has `EMU_MODEL ?= fx-cp400` (the ClassPad is the target; the
+default was fx-cg100 until 2026-11-05, and `EMU_MODEL=fx-cg100` still runs
+that profile for a comparison, nothing more) for `run`, `nkrun`, `nkshot`
+and `screenshot`:
 
     HLE_CB_CHORD=72,74 HLE_CB_CHORD_AT=1200000 HLE_CB_CHORD_HOLD=30000 \
     HLE_CB_TOUCH=160,264 HLE_CB_TOUCH_AT=1350000 HLE_CB_TOUCH_HOLD=30000 \
