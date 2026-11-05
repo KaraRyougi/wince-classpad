@@ -231,3 +231,17 @@ Open (2026-11-04 evening): with the three fixes above the blit-logging image sti
   Needs another KEYBD rebuild. The ClassPad profile run otherwise matched the fx-CG100 one line for line (IST up,
   interrupts 2 and 3 for the chord, scans 22/38).
 
+2026-11-05, first ClassPad image (ClasspadUI RelDir, NK.bin 05:56 VM time; copy notes/ce/NK-fix5.bin, screenshot
+  notes/ce/hello-cp400.png, both ignored; commits 6dc3d93 keyboard fKeyUp + def3c89 DCS panel/320x528/Matrix=1), run on
+  the ClassPad profile with HLE_CB_CHORD=72,74 at 1.2M for 30000 ticks and HLE_CB_TOUCH=160,264 at 1.35M for 30000
+  ticks, 400 s: "DDI: 320x528 16bpp, DCS fx-CP400 panel, frame buffer d0310000, stride 640"; "KEYBD: device layout
+  fx-CP400"; "TOUCH: display 320x528 -> fx-CP400 panel", "enabled, SYSINTR 17, IIC0 sensor"; hello window 320x528.
+  Keys: scan 22/38 down, then hello "key down vk=C0 sc=22" ('^' on the fx-CP400 table, char '`'), "key down vk=28
+  sc=38" (VK_DOWN), ONE auto-repeat of 38 during the 0.9 s hold, then "key up" for both after the chord up: the
+  fKeyUp fix is right and the repeat storm is gone. Touch: "down raw (2076,1942) contact 1", 67 samples from the DDSI
+  sample thread during the hold, "up raw ... after 67 samples", hello "touch down 160,264" / "touch up 160,264": the
+  registry CalibrationData maps the emulator's stylus exactly. The screenshot shows the 320x528 window with bars,
+  grey field, frame, text, the event log and the green crosshair at (160,264). hello reached tick 12 in 400 s (the
+  528-row push is slower than the 216-row one). Everything the ClassPad target needed from docs/05 section 5 is in
+  and verified; nothing is known to be open for this image on the emulator.
+
