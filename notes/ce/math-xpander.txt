@@ -1,0 +1,33 @@
+Math Xpander 1.0 (Saltire Software, 2001) on the ClassPad CE 6.0 image: dependency survey, 2026-11-05
+
+Source: ~/Downloads/XpanderSetup.exe, an InstallShield 6 self-extractor (unshield -g '[Windows CE Files]...' x
+data1.cab) holding three Pocket PC 2000 (CE 3.0) cabinets: Xpander.PPC300_2577.cab (ARM), _4000 (MIPS),
+_10003 (SH3; copy at notes/ce/Xpander.PPC300_10003.cab, not committed). The SH3 cabinet (bsdtar -xf) holds
+24 PE files + help/bitmap files; the manifest (XPANDE~2.000) installs to %CE1%\Xpander (\Program Files\Xpander),
+a Start-menu link, the .mwb workbook file type, and runs regsvrce.exe once.
+
+PE facts (scratch tools/peimports.py): every binary is machine 0x1A2 (SH3), subsystem 9, CE version 3.0.
+MathXpander.exe imports NumericCAS, Workbook, Common, mfcce300 (56 symbols) and coredll (13). The 23 DLLs link
+each other by name (not COM); regsvrce.exe is the only user of ole32 (CoInitializeEx/CoUninitialize) and of
+aygshell (ordinals 9, 56, 83, 84).
+
+External dependencies:
+- coredll: 253 ordinals, all present in CE 6's unfiltered coredll.def (PUBLIC\COMMON\OAK\LIB\SH4\retail); 85 of
+  them are GWES/GDI (windows, dialogs, menus, caret, clipboard, ImageList, DrawText, BitBlt...), the rest C runtime,
+  registry, threads, SIP (SipShowIM/SipGetInfo/SipGetCurrentIM/SipSetCurrentIM) and the SH3 software floating
+  point helpers (_addd, _divd, _dtoi, _muli64...), which the SH4 coredll still exports. Nothing kernel-ish
+  (no MapPtrToProcess, SetKMode, VirtualCopy...). The GWES image must include the headless build's missing
+  ordinals (it does with Minimal GWES/GDI/Window Manager + Standard Shell).
+- mfcce300.dll: MFC CE 3.0 runtime, SH3 build, NOT in the cabinet (Pocket PC 2000 had it in ROM) and not in
+  CE 6 or on the VM. Needed by 8 of the binaries (460 symbols). Source: eMbedded Visual C++ 3.0 /
+  Pocket PC 2000 SDK (Windows CE Tools\wce300\MS Pocket PC\mfc\lib\sh3\mfcce300.dll). Its own imports (commctrl,
+  possibly olece300/oleaut) are to be checked when the file is in hand.
+- ndosspal.dll (856 exports, imports coredll only): Saltire's own base library, in the cabinet.
+- commctrl: not imported directly (through MFC); in the image.
+
+Gates on our side:
+1. Loader: SH3 machine type -> bsp/kernel/loader-sh3-images.patch (accepts 0x1A2/0x1A3 on SH4).
+2. Putting the files in the image: list them in a .bib (FILES section, \Windows or a ROM folder) or load them
+   from a storage card / RAM file system; the registry entries from the manifest (file type, link) are optional.
+3. Screen: laid out for 240x320; fits in 320x528.
+Untested: nothing has been run yet.
