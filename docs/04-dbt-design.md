@@ -400,7 +400,32 @@ via hypercall 0xF1):
   TLB-invalidate and address-space-switch paths therefore issue F9/FA
   (docs/05).
 - Resume rules: translated code uses the block metadata (restart the
-  instruction, or the branch target after a delay slot). Inside the stubs,
+  instruction, or the branch target after a delay slot). The resume pc is
+  read before the pending scratch spills are undone (`META_COND_REG` reads
+  the T value a slot saved in a scratch), so a register the pc comes from
+  (`META_TARGET_REG`) must never be a scratch of the delay slot: the slot
+  is translated with `slot_avoid` = the target register and the kept PR
+  scratch (2026-11-04). Before that, kernel.dll `SwitchActiveProcess`'s
+  `jsr @r3; mov.l r1,@(12,r2)` (no borrow in that block) swapped r1
+  through r3, an interrupt on the `sts` restoring r3 found the store
+  committed and resumed "at the target" = byteswap(process id):
+  "Alignment Error" at PC=02002501 with RA = the jsr's return, once per
+  boot at a fixed tick (`tmu` loop `loop_jsrtgt`, swept over eight timer
+  periods, hangs the old runtime; unit test 20c). The helper
+  prologue window (the three parks before the stub masks interrupts)
+  resumes at the calling instruction, X1 - 2, but applies the block's
+  spill records as of the return address X1: the call's delay slot
+  `sts Y0,rT` has run, so the scratch's record (open through the slot's own
+  offset) is closed, and the prologue has already put r0 into Y0. Until
+  2026-11-04 the records were applied at X1 - 2 and the scratch took r0's
+  value: with rT = r1 in KCall's epilogue, `mov.b @r1,r0` ran with r1 = the
+  wait's return value (0 or WAIT_TIMEOUT = 102) in most boots of the
+  blit-logging GWES image (`Exception 040 ... TEA=00000102` from the
+  kernel, whose register dump is the KCall caller's frame; the translator's
+  own null-page dump, printed for the first four data faults below 0x1000,
+  showed the real pc and registers). The `tmu` test's `loop_ldcsr` sweeps
+  interrupts over an `ldc rm,sr` per iteration and fails on the old
+  runtime. Inside the stubs,
   window labels (`dbt_lk_s*`, `dbt_hit_*`, `dbt_full_m*`, `dbt_h*_s*`) tell
   the handler which of r0-r3 are still parked in the DSP slots.
 - Known v1 limits: FPU memory operands and guest code must be in unmapped
@@ -484,8 +509,13 @@ at the same instruction), which looked like a layout-sensitive bug; the
 intermittent "Faulted in KCall" of the Debug image was this too, the RTC
 edges being host-time based. Rule: a multi-word update that translated
 code can read must be ordered so that no interleaving pairs new with old,
-or run masked (C runs masked). Both
-literals start as {1, 0}, so the first execution always misses. A
+or run masked (C runs masked: the lookup and helper stubs raise IMASK
+before calling it, and casio-emu's fx-CG100 profile delivers peripheral
+interrupts only at IMASK=0, `interpreter.c`). The chaining patches
+(`link_direct`, `unchain`) are covered by that mask; their intermediate
+states would not be safe otherwise (form A's first store alone leaves
+[restore, restore, mov.l, jmp @rT, sts X0,rT], the scratch's spill gone).
+Both literals start as {1, 0}, so the first execution always misses. A
 `jsr`/`rts` pair now costs about 29 host instructions instead of ~57 (the
 remaining cost: 4 for the PR literal, 1 to park the target, 10 per inline
 cache, and 4 for `rts` to move PR into X0). Blocks grew by 24 bytes, which
@@ -613,7 +643,13 @@ cap halved the boot took 13 % longer for 16 k more translations: about
 two whole-cache instruction flushes (InitModule, CreateNewProcHelper, 8 per
 boot) made the translator drop every translation; now blocks whose code lies
 in the ROM image are kept (XIP, never written; `hcflush=` calls / all and
-`romkept=` in the statistics).
+`romkept=` in the statistics). The decision uses the physical address of
+the block's code: for P1/P2 code it is the pc itself, for user pcs and the
+kernel's TLB-mapped range (0xC0000000 up: kernel-mode DLL mappings and
+kernel `VirtualAlloc`) it comes from the UTLB at translation time (until
+2026-11-04 the kernel range was also keyed by pc & 0x1FFFFFFF, so a kernel
+VA whose low bits fell inside the ROM's physical range, say 0xC1xxxxxx, was
+taken for ROM and a translation of a reused page survived the flush).
 
 ## Test platform
 

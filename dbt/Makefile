@@ -6,7 +6,9 @@ OBJCOPY  := $(PREFIX)objcopy
 OBJDUMP  := $(PREFIX)objdump
 GUEST    ?= hello
 EMU      ?= $(HOME)/Dev/casio-emu
-BUILD    ?= build        # override per run (make BUILD=build-x ...) so runs can go in parallel
+# override BUILD per run (make BUILD=build-x ...) so runs can go in parallel; a
+# trailing comment on the assignment would keep its spaces in the value
+BUILD    ?= build
 
 # RAM layout (16 MiB at 0x8C000000), the single place these addresses live:
 #   0x8C000000-0x8C0FFFFF  launcher workspace (casio-emu starts us with sp=0x8C080000)

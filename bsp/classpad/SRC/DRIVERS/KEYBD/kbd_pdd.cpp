@@ -146,6 +146,18 @@ static DWORD WINAPI KeyscIst(LPVOID)
 
     for (;;) {
         DWORD rc = WaitForSingleObject(g_hevInterrupt, pollMs);
+        if (rc == WAIT_FAILED) {
+            // Seen under the translator (2026-11-04): the kernel refuses the wait
+            // (ERROR_OPERATION_ABORTED, the interrupt event still lists this
+            // thread's previous proxy). Spinning here at IST priority starved
+            // GWES and the display push thread; say so once and keep polling.
+            static BOOL s_said;
+            if (!s_said) {
+                s_said = TRUE;
+                RETAILMSG(1, (TEXT("CLASSPAD KEYBD: WaitForSingleObject failed, error %d: polling only\r\n"), GetLastError()));
+            }
+            Sleep(pollMs);
+        }
         if (rc == WAIT_OBJECT_0) {
             wakeups++;
             if (wakeups <= 10 || (wakeups % 100) == 0)

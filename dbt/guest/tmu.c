@@ -25,7 +25,8 @@ unsigned loop_trapa(unsigned, volatile unsigned *), loop_alu(unsigned, volatile 
          loop_ld(unsigned, volatile unsigned *), loop_ldpost(unsigned, volatile unsigned *), loop_ldself(unsigned, volatile unsigned *),
          loop_st(unsigned, volatile unsigned *), loop_stpre(unsigned, volatile unsigned *), loop_r0idx(unsigned, volatile unsigned *),
          loop_r0disp(unsigned, volatile unsigned *), loop_rmw(unsigned, volatile unsigned *), loop_pcrel(unsigned, volatile unsigned *),
-         loop_jsr(unsigned, volatile unsigned *), loop_jsrslot(unsigned, volatile unsigned *), loop_pushpop(unsigned, volatile unsigned *);
+         loop_jsr(unsigned, volatile unsigned *), loop_jsrslot(unsigned, volatile unsigned *), loop_pushpop(unsigned, volatile unsigned *),
+         loop_ldcsr(unsigned, volatile unsigned *), loop_jsrtgt(unsigned, volatile unsigned *);
 static int fails;
 volatile unsigned ticks, last_intevt, bad_intevt, fatal_vec;
 volatile unsigned irq_regs[18];                 /* r0-r15, spc, ssr of the interrupted code (tmu_vectors.S) */
@@ -71,6 +72,17 @@ static unsigned work(unsigned n)
         scratch[(i + 5) & 15] += h;
     }
     return a ^ b ^ c ^ d ^ e ^ f ^ g ^ h ^ scratch[3];
+}
+
+/* Restart channel 0 with another period: the tick is an instruction count,
+ * so a loop of fixed length sees it at the same phases; several periods
+ * sweep the interrupt over every host instruction of a construct. */
+static void tmu_period(unsigned p)
+{
+    mmio_w8(TSTR, mmio_r8(TSTR) & (unsigned char)~1u);
+    mmio_w32(TCOR0, p);
+    mmio_w32(TCNT0, p);
+    mmio_w8(TSTR, mmio_r8(TSTR) | 1u);
 }
 
 static void tmu_setup(void)
@@ -157,6 +169,40 @@ void guest_main(void)
             check(loops[k].name, got == expect && ticks > before + 1);
         }
     }
+    /* a helper call per iteration: interrupts land in the helper's prologue
+     * window (before it masks them), in its exit tail and in the call
+     * sequence. The prologue reuses the slot the caller's scratch was
+     * spilled to; a resume there must not undo that spill (2026-11-04: the
+     * scratch, r1 here, took r0's value once in a few thousand ticks). */
+    irq_disable();
+    expect = loop_ldcsr(200000, scratch);
+    irq_enable();
+    before = ticks;
+    got = loop_ldcsr(200000, scratch);
+    if (got != expect) { hc_puts("  expect "); hc_puthex(expect); hc_puts(" got "); hc_puthex(got); hc_putc('\n'); }
+    check("ldc sr helper under interrupts", got == expect && ticks > before + 50);
+
+    /* a jsr whose delay-slot store uses the target register as its swap
+     * scratch: an interrupt on the scratch's restore must resume at the
+     * guest's target, not at the swapped store data (2026-11-04) */
+    irq_disable();
+    expect = loop_jsrtgt(50000, scratch);
+    before = ticks;
+    {
+        unsigned bad = 0, k;
+        for (k = 0; k < 8; k++) {
+            irq_disable();
+            tmu_period(PERIOD - 1 - 7 * k);
+            irq_enable();
+            got = loop_jsrtgt(50000, scratch);
+            if (got != expect) { bad++; hc_puts("  period "); hc_puthex(PERIOD - 1 - 7 * k); hc_puts(" expect "); hc_puthex(expect); hc_puts(" got "); hc_puthex(got); hc_putc('\n'); }
+        }
+        irq_disable();
+        tmu_period(PERIOD);
+        irq_enable();
+        check("jsr with the slot store's scratch = target register", bad == 0 && ticks > before + 100);
+    }
+
     irq_disable();
     expect = work(60000);
     irq_enable();

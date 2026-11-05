@@ -104,3 +104,50 @@ IC refill race (2026-11-04): the XIP GWES image with the helper-fault change die
   stored the guest pc before the host; an interrupt in between, with the handler executing the same call site,
   hit {new pc, old host}: host 0 after reset_ic, or the previous target (silent wrong return, the Debug image's
   "Faulted in KCall"). The refill now writes pc=1, host, pc.
+Helper prologue window (2026-11-04): the blit-logging image (classpad_ddi.cpp prints the first 48 blits) died in most
+  untraced runs after the first logged blit, later after "push 200": "Exception 040 Thread=... PC=81021de2
+  (DoWaitForObjects+0x12a) R0=102 TEA=102", then the same in another thread at kernel.dll!KCall+0x2c, "mov.b @r1,r0"
+  with r1 = 102 (or 0), where r1 should hold the literal loaded at KCall+0x1e; then DoRtlDispatchException forever.
+  The kernel's register dump is the KCall caller's frame, so it misled; the translator now prints the first four data
+  faults below 0x1000 itself ("[dbt] null-page fault": host pc, block, host words, guest registers, slots), and that
+  showed block 8100d112 entered with r0 = r1 = r3 = 0 right after the `ldc r7,sr` helper. Cause: an interrupt in the
+  helper stub's prologue (three parks before it masks interrupts) resumes at the calling instruction X1 - 2 and
+  applied the block's spill records at that offset, where the call's scratch (r1, spilled to Y0 around the call and
+  restored by the jmp's delay slot) still counted as spilled, while the prologue had already parked r0 in Y0: r1 took
+  r0's value (WAIT_TIMEOUT or WAIT_OBJECT_0 from the wait the KCall returned). The records are now applied as of the
+  return address X1. Timing-dependent per binary (the emulator's ticks are instruction counts), which is why a traced
+  build never hit it; the tmu test's new loop_ldcsr reproduces it on the old runtime in one run. Not the cause,
+  although suspected first: dbt_chain_direct's two-word patch (the lookup stubs raise IMASK before C, and casio-emu's
+  fx-CG100 profile only delivers peripheral interrupts at IMASK=0, interpreter.c).
+  Also fixed: the ROM-kept decision at a whole-cache flush keyed kernel VAs (0xC0000000 up) by pc & 0x1FFFFFFF; they
+  now go through the UTLB like user pcs (a 0xC1xxxxxx page reused for new code could keep a stale translation).
+Resume before undo (2026-11-04): with the window fix the same image died at hello tick 100 in all three runs:
+  "Exception 'Alignment Error' (7) ... PC=02002501 RA=81015d10 (SwitchActiveProcess+0x2c)". 02002501 is the hello
+  process id 01250002 byte-swapped: the jsr @r3 at SwitchActiveProcess+0x28 has `mov.l r1,@(12,r2)` (dwActvProcId)
+  in its slot, the block has no borrowed register (score 0), so the store swaps r1 through r3, the jump's own
+  target register; an interrupt on the `sts` that restores r3 found the store committed, resumed "at the target"
+  = r3 = swapped data, and the rte into 02002501 raised the synthetic address error. Undoing the spills before
+  reading the pc is wrong for bt/s|bf/s with a T-writing slot (META_COND_REG reads the saved T from a scratch:
+  tmu "bt/s with dt in the slot" failed that way), so the translator now keeps a delay slot's scratches off the
+  branch's target register and the kept PR scratch (slot_avoid). tmu: loop_jsrtgt over eight timer periods (the
+  tick is an instruction count, one period sees one phase); unit test 20c.
+Blit log (2026-11-04, 48 blits of the hello window): 8 bar fills (F0F0, solid colours), the grey field
+  (F0F0 0,36-384,216 colour 630C = RGB 96,96,96), then F0F0 5,41-379,211 colour FFFF: GDI's Rectangle fills its
+  interior with the DC's brush, the stock white one, and the three text blits (AAF0, 1bpp mask, colour FFFF) are
+  white on that white. The display path was right all along; hello.c now selects the hollow brush around Rectangle.
+  Everything the window draws went through the solid-fill and text paths of GPE's EmulatedBlt; nothing hit GenBlt.
+Open (2026-11-04 evening): with the three fixes above the blit-logging image still stops in about half of the runs,
+  at a tick phase that depends on the binary and on host time, without any exception: after a while no "tick",
+  no "push" and no paint. Diagnosis (casio-emu HLE_KEYLOG, HLE_TRACE=<host pc of dbt_fallback_c>
+  HLE_TRACE_AFTER=<updateTimers tick> HLE_TRACE_LIMIT=40000, HLE_WRITEWATCH=8cbbc800 for the P1 alias of
+  kbdmouse's g_hevInterrupt): the KEYSC IST (priority 145) spins. Its WaitForSingleObject(hEvent 01090003, 20 ms)
+  returns WAIT_FAILED every time, the handle and pollMs are intact, and the kernel's reason is in WaitOneMore:
+  the interrupt event's pProxList still holds this thread's own proxy (d03ffc18) from an earlier wait, so
+  "more than one thread waiting on the same interrupt event" -> waitbad. The scan loop then runs at IST priority
+  (4.7 million KIUDATA reads in five minutes) and starves GWES, hello and the display push thread. What left the
+  proxy linked (RunqDequeue's interrupt-event special case or WakeOneThreadFlat skipped or mis-ordered) is not
+  found: the tmu loops pass under DEVALL=1, the 16-bit r0 store and the dev store paths read correctly. kbd_pdd.cpp
+  now logs the failure once and sleeps instead of spinning, so the next image shows "WaitForSingleObject failed,
+  error 995" and keeps running; the translator-side cause stays open (docs/04 resume rules are the suspects).
+  The emulator's instruction trace is the tool for this class: it shows guest registers of translated code
+  without changing the guest's timing, unlike any translator-side trace.

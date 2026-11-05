@@ -268,11 +268,20 @@ What the kernel sources settled (2026-11-02, notes/ce/kernel-sh-notes.md):
    window appears in the emulator's screenshot (colour bars, orange
    frame), its timer ticks and the driver keeps pushing dirty rows; the
    keyboard driver is up with its interrupt, the touch driver finds no
-   panel on the fx-CG100 profile. Two translator bugs fell out of it:
-   faults in helper C code are delivered to the guest, and the
-   inline-cache refill race (docs/04). Open: the grey field and the text
-   are missing from the frame (exact-colour fills and lines land, blits
-   with a dithered brush or a glyph mask do not).
+   panel on the fx-CG100 profile. Three translator bugs fell out of it:
+   faults in helper C code are delivered to the guest, the inline-cache
+   refill race, and the helper prologue window undoing a spill the call
+   had already restored (docs/04; found with a driver build that logs
+   its first 48 blits). The "missing" grey field and text were the hello
+   app's own doing: `Rectangle` filled its interior with the stock white
+   brush over the grey, and the text was white on it; `hello.c` now
+   selects the hollow brush (a rebuild of the image shows it). Every blit
+   the window makes is a solid fill or a 1bpp text blit through GPE's
+   emulated paths. Open: in about half of the runs the keyboard IST's
+   timed wait starts failing (the interrupt event still lists the
+   thread's previous proxy; `notes/ce/stock-run.txt`) and the thread
+   spins at its priority, starving the window; the driver now logs it
+   once and sleeps, the cause is not found.
 7. Keyboard and touch (written 2026-11-03, not yet compiled):
    `SRC\DRIVERS\KEYBD` is the Layout Manager MDD with a PDD that programs
    the SH7305 KEYSC like the fx-CG100 OS does, requests a SYSINTR for its

@@ -29,6 +29,9 @@ typedef struct {
      * store of the same register again costs one instruction. */
     int    bx;
     int    cache_reg, cache_size;
+    sf_u32 slot_avoid;       /* registers a delay slot may not use as scratch: the branch's
+                              * target register (META_TARGET_REG reads it at a resume, before
+                              * the pending spills are undone) and the kept PR scratch */
     /* instructions the pre-pass decoded, from the block's guest pc on
      * (g_pre: one translation at a time; an abandoned one never resumes) */
     int    pre_n;
@@ -63,6 +66,7 @@ static int pick_scratch(const tctx *t, sf_u32 avoid)
 {
     int r;
     if (t->bx >= 0) avoid |= R(t->bx);
+    avoid |= t->slot_avoid;
     for (r = 1; r <= 14; r++) if (!(avoid & R(r))) return r;
     return -1;
 }
@@ -626,7 +630,9 @@ static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
              * valid before X0 is loaded (an interrupt in the helper's exit
              * tail resumes at the committed call's next range) */
             if (slot->defs & R(d->br_reg)) { t->err = DBT_ERR_UNSUPPORTED; return; }
+            t->slot_avoid = R(d->br_reg);
             tr_insn(t, slot, 1);
+            t->slot_avoid = 0;
             begin_meta_kind(t, META_TARGET_REG, goff, next, 0);
             t->cur->fix_reg = (sf_u8)d->br_reg;
             target_to_x0(t, d->br_reg, 0, next, avoid | R(d->br_reg));
@@ -652,11 +658,21 @@ static void tr_branch(tctx *t, const sh_insn *d, const sh_insn *slot)
              * helper call (helpers own Y0). */
             int rT = -1;
             if (d->br == BR_JSR) rT = set_pr(t, next, avoid | R(d->br_reg), !is_helper(t, slot));
+            /* the slot's scratches: not the target register (a resume after
+             * the slot's committed store reads it, before the undo: the CE
+             * kernel's `jsr @r3; mov.l r1,@(12,r2)` sent a call to the
+             * swapped store data, 2026-11-04) nor the kept PR scratch */
+            t->slot_avoid = R(d->br_reg) | (rT >= 0 ? R(rT) : 0);
             if (slot) tr_insn(t, slot, 1);
+            t->slot_avoid = 0;
             begin_meta_kind(t, META_TARGET_REG, goff, 0, 0);
             t->cur->fix_reg = (sf_u8)d->br_reg;
             exit_restore(t);
-            jump_indirect_ic_reg(t, d->br_reg, rT);
+            /* a helper slot owned Y0: the PR scratch was restored before it
+             * and the inline cache spills its own (it used to take rT as
+             * still spilled and reloaded it from Y0, the helper's leftovers,
+             * on the slow path of a device store) */
+            jump_indirect_ic_reg(t, d->br_reg, is_helper(t, slot) ? -1 : rT);
         }
         return;
     case BR_RTS:

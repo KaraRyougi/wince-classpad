@@ -43,6 +43,16 @@ _loop_trapa:
         bf      1b
         TAIL
 
+        .global _loop_ldcsr                    /* a helper call (ldc rm,sr) each iteration */
+_loop_ldcsr:
+        HEAD
+1:      BODY
+        stc     sr, r0
+        ldc     r0, sr
+        dt      r4
+        bf      1b
+        TAIL
+
         .global _loop_bfs
 _loop_bfs:
         HEAD
@@ -197,6 +207,33 @@ _loop_jsrslot:
         bf      1b
         lds.l   @r15+, pr
         TAIL
+
+        .global _loop_jsrtgt                   /* jsr @r3 whose slot store swaps through r3, its lowest free scratch */
+_loop_jsrtgt:
+        sts.l   pr, @-r15
+        mov.l   r8, @-r15
+        HEAD
+        mov     r5, r8
+1:      BODY
+        mov.l   r3, @(8, r8)
+        mov.l   r2, @(12, r8)
+        mov.l   .Lleaf, r3
+        bra     2f                             /* block boundary: the jsr block scores 0, no borrowed register */
+        mov     r8, r2
+2:      jsr     @r3
+        mov.l   r1, @r2                        /* data r1, base r2: the swap scratch is r3, the target */
+        mov.l   @(8, r8), r3
+        mov.l   @(12, r8), r2
+        dt      r4
+        bf      1b
+        mov.l   @r15+, r8
+        lds.l   @r15+, pr
+        TAIL
+        .align 2
+.Lleaf: .long   _loop_leaf
+_loop_leaf:
+        rts
+        nop
 
         .global _loop_pushpop                  /* sts.l/lds.l pr, mov.l @-r15 / @r15+ */
 _loop_pushpop:

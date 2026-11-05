@@ -364,11 +364,22 @@ int main(void)
      * and the PR scratch (r2) stays spilled in Y0 across the slot */
     { sf_u32 ops[] = { 0x410B, 0x2F46 };
       translate(ops, 2, 2);
-      /* the store's scratch is r1, the target register itself: legal, it is restored before the compare */
-      expect("jsr fast slot store", hbuf[0] == LDS_Y0(2) && hbuf[2] == OP_LDS_PR(2) && hbuf[3] == LDS_X0(1) && hbuf[7] == 0x2F16 && hbuf[8] == STS_X0(1)
+      /* the store's scratch is r3: neither the target register r1 (an interrupt on its
+       * restoring sts resumes at "the target" = r1 before the undo) nor the kept PR scratch r2 */
+      expect("jsr fast slot store", hbuf[0] == LDS_Y0(2) && hbuf[2] == OP_LDS_PR(2) && hbuf[3] == LDS_X0(3) && hbuf[7] == 0x2F36 && hbuf[8] == STS_X0(3)
              && blk.meta[1].kind == META_TARGET_REG && blk.meta[1].fix_reg == 1 && blk.meta[1].host_off == 18);
-      { dbt_spill sp[4]; int n = dbt_block_pending_spills(&blk, 0, 14, sp, 4);   /* at the store: r1 (X0) and r2 (Y0) open, latest first */
-        expect("jsr fast pending", n == 2 && sp[0].gpr == 1 && sp[0].slot == SLOT_X0 && sp[1].gpr == 2 && sp[1].slot == SLOT_Y0); }
+      { dbt_spill sp[4]; int n = dbt_block_pending_spills(&blk, 0, 14, sp, 4);   /* at the store: r3 (X0) and r2 (Y0) open, latest first */
+        expect("jsr fast pending", n == 2 && sp[0].gpr == 3 && sp[0].slot == SLOT_X0 && sp[1].gpr == 2 && sp[1].slot == SLOT_Y0); }
+    }
+
+    /* 20c. jsr @r3 ; mov.l r1,@(12,r2) (kernel.dll SwitchActiveProcess): the store's lowest free register
+     * would be r3, the target; it must take r5 (r4 is the PR scratch) */
+    { sf_u32 ops[] = { 0x430B, 0x1213 };
+      int i, r3_spilled = 0;
+      translate(ops, 2, 2);
+      for (i = 0; i < blk.nspills; i++) if (blk.spills[i].gpr == 3) r3_spilled = 1;
+      expect("jsr slot avoids the target register", !r3_spilled && blk.nspills == 2 && blk.spills[0].gpr == 4 && blk.spills[1].gpr == 5
+             && blk.meta[1].kind == META_TARGET_REG && blk.meta[1].fix_reg == 3);
     }
 
     /* 21. rts ; fmov.s @r4+,fr0 : helper call first, target capture afterwards */

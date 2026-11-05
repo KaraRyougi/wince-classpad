@@ -499,7 +499,13 @@ static dbt_block *translate_at(sf_u32 gpc)
         binfo *bi = &g_binfo[g_nblocks];
         bi->dead = 0; bi->user = (sf_u8)IS_USER(gpc);
         bi->asid = bi->user ? (sf_u16)g_asid : (sf_u16)ASID_ANY;
-        bi->phys = bi->user ? utlb_translate(gpc, g_asid) : (gpc & 0x1FFFFFFFu);
+        /* P1/P2 code is its own physical address; user pcs and the kernel's
+         * TLB-mapped range (0xC0000000 up: XIP DLL mappings, kernel
+         * VirtualAlloc) go through the UTLB. With pc & 0x1FFFFFFF a kernel
+         * VA whose low bits fell inside the ROM's physical range was taken
+         * for ROM and survived whole-cache flushes, the only sync the
+         * kernel does when it reuses such a page for new code. */
+        bi->phys = (bi->user || gpc >= 0xC0000000u) ? utlb_translate(gpc, g_asid) : (gpc & 0x1FFFFFFFu);
         g_chain_next[g_nblocks] = g_chain_head[hidx(gpc)];
     }
     /* An interrupt can land in the translator (it resumes the guest at the
@@ -1008,7 +1014,17 @@ static int stub_window(dbt_gctx *ctx, sf_u32 *guest_pc)
                 if (!b) dbt_halt("helper return address not in a block");
                 off = ret - 2 - b->host_base;
                 *guest_pc = resume_pc(b, off, ctx, &idx, &committed);
-                apply_resume_state(b, idx, off, committed, ctx);
+                /* The registers are as of the return address, not of the
+                 * jmp's delay slot: that `sts Y0,rT` has run, so the
+                 * scratch's spill record (open through its own offset) is
+                 * closed, and the prologue has since put r0 into Y0.
+                 * Undoing it at X1 - 2 loaded r0 into the scratch: with
+                 * rT = r1 in KCall's epilogue, r1 = the wait's return value
+                 * at `mov.b @r1,r0` (TEA 0 or 102) once in a few GWES boots
+                 * (2026-11-04). The re-park of the borrowed register at the
+                 * return address has not run either: its record starts
+                 * there and is not pending at off + 2. */
+                apply_resume_state(b, idx, off + 2, committed, ctx);
                 return 1;
             }
         }
@@ -1054,7 +1070,7 @@ int dbt_exc_c(dbt_gctx *ctx)
 
 static int exc_c_body(dbt_gctx *ctx)
 {
-    dbt_block *b;
+    dbt_block *b = 0;                   /* set on the in-block paths only */
     sf_u32 guest_pc, handler;
     int act;
     dbt_stat.exceptions++;
@@ -1121,6 +1137,10 @@ static int exc_c_body(dbt_gctx *ctx)
                 trace_exc(ctx->host_spc, b->guest_pc, off, 0xEE, 0, guest_pc, ctx->vec_off, 1);
             } else {
                 int idx, committed;
+                /* the pc first: META_COND_REG reads the T value a slot saved
+                 * in a scratch, which the undo below takes back. The other
+                 * register the pc can come from, META_TARGET_REG's, is never
+                 * a scratch of its slot (translate.c slot_avoid). */
                 guest_pc = resume_pc(b, off, ctx, &idx, &committed);
                 apply_resume_state(b, idx, off, committed, ctx);
                 trace_exc(ctx->host_spc, b->guest_pc, off, b->meta[idx].kind, (sf_u32)committed, guest_pc, ctx->vec_off, 2);
@@ -1138,6 +1158,29 @@ static int exc_c_body(dbt_gctx *ctx)
     }
 
 deliver:
+    /* A data fault on the null page is almost always a wrong register in
+     * translated code; the first few are described (host code and guest
+     * registers) before the guest handles them. */
+    if (ctx->tea < 0x1000u && (ctx->vec_off == 0x400 || ctx->vec_off == 0x100) &&
+        (ctx->expevt == 0x040 || ctx->expevt == 0x060 || ctx->expevt == 0x0E0 || ctx->expevt == 0x100)) {
+        static int shown;
+        if (shown < 4) {
+            int i;
+            shown++;
+            dbt_puts("[dbt] null-page fault: expevt="); dbt_puthex(ctx->expevt); dbt_puts(" tea="); dbt_puthex(ctx->tea);
+            dbt_puts(" host="); dbt_puthex(ctx->host_spc); dbt_puts(" block="); dbt_puthex(b ? b->guest_pc : 0);
+            dbt_puts(" guest="); dbt_puthex(guest_pc); dbt_puts("\n[dbt]  code:");
+            for (i = -8; i < 8; i++) {
+                sf_u32 a = ctx->host_spc + (sf_u32)(i * 2);
+                dbt_puts(i == 0 ? " >" : " "); dbt_puthex(*(volatile sf_u16 *)a);
+            }
+            dbt_puts("\n[dbt]  regs:");
+            for (i = 0; i < 16; i++) { dbt_puts(" "); dbt_puthex(ctx->r[i]); }
+            dbt_puts("\n[dbt]  slots A0 X0 X1 Y0 Y1:");
+            for (i = 0; i < SLOT_COUNT; i++) { dbt_puts(" "); dbt_puthex(ctx->slots[i]); }
+            dbt_puts("\n");
+        }
+    }
     /* deliver to the guest handler */
     ctx->new_spc = guest_pc;
     ctx->new_ssr = (ctx->ssr & ~SR_MD) | (dbt_shadow_md & SR_MD);
