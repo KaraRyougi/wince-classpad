@@ -68,11 +68,23 @@ static int window_has_our_image(void)
     return !memcmp(p + 0x40, "ECEC", 4) || !memcmp(p, "B000FF\n", 7);
 }
 
+/* NK_WINDOW=eact: the window is the eActivity volume, which Casio's OS
+ * reformats at every boot that finds it holding something else (docs/03), so
+ * a Fugue volume there is ours to erase as well; its header names itself. */
+static int window_is_fugue_volume(void)
+{
+#ifdef NK_WINDOW_EACT
+    return !memcmp((const char *)NK_FLASH + 0x2020, "Fugue FAT File System", 21);
+#else
+    return 0;
+#endif
+}
+
 /* erase the sectors covering [lo, hi) after checking each is ours to erase */
 static int erase_span(u32 lo, u32 hi)
 {
     u32 s, first = lo & ~(NOR_SECTOR - 1), n = 0, i = 0;
-    int ours = window_has_our_image();
+    int ours = window_has_our_image() || window_is_fugue_volume();
     for (s = first; s < hi; s += NOR_SECTOR) {
         n++;
         if (!nor_sector_erased(s) && !ours)
@@ -149,7 +161,8 @@ int hhk_main(int argc, char **argv, char **envp)
         lo = WIN_LO; hi = WIN_LO + size + (size & 1);
         if (hi > WIN_HI) return fail("file larger than the window");
     }
-    say("%s", window_has_our_image() ? "window holds a CE image: replace it" : "window is blank");
+    say("%s", window_has_our_image() ? "window holds a CE image: replace it" :
+               window_is_fugue_volume() ? "window is the eActivity volume: erase it" : "window is blank");
     say("EXE: erase and program   Clear: cancel");
     if (!ui_wait_exe_or_clear()) { os_close(fd); return 0; }
 

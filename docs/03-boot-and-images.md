@@ -214,3 +214,32 @@ patch that stops Fugue from using it, which is disassembly work still to
 do; without it the image survives until the first eActivity save. For a
 7 MiB image the alternatives are a smaller image (compression on, fewer
 components) or that patch.
+
+### Using the eActivity area without a patch: reflash after every return (2026-11-05)
+
+The reformat in result 1 above is silent: the boot continues normally, the
+OS just spends the sector erases, and the only other writes are the MCS
+backup log advancing (a new `CASIOMCSDATA` record, the sector sequence
+tags toggled: a normal main-memory commit, not a reset). So the area can
+be used **without any OS patch** by giving the image up every time Casio's
+OS boots:
+
+1. keep `NK.bin` as a file in `\fls0\` (the 24 MiB storage volume);
+2. `make -C dbt NK_WINDOW=eact DEVICE=1 BUILD=build-eact hhk` builds
+   `wince.hhk` and `nkflash.hhk` for `NK_FLASH` 0x83860000 (image built with
+   `ROMSTART=83860000 ROMSIZE=007A0000`); with `NK_WINDOW=eact` the flasher
+   also treats a Fugue volume in the window (the `Fugue FAT File System`
+   header at +0x2020) as erasable, so it works on a freshly reformatted
+   area;
+3. from HollyHock: `nkflash.hhk` (about a minute for 7 MB: 56 sector
+   erases plus programming), then `wince.hhk`;
+4. after a RESET, Casio's OS finds the volume invalid, erases the 61 sectors
+   and formats it again: the image is gone, the eActivity application works
+   as before (empty), and the next CE session starts at step 3.
+
+What it costs: one reflash per CE session (the 7 MB copy over USB only once,
+the file stays), 61 erase cycles per Casio boot after a CE session (NOR
+endurance is 100k cycles), and every eActivity the user keeps must live
+elsewhere (they are erased with the volume). Unverified on hardware like
+the rest; the emulator run that established the behaviour is the foreign
+data boot in result 1.

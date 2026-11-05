@@ -53,6 +53,7 @@ NK_WINDOW    ?= hole
 ifeq ($(NK_WINDOW),eact)
 NK_FLASH_OFF ?= 0x03860000
 NK_FLASH_MAX ?= 0x007A0000
+HOST_CFLAGS  += -DNK_WINDOW_EACT    # nkflash.hhk may erase the eActivity volume (docs/03)
 else
 NK_FLASH_OFF ?= 0x01000000
 NK_FLASH_MAX ?= 0x003E0000
