@@ -1,0 +1,22 @@
+--- a/PRIVATE/WINCEOS/COREOS/NK/KERNEL/kcalls.c
++++ b/PRIVATE/WINCEOS/COREOS/NK/KERNEL/kcalls.c
+@@ -2374,6 +2374,19 @@
+     if (pCurThread->lpce) {
+         pCurThread->lpce->base = pCurThread->lpProxy;
+         pCurThread->lpce->size = (DWORD)pCurThread->lpPendProxy;
++    } else if (pProx = pCurThread->lpProxy) {
++        // must be an interrupt event - special case it! An earlier call of
++        // this KCall linked the proxy on the event and the timed-out retry
++        // above comes here without going through NextThread/RunqDequeue,
++        // which do this unlink when the sleep expires. Left linked, the
++        // proxy makes every later wait on the event fail with
++        // ERROR_INVALID_HANDLE ("more than one thread waiting").
++        PEVENT lpe = (PEVENT) pProx->pObject;
++        DEBUGCHK(pProx->bType == HT_MANUALEVENT);
++        if (lpe->pProxList == pProx) {
++            lpe->pProxList = 0;
++            pProx->pQDown = 0;
++        }
+     }
+     pCurThread->lpProxy = 0;
+     pCurThread->wCount++;

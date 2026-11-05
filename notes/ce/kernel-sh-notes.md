@@ -214,3 +214,60 @@ PR_B0_IE, `KernelInit` -> `resched` (first thread).
 
 The first message from a working OAL is therefore the kernel sign-on
 "Windows CE Kernel for SH4 Built on ..." followed by "CCR=...".
+
+## 10. WaitOneMore leaves an interrupt-event proxy linked when a timed wait expires between its KCalls (kernel hole, patched)
+
+- **Symptom** (2026-11-04/05, image with the KEYSC driver): right after the
+  hello window's first paint the keyboard IST's
+  `WaitForSingleObject(hevInterrupt, 20)` returns WAIT_FAILED on every call,
+  `GetLastError()` = 6 (ERROR_INVALID_HANDLE), and the thread runs at
+  priority 145 for ever, starving GWES. Deterministic in the emulator: six
+  runs all stalled after the 1496th link of the event's `pProxList`.
+- **Mechanism** (`KERNEL/kcalls.c`, QFE 2013-03-29 / KB2826824, lines
+  2217-2385): `DoWaitForObjects` (schedule.c) sets `lpce = NULL` for an
+  interrupt event and calls `KCall(WaitOneMore)` in a loop. The first call
+  has `lpPendProxy` set: it links the proxy on `pevent->pProxList`, sets
+  `lpProxy = pProx` and returns with `dwContinue` still set. The later
+  calls have `lpPendProxy == 0` and `dwPendTime != INFINITE`, so they take
+  the last branch: `if (!dwPendTime || (int)(GETCURRTICK() - dwPendWakeup)
+  >= 0) { retval = WAIT_TIMEOUT; goto exitfunc; }` and otherwise one
+  `SleepOneMore` step per KCall. `exitfunc` hands the proxies to `lpce`
+  (NULL here) and clears `lpProxy`; the proxy stays on the event. The next
+  wait finds `pevent->pProxList` set and goes to `waitbad`: the kernel's
+  "more than one thread waiting on the same interrupt event" check, error
+  6. (DoWaitForObjects has a DEBUGCHK for exactly this; retail builds drop
+  it, so the hole is silent.) The three other places that end an
+  interrupt-event wait special-case `!lpce && lpProxy` and do
+  `pevent->pProxList = 0; pprox->pQDown = 0`: NextThread's sleep expiry
+  (~1172), RunqDequeue's sleep chain (~260) and the thread-kill path
+  (~982). `exitfunc` is the one that does not.
+- **Trigger**: more than dwTimeout+1 ms of tick between two consecutive
+  KCalls of the waiting thread. On hardware that takes a 21 ms preemption
+  at a KCall boundary, so it is rare; under the translator the first
+  translation of new code (the paint path) is charged as guest time, so
+  it happens every run.
+- **Evidence** (casio-emu `HLE_WRITEWATCH` on THREAD 8cbb92b8: lpProxy
+  +0x34, dwLastError +0x38, pCrabPth +0x204; `HLE_RAMSAVE_AT` snapshot at
+  tick 2e6): 1495 times link (PR 810122be, WaitOneMore) then clear by
+  NextThread (PR 81010f8e); the 1496th link is cleared with PR 810122be
+  (exitfunc), the event keeps `pProxList = d03ffc18`, dwLastError = 6 on
+  every wait after that, pCrabPth took non-zero values from SleepOneMore
+  (PR 8101251c). Snapshot: IST running, lpProxy 0, lpPendProxy d03ffc18,
+  dwPendWakeup 0xe8c4 > CurMSec 0xe8af.
+- **Why a driver cannot recover on its own**: the stale `pProxList` points
+  at a dead slot of the thread's stack (`_proxys[]` of DoWaitForObjects).
+  The next interrupt on that SYSINTR (`WakeOneThreadInterruptDelayed`) and
+  `InterruptDisable` (`EventModIntr` with EVENT_SET) both dereference it as
+  a PROXY and write through its `pTh`. Re-creating the event from the
+  driver therefore goes through that code with garbage; the kernel fix is
+  the fix. Drivers can only avoid timed waits on interrupt events.
+- **Fix**: `bsp/kernel/kcalls-waitonemore.patch` adds the same unlink to
+  `exitfunc`, guarded by `lpe->pProxList == pProx` (`bsp/kernel/README.md`
+  for the rebuild). `kbd_pdd.cpp` waits INFINITE and rescans from a poll
+  thread. The common touch MDD waits on its interrupt event with the sample
+  timeout while the stylus is down: same pattern, needs the kernel patch.
+- **Tools that found it**: write watches on the thread's fields and on
+  `IntrEvents[SYSINTR - 8]` (KData + 0x1a0 + 4 * index), a RAM snapshot
+  scanned for the thread by `bBPrio`/`bCPrio`, and the fact that the
+  emulator's runs are deterministic, so counts line up between runs.
+

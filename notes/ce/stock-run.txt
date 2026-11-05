@@ -148,6 +148,23 @@ Open (2026-11-04 evening): with the three fixes above the blit-logging image sti
   proxy linked (RunqDequeue's interrupt-event special case or WakeOneThreadFlat skipped or mis-ordered) is not
   found: the tmu loops pass under DEVALL=1, the 16-bit r0 store and the dev store paths read correctly. kbd_pdd.cpp
   now logs the failure once and sleeps instead of spinning, so the next image shows "WaitForSingleObject failed,
-  error 995" and keeps running; the translator-side cause stays open (docs/04 resume rules are the suspects).
+  error 6" and keeps running. (2026-11-05: the cause is a kernel hole, not the translator; next entry.)
   The emulator's instruction trace is the tool for this class: it shows guest registers of translated code
   without changing the guest's timing, unlike any translator-side trace.
+
+2026-11-05, same image, why the IST's wait fails (casio-emu HLE_WRITEWATCH on the IST THREAD 8cbb92b8: lpProxy +0x34,
+  dwLastError +0x38, pCrabPth +0x204; on IntrEvents[SYSINTR 16 - 8] = KData+0x1c0 and on the event's pProxList
+  8cbb9008; HLE_RAMSAVE_AT=2000000 snapshot scanned for the priority-145 thread). Deterministic: six runs all stop
+  after the 1496th link of the proxy on the event, right after hello's first paint. The first 1495 links (PR 810122be,
+  WaitOneMore) are each cleared by NextThread's sleep expiry (PR 81010f8e); the 1496th is cleared from WaitOneMore's
+  own exit path (PR 810122be) and nobody unlinks it from the event: the next wait sees pProxList set and takes the
+  "more than one thread waiting" branch, error 6 (ERROR_INVALID_HANDLE), 453,000 times in the run. pCrabPth took
+  non-zero values from SleepOneMore (PR 8101251c), so the sleep-list insertion really runs over several KCalls.
+  Snapshot after the stall: IST running, lpProxy 0, lpPendProxy d03ffc18, dwPendWakeup 0xe8c4 > CurMSec 0xe8af,
+  event 8cbb9000 pProxList d03ffc18. It is the kernel hole described in notes/ce/kernel-sh-notes.md section 10:
+  WaitOneMore's timed-out retry returns through exitfunc, which hands proxies to lpce (NULL for interrupt events)
+  and otherwise leaves them linked; every other end of such a wait (NextThread, RunqDequeue, KillThread) has the
+  interrupt-event special case. Needs the timeout (20+1 ms) to pass between two KCalls of the thread, which the
+  translator's first translation of the paint path does. Fix: bsp/kernel/kcalls-waitonemore.patch (apply in the VM,
+  rebuild the kernel) and kbd_pdd.cpp waits INFINITE with a separate poll thread. The touch MDD's sample wait is
+  the same pattern. Not yet run: both need a rebuilt image.

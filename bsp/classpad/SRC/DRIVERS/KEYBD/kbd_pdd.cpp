@@ -6,14 +6,19 @@
 //  a SYSINTR for its interrupt (logical IRQ_KEYSC, intr_cfg.h) and starts an
 //  IST that keeps a 96-bit image of the matrix. Every changed bit becomes a
 //  key event: scan code = 16 * KIUDATA word + bit (classpad_keysc.h), key
-//  down when the bit is set. The IST wakes on the interrupt and on a short
-//  timeout (registry "PollMs"), because the emulator drops an edge that
-//  arrives while the source is masked between the ISR and InterruptDone;
-//  auto-repeat is the MDD's job.
+//  down when the bit is set. The IST wakes on the interrupt only; a second
+//  thread rescans every "PollMs", because the emulator drops an edge that
+//  arrives while the source is masked between the ISR and InterruptDone.
+//  The poll is a separate thread rather than a timeout on the IST's wait on
+//  purpose: a timed wait on an interrupt event hits a CE 6.0 R3 kernel hole
+//  (WaitOneMore's retry path; notes/ce/kernel-sh-notes.md section 10,
+//  bsp/kernel/kcalls-waitonemore.patch) whenever the timeout expires between
+//  the kernel calls that set the wait up, and the translator's slow guest
+//  time makes that routine. Auto-repeat is the MDD's job.
 //
-//  Registry (HKLM\HARDWARE\DEVICEMAP\KEYBD): "Priority256" (IST priority,
-//  default 145), "PollMs" (default 20), "Matrix" (0 = fx-CG100 keypad,
-//  1 = fx-CP400 keypad; read by kbd_layout.cpp).
+//  Registry (HKLM\HARDWARE\DEVICEMAP\KEYBD): "Priority256" (priority of
+//  both threads, default 145), "PollMs" (default 20), "Matrix" (0 = fx-CG100
+//  keypad, 1 = fx-CP400 keypad; read by kbd_layout.cpp).
 //------------------------------------------------------------------------------
 #include <windows.h>
 #include <nkintr.h>
@@ -46,7 +51,9 @@ static UINT             g_uiPddId;
 static PFN_KEYBD_EVENT  g_pfnKeybdEvent;
 static DWORD            g_dwSysIntr = SYSINTR_UNDEFINED;
 static HANDLE           g_hevInterrupt;
-static HANDLE           g_hThread;
+static HANDLE           g_hThread;                  // IST
+static HANDLE           g_hPoll;                    // poll thread
+static CRITICAL_SECTION g_csScan;                   // one scan at a time
 static UINT16           g_image[KEYSC_WORDS];       // last matrix image
 static DWORD            g_events;                   // key events delivered
 
@@ -124,6 +131,19 @@ static UINT KeyscScan(void)
     return n;
 }
 
+static DWORD WINAPI KeyscPoll(LPVOID arg)
+{
+    DWORD pollMs = (DWORD)arg;
+    CeSetThreadPriority(GetCurrentThread(), (int)RegDword(TEXT("Priority256"), KEYBD_IST_PRIORITY));
+    for (;;) {
+        Sleep(pollMs);
+        EnterCriticalSection(&g_csScan);
+        KeyscScan();
+        LeaveCriticalSection(&g_csScan);
+    }
+    return 0;
+}
+
 static DWORD WINAPI KeyscIst(LPVOID)
 {
     DWORD irq = IRQ_KEYSC, pollMs = RegDword(TEXT("PollMs"), KEYBD_POLL_MS), wakeups = 0;
@@ -142,30 +162,29 @@ static DWORD WINAPI KeyscIst(LPVOID)
 
     KeyscInit();
     KeyscScan();        // keys already held: report them, start from the live image
-    RETAILMSG(1, (TEXT("CLASSPAD KEYBD: IST running, SYSINTR %d, poll %d ms\r\n"), g_dwSysIntr, pollMs));
+    g_hPoll = CreateThread(NULL, 0, KeyscPoll, (LPVOID)pollMs, 0, NULL);
+    RETAILMSG(1, (TEXT("CLASSPAD KEYBD: IST running, SYSINTR %d, poll %d ms%s\r\n"), g_dwSysIntr, pollMs,
+                  g_hPoll ? TEXT("") : TEXT(" (poll thread failed)")));
+    if (g_dwSysIntr == SYSINTR_UNDEFINED) return 0;     // the poll thread carries the keyboard
 
     for (;;) {
-        DWORD rc = WaitForSingleObject(g_hevInterrupt, pollMs);
-        if (rc == WAIT_FAILED) {
-            // Seen under the translator (2026-11-04): the kernel refuses the wait
-            // (ERROR_OPERATION_ABORTED, the interrupt event still lists this
-            // thread's previous proxy). Spinning here at IST priority starved
-            // GWES and the display push thread; say so once and keep polling.
-            static BOOL s_said;
-            if (!s_said) {
-                s_said = TRUE;
-                RETAILMSG(1, (TEXT("CLASSPAD KEYBD: WaitForSingleObject failed, error %d: polling only\r\n"), GetLastError()));
-            }
-            Sleep(pollMs);
+        // INFINITE on purpose, see the header: a timeout here left this
+        // thread's proxy linked on the interrupt event (2026-11-04/05), after
+        // which every wait failed with ERROR_INVALID_HANDLE and the loop spun
+        // at IST priority, starving GWES and the display push thread.
+        DWORD rc = WaitForSingleObject(g_hevInterrupt, INFINITE);
+        if (rc != WAIT_OBJECT_0) {
+            RETAILMSG(1, (TEXT("CLASSPAD KEYBD: WaitForSingleObject failed, error %d: polling only\r\n"), GetLastError()));
+            return 0;
         }
-        if (rc == WAIT_OBJECT_0) {
-            wakeups++;
-            if (wakeups <= 10 || (wakeups % 100) == 0)
-                RETAILMSG(1, (TEXT("CLASSPAD KEYBD: interrupt %d, KIUINTREG %04x\r\n"), wakeups, MMIO_R16(KEYSC_KIUINTREG)));
-            KeyscAck();
-        }
+        wakeups++;
+        if (wakeups <= 10 || (wakeups % 100) == 0)
+            RETAILMSG(1, (TEXT("CLASSPAD KEYBD: interrupt %d, KIUINTREG %04x\r\n"), wakeups, MMIO_R16(KEYSC_KIUINTREG)));
+        EnterCriticalSection(&g_csScan);
+        KeyscAck();
         KeyscScan();
-        if (rc == WAIT_OBJECT_0 && g_dwSysIntr != SYSINTR_UNDEFINED) InterruptDone(g_dwSysIntr);
+        LeaveCriticalSection(&g_csScan);
+        InterruptDone(g_dwSysIntr);
     }
     return 0;
 }
@@ -205,6 +224,7 @@ static BOOL WINAPI ClassPad_Entry(UINT uiPddId, PFN_KEYBD_EVENT pfnKeybdEvent, P
     *ppKeybdPdd = &g_classpadPdd;
 
     if (g_hThread) return TRUE;
+    InitializeCriticalSection(&g_csScan);
     g_hevInterrupt = CreateEvent(NULL, FALSE, FALSE, NULL);
     if (!g_hevInterrupt) return FALSE;
     g_hThread = CreateThread(NULL, 0, KeyscIst, NULL, 0, NULL);

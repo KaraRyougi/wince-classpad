@@ -277,18 +277,22 @@ What the kernel sources settled (2026-11-02, notes/ce/kernel-sh-notes.md):
    brush over the grey, and the text was white on it; `hello.c` now
    selects the hollow brush (a rebuild of the image shows it). Every blit
    the window makes is a solid fill or a 1bpp text blit through GPE's
-   emulated paths. Open: in about half of the runs the keyboard IST's
-   timed wait starts failing (the interrupt event still lists the
-   thread's previous proxy; `notes/ce/stock-run.txt`) and the thread
-   spins at its priority, starving the window; the driver now logs it
-   once and sleeps, the cause is not found.
+   emulated paths. The keyboard IST's timed wait failing after the first paint
+   (the interrupt event still listing the thread's previous proxy, error
+   6 ERROR_INVALID_HANDLE) is a CE 6.0 R3 kernel hole, not a translator
+   bug: WaitOneMore's timed-out retry path returns without unlinking an
+   interrupt-event proxy (`notes/ce/kernel-sh-notes.md` section 10,
+   `bsp/kernel/kcalls-waitonemore.patch`). The keyboard driver no longer
+   waits with a timeout (a poll thread does the rescan); the touch MDD's
+   sample-rate wait is the same pattern, so the kernel patch is the fix
+   for it. Both wait for a rebuilt image (2026-11-05).
 7. Keyboard and touch (written 2026-11-03, not yet compiled):
    `SRC\DRIVERS\KEYBD` is the Layout Manager MDD with a PDD that programs
    the SH7305 KEYSC like the fx-CG100 OS does, requests a SYSINTR for its
    interrupt (INTEVT 0xBE0 is vector 95, beyond the common OAL's 64-entry
    IRQ map, so the OAL hooks the vector and the driver uses logical IRQ 48)
    and diffs the six KIUDATA words in an IST woken by the interrupt and a
-   20 ms poll (the emulator drops an edge raised while the source is
+   20 ms poll thread (the emulator drops an edge raised while the source is
    masked). Scan code = 8 * row + column; two device layouts (fx-CG100 and
    fx-CP400 keypads, registry `Matrix`). `SRC\DRIVERS\TOUCH` is the touch
    MDD with a DDSI layer for the fx-CP400 panel as casio-emu models it: a
