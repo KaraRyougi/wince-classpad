@@ -293,6 +293,11 @@ What the kernel sources settled (2026-11-02, notes/ce/kernel-sh-notes.md):
    keyboard IST runs without a failure and the window shows bars, grey
    field, frame and text for the whole run (`notes/ce/hello-fix3.png`);
    the touch sample thread is not exercised on the fx-CG100 profile.
+   The ClassPad image (same day, section 5 items done) runs on the
+   ClassPad profile with the 320x528 DCS panel showing, the fx-CP400 key
+   table (press and release in the right order, one auto-repeat during a
+   held key), and the IIC0 touch driver delivering calibrated points
+   (`notes/ce/hello-cp400.png`, `notes/ce/stock-run.txt`).
 7. Keyboard and touch (written 2026-11-03, not yet compiled):
    `SRC\DRIVERS\KEYBD` is the Layout Manager MDD with a PDD that programs
    the SH7305 KEYSC like the fx-CG100 OS does, requests a SYSINTR for its
@@ -370,7 +375,7 @@ differs from the fx-CG100 run except the touch driver's panel decision. So
 the ClassPad's INTC arbitration (priority against IMASK instead of
 IMASK = 0) and its sleep semantics (an interrupt is accepted in `sleep`
 even with BL = 1, `handleSleepInterrupt`) change nothing for the kernel and
-the OAL. What the image still needed for the ClassPad, found in that run.
+the OAL. What the image still needed for the ClassPad, found in that run (all done and verified the same day, commits def3c89 and 6dc3d93, `notes/ce/stock-run.txt`).
 **Done in the sources the same day** (items 1, 2, 4 below; the image is
 rebuilt by the user in the VM: Build Current BSP and Subprojects, Copy
 Files to Release Directory, Make Run-Time Image, no Sysgen; the kernel is
