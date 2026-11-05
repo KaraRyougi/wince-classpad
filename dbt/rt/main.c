@@ -26,9 +26,11 @@
 #endif
 #define GUEST_LOAD   GUEST_RAM_LO
 #ifndef NK_FLASH
-#define NK_FLASH     0x81000000u          /* NOR offset 16 MiB */
+#define NK_FLASH     0x81000000u          /* NOR offset 16 MiB (dbt/Makefile NK_FLASH) */
 #endif
-#define NK_FLASH_MAX 0x00F00000u          /* readable span: up to the 2 MiB add-in window at 31 MiB... keep 15 MiB */
+#ifndef NK_FLASH_MAX
+#define NK_FLASH_MAX 0x003E0000u          /* the window on the device: the erased hole in Casio's OS image ends at offset 0x13E0000 (docs/03) */
+#endif
 
 extern const unsigned char guest_blob_start[], guest_blob_end[];   /* asm: _guest_blob_* */
 

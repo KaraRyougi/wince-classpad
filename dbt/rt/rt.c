@@ -114,7 +114,11 @@ static void watch_char(int c);
 #endif
 void dbt_putc(int c)
 {
-    DEBUG_PORT = (sf_u8)c;
+#ifndef DBT_NO_DEBUG_PORT
+    DEBUG_PORT = (sf_u8)c;          /* casio-emu only (make DEVICE=1 leaves it out) */
+#else
+    (void)c;
+#endif
 #ifdef DBT_TRACE_EXEC
     watch_char(c);
 #endif

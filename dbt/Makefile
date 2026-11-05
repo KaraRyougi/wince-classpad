@@ -41,7 +41,20 @@ RT_SRC := rt/crt0.S rt/stubs.S rt/main.c rt/rt.c rt/nkbin.c rt/bench.c bench/loo
 # P1 range) is flattened to the bytes the NOR holds at its own address and
 # runs in place (XIP). Example: make NKBIN=/abs/path/NK.bin run
 NKBIN       ?=
+# NOR offset of the CE image. On the fx-CP400 (64 MiB chip) offset 16 MiB lies
+# in the erased hole inside Casio's 21 MiB OS image (0x00EE0000-0x013E0000,
+# docs/03); the window ends at 0x013E0000, so an image has 3.875 MiB
+# (config.bib ROMSIZE). NK_FLASH is the same offset as a P1 address.
 NK_FLASH_OFF ?= 0x01000000
+NK_FLASH     := 0x81000000
+NK_FLASH_MAX := 0x003E0000
+FLASH_DEFS   := -DNK_FLASH=$(NK_FLASH)u -DNK_FLASH_MAX=$(NK_FLASH_MAX)u
+HOST_CFLAGS  += $(FLASH_DEFS)
+# make DEVICE=1 hhk: a translator without the emulator's debug port (byte
+# stores to 0xFFFFF000, undefined on the real SoC); its prints then go only to
+# the debug ring. Use a private BUILD dir so emulator builds keep their port.
+DEVICE ?= 0
+HOST_CFLAGS  += $(if $(filter 1,$(DEVICE)),-DDBT_NO_DEBUG_PORT,)
 NK_PADDED = $(BUILD)/nk-flash.bin
 NK_OFF_FILE = $(BUILD)/nk-flash.off
 NK_ENV = $(if $(NKBIN),HLE_OSROM=$(abspath $(NK_PADDED)) HLE_OSROM_PAD=$$(cat $(NK_OFF_FILE)),)   # recursive: nkrun sets NKBIN per target
@@ -60,7 +73,7 @@ define NK_PAD
 mkdir -p $(BUILD) && python3 ../tools/nkflash.py $(NKBIN) $(NK_PADDED) $(NK_FLASH_OFF) > $(NK_OFF_FILE) && echo "flash offset $$(cat $(NK_OFF_FILE))"
 endef
 
-.PHONY: all clean run nkrun nkshot screenshot disasm
+.PHONY: all clean run nkrun nkshot screenshot disasm hhk hhk-check hhkrun flashtest
 
 IMG := $(BUILD)/dbt-$(GUEST)
 
@@ -123,6 +136,65 @@ $(IMG)-loader.bin: $(IMG)-loader.elf
 # casio-emu reads the payload from file offset 0x7000 (g3a header size)
 $(IMG).g3a: $(IMG)-loader.bin
 	( dd if=/dev/zero bs=28672 count=1 2>/dev/null; cat $< ) > $@
+
+# --- HollyHock program for the real fx-CP400 (dbt/hhk, docs/03, loader/README.md) ---
+# wince.hhk: the stub (hhk/launcher.c, loaded by HollyHock at 0x8CFF0000) with
+# the translator image $(IMG).bin as a second loadable region at IMAGE_BASE;
+# the stub quiets the OS's interrupt sources and jumps into it the way the
+# .g3a launcher does (hhk/takeover.S). nkflash.hhk writes \fls0\NK.bin into
+# the NOR window at NK_FLASH. Both are plain ELF files (also copied as .hh3).
+HHK_BASE   := 0x8CFF0000
+HHK_LIMIT  := 0x8D000000
+HHK_VERSION := $(shell git -C .. log -1 --format=%cd --date=short 2>/dev/null || echo dev)
+HHK_CFLAGS := $(HOST_CFLAGS) -I hhk -DHHK_APP_VERSION='"$(HHK_VERSION)"'
+HHK_LD     := -T hhk/hhk.ld -Wl,--defsym,HHK_BASE=$(HHK_BASE) -Wl,--defsym,HHK_LIMIT=$(HHK_LIMIT) -Wl,--defsym,PAYLOAD_BASE=$(IMAGE_BASE)
+HHK_COMMON := hhk/start.S hhk/util.c hhk/os.c
+PAYLOAD_H  := $(BUILD)/dbt-$(GUEST)-payload.h
+WINCE_HHK  := $(BUILD)/wince.hhk
+NKFLASH_HHK := $(BUILD)/nkflash.hhk
+
+$(PAYLOAD_H): $(IMG).bin ../tools/hhkpayload.py
+	python3 ../tools/hhkpayload.py $< > $@
+
+$(WINCE_HHK): $(HHK_COMMON) hhk/launcher.c hhk/takeover.S hhk/payload.S hhk/hhk.ld hhk/util.h hhk/os.h $(IMG).bin $(PAYLOAD_H)
+	$(CC) $(HHK_CFLAGS) -include $(PAYLOAD_H) -DIMAGE='"$(IMG).bin"' $(HHK_LD) -o $@ $(HHK_COMMON) hhk/launcher.c hhk/takeover.S hhk/payload.S -lgcc
+	cp $@ $(@:.hhk=.hh3)
+
+$(NKFLASH_HHK): $(HHK_COMMON) hhk/nkflash.c hhk/norflash.c hhk/hhk.ld hhk/util.h hhk/os.h hhk/norflash.h
+	$(CC) $(HHK_CFLAGS) -DHHK_APP_NAME='"CE image flasher"' -DHHK_APP_DESC='"writes fls0/NK.bin into the NOR window for Windows CE"' $(HHK_LD) -o $@ $(HHK_COMMON) hhk/nkflash.c hhk/norflash.c -lgcc
+	cp $@ $(@:.hhk=.hh3)
+
+hhk: $(WINCE_HHK) $(NKFLASH_HHK) hhk-check
+
+# the .hhk carries the very bytes the emulator runs (and loads where the layout says)
+hhk-check: $(WINCE_HHK) $(NKFLASH_HHK) $(IMG).g3a ../tools/hhkcheck.py
+	python3 ../tools/hhkcheck.py $(WINCE_HHK) $(IMG).bin $(IMG).g3a $(IMAGE_BASE)
+	python3 ../tools/hhkcheck.py $(NKFLASH_HHK)
+
+# the same stub as a casio-emu payload: hhk_takeover (quiesce, copy, cache sync,
+# jump) runs the current guest in the emulator. make GUEST=hello hhkrun
+HHK_EMU_SRC := hhk/start.S hhk/util.c hhk/launcher.c hhk/takeover.S hhk/payload.S
+$(BUILD)/dbt-$(GUEST)-hhk.elf: $(HHK_EMU_SRC) hhk/hhk-emu.ld $(IMG).bin $(PAYLOAD_H)
+	$(CC) $(HOST_CFLAGS) -I hhk -DHHK_EMU -include $(PAYLOAD_H) -DIMAGE='"$(IMG).bin"' -T hhk/hhk-emu.ld -o $@ $(HHK_EMU_SRC) -lgcc
+
+$(BUILD)/dbt-$(GUEST)-hhk.g3a: $(BUILD)/dbt-$(GUEST)-hhk.elf
+	$(OBJCOPY) -O binary $< $(<:.elf=.bin)
+	( dd if=/dev/zero bs=28672 count=1 2>/dev/null; cat $(<:.elf=.bin) ) > $@
+
+hhkrun: $(BUILD)/dbt-$(GUEST)-hhk.g3a
+	$(if $(NKBIN),$(NK_PAD))
+	-$(EMU_ENV) $(NK_ENV) $(EMU)/run-headless.sh $(abspath $<) $(RUN_SECS)
+
+# norflash.c against the emulator's NOR command decoder (HLE_FLASH_CMD=1)
+$(BUILD)/flashtest.elf: hhk/start.S hhk/util.c hhk/norflash.c hhk/flashtest.c hhk/hhk-emu.ld | $(BUILD)
+	$(CC) $(HOST_CFLAGS) -I hhk -DHHK_EMU -T hhk/hhk-emu.ld -o $@ hhk/start.S hhk/util.c hhk/norflash.c hhk/flashtest.c -lgcc
+
+$(BUILD)/flashtest.g3a: $(BUILD)/flashtest.elf
+	$(OBJCOPY) -O binary $< $(<:.elf=.bin)
+	( dd if=/dev/zero bs=28672 count=1 2>/dev/null; cat $(<:.elf=.bin) ) > $@
+
+flashtest: $(BUILD)/flashtest.g3a
+	-$(EMU_ENV) HLE_FLASH_CMD=1 $(EMU)/run-headless.sh $(abspath $<) 10
 
 run: $(IMG).g3a
 	$(if $(NKBIN),$(NK_PAD))

@@ -19,8 +19,10 @@ leaves the window or a non-SH4 CPU type is reported as a warning.
 Where the image comes from (`dbt/rt/main.c`):
 
 1. **Flash**, at `NK_FLASH` (default P1 `0x81000000`, NOR offset 16 MiB).
-   This is the layout the real device will use (the CE image lives in the
-   32 MiB XIP flash; Casio's OS occupies the first few MiB). In casio-emu
+   This is the layout the real device uses (the fx-CP400 chip is 64 MiB;
+   offset 16 MiB is inside the erased hole of Casio's 21 MiB OS image and the
+   window runs to offset 0x13E0000, docs/03; `nkflash.hhk` programs it from
+   Casio's OS, `wince.hhk` starts the translator: `dbt/hhk`). In casio-emu
    the add-in window is only 2 MiB, so a CE image cannot travel inside the
    `.g3a`; instead `HLE_OSROM=<file> HLE_OSROM_PAD=<offset>` places a file
    into the emulated NOR, and `tools/nkflash.py` (run by the Makefile for
@@ -59,7 +61,7 @@ bytes before handing it to `HLE_OSROM`.
 | range | use | size |
 |---|---|---|
 | 0x8C000000-0x8C0FFFFF | left to the launcher / Casio OS workspace in the emulator | 1 MiB |
-| 0x81000000-0x817FFFFF | NOR: the CE image, executed in place (XIP); on the device the first 16 MiB of the chip hold Casio's OS | 8 MiB |
+| 0x81000000-0x813DFFFF | NOR: the CE image, executed in place (XIP); on the device this is the erased hole inside Casio's OS image (docs/03), `ROMSIZE` in config.bib | 3.875 MiB |
 | 0x8C100000-0x8CC7FFFF | guest: CE RAM (the whole window; a RAMIMAGE build puts its image here too) | 11.5 MiB |
 | 0x8CC80000-0x8CEFFFFF | translator text/data/bss (~2.3 MiB: 4096 block headers, 1.25 MiB metadata arena, hash 64 KiB) + C stack | 2.5 MiB |
 | 0x8CF00000-0x8CFFFFFF | code cache | 1 MiB |

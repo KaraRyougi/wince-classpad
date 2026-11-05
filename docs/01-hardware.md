@@ -27,8 +27,8 @@ fx-CP400 firmware write-ups, Omnimaga/Cemetech teardowns, Phoronix on the
 
 | Virtual | Physical | Size | What |
 |---|---|---|---|
-| 0x80000000 | 0x00000000 | 32 MiB | Flash, cached (P1). Casio OS executes in place here. |
-| 0xA0000000 | 0x00000000 | 32 MiB | Flash, uncached (P2) |
+| 0x80000000 | 0x00000000 | 64 MiB | Flash, cached (P1). Casio OS executes in place here (map in docs/03). |
+| 0xA0000000 | 0x00000000 | 64 MiB | Flash, uncached (P2) |
 | 0x8C000000 | 0x0C000000 | 16 MiB | SDRAM (ESMT M12L128168A, 128 Mbit). Framebuffer at 0x8C000000. |
 | 0x8E000000 | | | MCS region per the wiki (conflicting notes; treat as reserved) |
 | 0x00000300 | | | Casio bootloader ("LV777", "CASIOABS" at 0x3380) |
@@ -42,8 +42,12 @@ The chip on the fx-CP400 is a Spansion custom part (board marking S99 xxxxx)
 that a 2013 teardown called NAND. All software evidence says it is a linear,
 16-bit, memory-mapped device that the CPU executes from (firmware patch
 offsets equal ROM address minus 0x80000000; gint speaks of "flash-mapped ROM").
-For our purposes it is NOR-like and XIP-capable. The fx-CG50/CG100 use a
-32 MiB Spansion NOR (S29GL256 class).
+For our purposes it is NOR-like and XIP-capable: a 64 MiB x16 part with
+uniform 128 KiB sectors and the AMD/Spansion command set (unlock 0xAAA/0x554,
+32-word write buffer), as casio-emu models it from the OS's driver; the
+2013 teardown's 32 MiB figure was wrong (docs/03 "The fx-CP400 flash map":
+Casio's 21 MiB OS image, MCS backup, 24 MiB storage and 5.5 MiB eActivity
+file systems). The fx-CG50/CG100 use a 32 MiB Spansion NOR (S29GL256 class).
 
 ## Display and input
 
