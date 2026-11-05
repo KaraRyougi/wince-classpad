@@ -245,3 +245,19 @@ Open (2026-11-04 evening): with the three fixes above the blit-logging image sti
   528-row push is slower than the 216-row one). Everything the ClassPad target needed from docs/05 section 5 is in
   and verified; nothing is known to be open for this image on the emulator.
 
+2026-11-05, Standard Shell image (catalog: Still Image Codec Support, Solitaire, AYGShell API Set, Graphical Shell -
+  Standard Shell, QVGA Resources - Portrait Mode; Terminal Emulator dropped; Clean Sysgen after the catalog change,
+  the plain Sysgen failed linking coredllhs.dll with 59 unresolved shell/notify/DPA symbols because the stale
+  coredllhs_ALL.lib was "up-to-date"). NK.bin 6.95 MB, kernel.dll relinked from the patched nkmain.lib. Two
+  build-pipeline lessons: makeimg packs whatever platform.reg sits in RelDir, and "Copy Files to Release Directory"
+  did not replace it (the RelDir copy was 06:41 old twice; a manual copy fixed it), so check reginit.ini's timestamp
+  and content after makeimg. First runs (NK-shell1/2/3.bin, hello still Launch60): the hello window covers the
+  desktop; a GWES wait cursor at ~9-11 min and nothing else in 900 s. platform.reg now leaves hello out of init
+  (commit b962bfc; it also restores common.reg's Launch60 servicesStart.exe). NK-shell4.bin (07:23 VM time) on the
+  ClassPad profile, default translator build, 1500 s: POSTINIT ~1 min, drivers ~3 min, first frame at ~5.5 min
+  (black screen, wait cursor; the DDI's first 48 blits are offscreen cursor/icon compositing), desktop at ~9.5 min
+  (blue background, My Device / Recycle Bin / Microsoft WordPad / My Documents icons, the CE 6.0 startup logo),
+  taskbar at ~10.5 min (Start button, clock, input panel icon), then idle with the clock advancing
+  (notes/ce/desktop-cp400.png). QVGA portrait resources lay the icons out in one column. The 6.95 MB image exceeds
+  the 3.875 MiB NOR hole of the real device (docs/03): emulator only for now.
+
