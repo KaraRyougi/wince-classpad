@@ -171,12 +171,15 @@ NKFLASH_HHK := $(BUILD)/nkflash.hhk
 $(PAYLOAD_H): $(IMG).bin ../tools/hhkpayload.py
 	python3 ../tools/hhkpayload.py $< > $@
 
-$(WINCE_HHK): $(HHK_COMMON) hhk/launcher.c hhk/takeover.S hhk/payload.S hhk/hhk.ld hhk/util.h hhk/os.h $(IMG).bin $(PAYLOAD_H)
-	$(CC) $(HHK_CFLAGS) -include $(PAYLOAD_H) -DIMAGE='"$(IMG).bin"' $(HHK_LD) -o $@ $(HHK_COMMON) hhk/launcher.c hhk/takeover.S hhk/payload.S -lgcc
+# wince.hhk carries the flasher too: NK.bin on the calculator is written to
+# the window when it differs from what is there, then CE boots
+HHK_FLASH := hhk/nkflash.c hhk/norflash.c
+$(WINCE_HHK): $(HHK_COMMON) $(HHK_FLASH) hhk/launcher.c hhk/takeover.S hhk/payload.S hhk/hhk.ld hhk/util.h hhk/os.h hhk/nkflash.h hhk/norflash.h $(IMG).bin $(PAYLOAD_H)
+	$(CC) $(HHK_CFLAGS) -include $(PAYLOAD_H) -DIMAGE='"$(IMG).bin"' $(HHK_LD) -o $@ $(HHK_COMMON) $(HHK_FLASH) hhk/launcher.c hhk/takeover.S hhk/payload.S -lgcc
 	cp $@ $(@:.hhk=.hh3)
 
-$(NKFLASH_HHK): $(HHK_COMMON) hhk/nkflash.c hhk/norflash.c hhk/hhk.ld hhk/util.h hhk/os.h hhk/norflash.h
-	$(CC) $(HHK_CFLAGS) -DHHK_APP_NAME='"CE image flasher"' -DHHK_APP_DESC='"writes fls0/NK.bin into the NOR window for Windows CE"' $(HHK_LD) -o $@ $(HHK_COMMON) hhk/nkflash.c hhk/norflash.c -lgcc
+$(NKFLASH_HHK): $(HHK_COMMON) $(HHK_FLASH) hhk/hhk.ld hhk/util.h hhk/os.h hhk/nkflash.h hhk/norflash.h
+	$(CC) $(HHK_CFLAGS) -DNKFLASH_STANDALONE -DHHK_APP_NAME='"CE image flasher"' -DHHK_APP_DESC='"writes fls0/NK.bin into the NOR window for Windows CE"' $(HHK_LD) -o $@ $(HHK_COMMON) $(HHK_FLASH) -lgcc
 	cp $@ $(@:.hhk=.hh3)
 
 hhk: $(WINCE_HHK) $(NKFLASH_HHK) hhk-check

@@ -73,16 +73,21 @@ it, so `NK_FLASH` stays 0x81000000 and the usable window ends at 0x13E0000:
     translator image `dbt-<guest>.bin` as a second loadable region at its own
     link address 0x8CC80000, so the launcher's copy puts it where `loader.S`
     would. The stub checks the copy against the byte sum recorded at build
-    time, says what it found (translator size, whether the NOR window holds
-    an XIP ROMHDR, a RAM image or nothing) and waits for EXE (Clear returns
-    to HollyHock); then `hhk/takeover.S` masks interrupts (IMASK=15, RB=0),
+    time, then (since 2026-11-05 the flasher is built in) looks for
+    `\fls0\NK.bin`: when the file is there it is compared with the window
+    record by record and, if it differs, erased and programmed after the
+    one EXE the stub asks for; without the file the stub boots what the
+    window holds. It says what it found (translator size, window state, CE
+    image kind) and waits for that EXE (Clear returns to HollyHock); then
+    `hhk/takeover.S` masks interrupts (IMASK=15, RB=0),
     quiets the OS's interrupt sources (TMU stopped, all INTC priorities 0 and
     sources masked, IRQ pins masked, RTC interrupts off), turns the MMU off
     with the TLB flushed, syncs the caches over the image and jumps to it.
     From there the path is the emulator's: `crt0.S`, `dbt_main` finds the
     XIP image at `NK_FLASH`, the kernel starts. Without OS routines (below)
     the stub boots at once, silently.
-  - `nkflash.hhk`: writes `\fls0\NK.bin` (Platform Builder's output, copied
+  - `nkflash.hhk`: the same flasher as a tool of its own (flash without
+    booting). It writes `\fls0\NK.bin` (Platform Builder's output, copied
     to the calculator's USB storage) into the window: an XIP build has each
     record programmed at its own address (P1 address - 0x80000000), a RAM
     image goes as is to `NK_FLASH`; the same decision `tools/nkflash.py`
@@ -115,12 +120,12 @@ it, so `NK_FLASH` stays 0x81000000 and the usable window ends at 0x13E0000:
    `dbt/build-dev/wince.hhk`, `dbt/build-dev/nkflash.hhk` and `NK.bin` to the
    root of the calculator's storage (`\fls0\`). If the launcher lists only
    `.hh3` files, use the `.hh3` copies.
-3. Run `nkflash.hhk` from the HollyHock launcher: it reports the window,
-   the image range and whether the window is blank, then erases and programs
-   on EXE (about a minute for 2.5 MiB) and ends with "ROMHDR marker: ECEC
-   found".
-4. Run `wince.hhk`: it should report "XIP image (ROMHDR) in flash"; EXE
-   hands the machine over. Nothing is visible until the display driver
+3. Run `wince.hhk` from the HollyHock launcher: it reports the window, the
+   image in `NK.bin` and whether the flash already holds it, then on EXE
+   erases and programs if needed (about a minute for 2.5 MiB, "ROMHDR
+   marker: ECEC found") and hands the machine over. `nkflash.hhk` does the
+   flashing alone when that is wanted.
+4. Nothing is visible until the display driver
    starts (minutes under the translator: the Release GWES image takes about
    15 s of emulated time, so expect several real minutes); a RESET (back of
    the calculator) returns to Casio's OS, whose RAM state is gone but whose
@@ -231,8 +236,8 @@ OS boots:
    also treats a Fugue volume in the window (the `Fugue FAT File System`
    header at +0x2020) as erasable, so it works on a freshly reformatted
    area;
-3. from HollyHock: `nkflash.hhk` (about a minute for 7 MB: 56 sector
-   erases plus programming), then `wince.hhk`;
+3. from HollyHock: `wince.hhk` (it flashes `NK.bin` first, about a minute
+   for 7 MB: 56 sector erases plus programming, then boots);
 4. after a RESET, Casio's OS finds the volume invalid, erases the 61 sectors
    and formats it again: the image is gone, the eActivity application works
    as before (empty), and the next CE session starts at step 3.

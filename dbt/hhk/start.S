@@ -75,7 +75,7 @@ _start:
         .endm
 #ifndef HHK_APP_NAME
 #define HHK_APP_NAME "Windows CE"
-#define HHK_APP_DESC "boots the CE image from flash through the translator"
+#define HHK_APP_DESC "flashes fls0/NK.bin if needed, then boots CE through the translator"
 #endif
         HHNOTE  NAME, HHK_APP_NAME
         HHNOTE  DESCRIPTION, HHK_APP_DESC

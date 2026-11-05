@@ -1,17 +1,22 @@
 /* launcher.c - the Windows CE launcher (wince.hhk): started by HollyHock from
- * Casio's OS, it hands the fx-CP400 to the translator image that the ELF
- * carries at IMAGE_BASE (payload.S, placed there by the launcher's own copy)
- * and lets the translator find the CE image in the NOR at NK_FLASH (docs/05).
+ * Casio's OS, it brings the NOR window up to date from \fls0\NK.bin when
+ * that file is there and differs from the flash (hhk/nkflash.c), then hands
+ * the fx-CP400 to the translator image that the ELF carries at IMAGE_BASE
+ * (payload.S, placed there by the launcher's own copy), which finds the CE
+ * image in the NOR at NK_FLASH (docs/05).
  *
- * With OS routines available (os.c) it shows what it found and waits for EXE;
- * without them it boots at once. The payload is checked against the sum the
+ * With OS routines available (os.c) it shows what it found and waits for
+ * one EXE before touching the flash or the machine; without them it boots
+ * what is in the flash at once. The payload is checked against the sum the
  * build recorded (PAYLOAD_SUM/PAYLOAD_SIZE from <build>/...-payload.h) so a
  * truncated copy on the calculator never runs.
  * HHK_EMU: the same stub as a casio-emu .g3a; the payload sits behind the
- * stub in the add-in window and hhk_takeover copies it (dbt/loader/loader.S). */
+ * stub in the add-in window and hhk_takeover copies it (dbt/loader/loader.S);
+ * no OS, no flashing. */
 #include "util.h"
 #ifndef HHK_EMU
 #include "os.h"
+#include "nkflash.h"
 #endif
 
 extern const u8 payload_start[], payload_end[];
@@ -32,6 +37,16 @@ static const char *ce_image_kind(void)
     return "none: the embedded guest will run";
 }
 
+#ifndef HHK_EMU
+static int stop(const char *msg)
+{
+    nk_say("%s", msg);
+    nk_say("Clear or EXE: back to HollyHock");
+    ui_wait_exe_or_clear();
+    return 1;
+}
+#endif
+
 int hhk_main(int argc, char **argv, char **envp)
 {
     u32 len = (u32)(payload_end - payload_start);
@@ -46,24 +61,35 @@ int hhk_main(int argc, char **argv, char **envp)
 #else
     os_init(argc, argv, envp);
     if (os_ok) {
-        ui_clear();
-        ui_printf(1, "Windows CE launcher (wince-classpad)");
-        ui_printf(2, "OS routines: %s", os_source);
-        ui_printf(4, "translator: %u bytes at %08x", len, (u32)payload_start);
-        ui_printf(5, "payload sum %08x: %s", sum, ok ? "ok" : "MISMATCH");
-        ui_printf(7, "CE image at %08x:", (u32)NK_FLASH);
-        ui_printf(8, "  %s", ce_image_kind());
-        if (ok) {
-            ui_printf(11, "EXE: leave Casio's OS and boot CE");
-            ui_printf(12, "Clear: back to HollyHock");
-            ui_printf(14, "(the screen stays until the CE display");
-            ui_printf(15, " driver starts; reset to return)");
+        int file, same;
+        ui_clear(); nk_row = 1;
+        nk_say("Windows CE launcher (wince-classpad)");
+        nk_say("OS routines: %s", os_source);
+        nk_say("translator %u bytes, sum %08x %s", len, sum, ok ? "ok" : "MISMATCH");
+        if (!ok) return stop("Copy wince.hhk to the calculator again.");
+        nk_say("window %08x %s", (u32)NK_FLASH, nkflash_window_state());
+        file = nkflash_open();
+        if (file == NKF_BAD) return stop("NK.bin rejected: nothing written.");
+        same = 0;
+        if (file == NKF_READY) {
+            nk_say("comparing NK.bin with the flash...");
+            same = nkflash_compare();
+            if (same < 0) { nkflash_close(); return stop("NK.bin unreadable."); }
+            nk_say(same ? "NK.bin is already in the flash" : "NK.bin differs: will erase and program");
         } else {
-            ui_printf(11, "Copy wince.hhk to the calculator again.");
-            ui_printf(12, "Clear or EXE: back to HollyHock");
+            nk_say("no \\fls0\\NK.bin: booting what is there");
         }
-        ui_refresh();
-        if (!ui_wait_exe_or_clear() || !ok) return ok ? 0 : 1;
+        nk_say("CE image: %s", ce_image_kind());
+        if (file == NKF_NOFILE && !memcmp((const char *)NK_FLASH, "\xff\xff\xff\xff", 4) && memcmp((const char *)NK_FLASH + 0x40, "ECEC", 4))
+            nk_say("(the embedded test guest would run)");
+        nk_say("EXE: %s and boot CE   Clear: cancel", (file == NKF_READY && !same) ? "flash NK.bin" : "go");
+        if (!ui_wait_exe_or_clear()) { nkflash_close(); return 0; }
+        if (file == NKF_READY && !same) {
+            if (nkflash_write()) { nkflash_close(); return stop("Flash failed: not booting."); }
+        }
+        nkflash_close();
+        nk_say("starting the translator (the screen stays");
+        nk_say(" until the CE display driver runs)");
     } else if (!ok) {
         return 1;                       /* no way to say so: do nothing */
     }
