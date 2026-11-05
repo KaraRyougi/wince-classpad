@@ -42,12 +42,27 @@ well, at about the same boot time under the translator.
 ## Display: GWES image
 
 `SRC\DRIVERS\DISPLAY` is a GPE display driver (`classpad_ddi.dll`): GDI draws
-into a RAM frame buffer, a thread pushes the dirty rows to the R61524 through
-its 16-bit data port (the `lcd` guest's protocol; geometry in
-`SRC\INC\classpad_lcd.h`, 384x216 for the emulated fx-CG100 panel).
-`SRC\APPS\HELLO` is the first window (colour bars, frame, counter), launched
-from HKLM\init after GWES. Both are built with the BSP and go into the image
+into a RAM frame buffer, a thread pushes the dirty rows to the panel through
+its 16-bit data port at 0xB4000000 (Port R bit 4 = command/data). Two panels,
+`SRC\INC\classpad_lcd.h`: the fx-CP400's DCS command set (320x528; CASET
+0x2A / PASET 0x2B with four parameter bytes, RAMWR 0x2C then one RGB565
+pixel per 16-bit write, SLPOUT 0x11 + COLMOD 0x3A at start, DISPON 0x29
+after the first push, DISPOFF/SLPIN from the power handler; what casio-emu's
+fx-cp400 profile models, `src/hardware/classpad/classpad.c`) and the
+fx-CG100's R61524 registers (384x216, the `lcd` guest's protocol, kept for
+the emulator's fx-cg100 profile). Registry `HKLM\Drivers\Display\ClassPad`:
+`Width`/`Height` (default: the panel's size; `platform.reg` says 320x528)
+and `Panel` (1 = DCS, 0 = R61524; absent: a height under 500 rows means
+the R61524). `SRC\APPS\HELLO` is the first window (colour bars, frame,
+counter, key and touch log), launched from HKLM\init after GWES; it sizes
+itself from the screen. Both are built with the BSP and go into the image
 only when GWES is in the OS design (`CE_MODULES_DISPLAY`).
+
+The DCS panel is unverified so far (2026-11-05: written against the
+emulator's model, the image not yet rebuilt). On a real fx-CP400 the panel
+is powered up and initialised by Casio's boot code before the OS runs; the
+driver's own sequence (SLPOUT, 120 ms, COLMOD 16 bpp, DISPON) is the DCS
+minimum and may need the OS's full sequence (orientation, gamma) there.
 
 To get them: in the Catalog Items View add, under Core OS > CEBASE > Shell
 and User Interface > Graphics, Windowing and Events, "Minimal GDI
@@ -57,8 +72,18 @@ Fonts > Tahoma, so DrawText has something to draw with). Then Build >
 Advanced Build Commands > Sysgen (the catalog changed), Build Current BSP
 and Subprojects, Copy Files to Release Directory, Make Run-Time Image. On
 the Mac `make -C dbt NKBIN=/abs/NK.bin RUN_SECS=300 nkshot` runs the image
-with the emulator dumping the last meaningful frame to `dbt/build/nk.png`;
-the console shows "CLASSPAD DDI: ..." and "CLASSPAD HELLO: ..." on the way.
+on the emulator's fx-cp400 profile (`EMU_MODEL`, dbt/Makefile) with the
+last meaningful frame dumped to `dbt/build/nk.png`; the console shows
+"CLASSPAD DDI: 320x528 16bpp, DCS fx-CP400 panel, ..." and
+"CLASSPAD HELLO: ..." on the way.
+
+Rebuilding for the ClassPad panel (the 2026-11-05 change: DCS display
+variant, 320x528 in `platform.reg`, `Matrix`=1; the kernel is already
+patched): copy `bsp/classpad` over `PLATFORM\CLASSPAD`, then Build >
+Build Current BSP and Subprojects, Copy Files to Release Directory, Make
+Run-Time Image (no Sysgen: the catalog did not change). The display
+driver, the registry and the keyboard layout choice are all in the BSP
+and its FILES, so this rebuilds everything that changed.
 
 ## Keyboard and touch
 
@@ -128,12 +153,11 @@ takes a headless stylus press:
 (`[INJECTTOUCH down] 160 264 at tick ...` on the emulator side). The
 2026-11-05 image boots there to the same hello window and key events, but
 it is built for 384x216: the touch driver decides "display 384x216 -> no
-touch panel" and never touches IIC0, and the display driver's R61524
-register writes mean nothing to the ClassPad panel model (a DCS panel:
-commands 0x2A/0x2B/0x2C, 0x11, 0x29), so the emulated screen stays blank
-and no `nk.png` is written. Touch is exercised once the image is built for
-the ClassPad panel (registry `Width`/`Height` 320x528 or `"Panel"=dword:1`,
-a DCS variant of the DDI, `Matrix`=1); docs/05 section 5 lists the details.
+touch panel" and never touches IIC0, and that image's display driver spoke
+R61524 to the ClassPad's DCS panel, so the emulated screen stayed blank and
+no `nk.png` was written. The sources now carry the ClassPad geometry, the
+DCS display variant and `Matrix`=1 (above); the next image built from them
+should show the window at 320x528 and exercise touch with this recipe.
 
 ## What the files are
 

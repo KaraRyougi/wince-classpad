@@ -1,7 +1,8 @@
 !if 0
 classpad_ddi.dll - GPE display driver for the ClassPad under the translator.
 A RAM frame buffer that GDI draws into; a thread pushes dirty rows to the
-R61524 through its 16-bit data port (no scan-out hardware).
+panel (fx-CP400 DCS, or the fx-CG100 R61524) through its 16-bit data port
+(no scan-out hardware).
 !endif
 TARGETNAME=classpad_ddi
 TARGETTYPE=DYNLINK

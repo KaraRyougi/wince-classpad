@@ -370,7 +370,19 @@ differs from the fx-CG100 run except the touch driver's panel decision. So
 the ClassPad's INTC arbitration (priority against IMASK instead of
 IMASK = 0) and its sleep semantics (an interrupt is accepted in `sleep`
 even with BL = 1, `handleSleepInterrupt`) change nothing for the kernel and
-the OAL. What the image still needs for the ClassPad, none of it done here:
+the OAL. What the image still needed for the ClassPad, found in that run.
+**Done in the sources the same day** (items 1, 2, 4 below; the image is
+rebuilt by the user in the VM: Build Current BSP and Subprojects, Copy
+Files to Release Directory, Make Run-Time Image, no Sysgen; the kernel is
+already patched): `classpad_lcd.h` describes both panels with per-panel
+sizes and the DCS command set; `classpad_ddi.cpp` picks the panel from the
+registry `Panel` or the height (under 500 rows = R61524, else DCS), sends
+SLPOUT, 120 ms, COLMOD 16 bpp at start, CASET/PASET/RAMWR per push, DISPON
+after the first push and DISPOFF/SLPIN from `PowerHandler`; `platform.reg`
+has `Width`=0x140, `Height`=0x210 and `Matrix`=1. The R61524 path still
+compiles and is chosen by `Height` < 500 or `Panel`=0. Unverified until the
+rebuilt image runs; the real panel's initialisation beyond the DCS minimum
+is unknown (Casio's boot code does it before the OS on the device).
 
 1. **Display protocol.** The ClassPad LCD model (`src/hardware/classpad/
    classpad.c`) is not an R61524: it is a DCS panel on the same 16-bit port
@@ -387,12 +399,13 @@ the OAL. What the image still needs for the ClassPad, none of it done here:
    (0x200-0x202, 0x210-0x213) through `LcdWriteReg`, which the ClassPad
    model takes as commands 0x00-0x13: the hello window is drawn in the frame
    buffer but the emulated panel stays blank, so `nkshot` produces no
-   `nk.png` on this profile. The DDI needs a panel variant (registry or
+   `nk.png` on this profile. The DDI needed a panel variant (registry or
    `Height` >= 500) that speaks this protocol, and `classpad_lcd.h`'s
-   `LCD_WIDTH`/`LCD_HEIGHT` ceilings (384x216) raised to 320x528.
+   384x216 ceilings raised to 320x528 (done, above).
 2. **Geometry.** `platform.reg`: `Width`=0x140, `Height`=0x210 for the
-   `ClassPad` display key (today 0x180 x 0xD8 = 384x216); `config.bib`'s
-   frame buffer size follows from the DDI.
+   `ClassPad` display key (was 0x180 x 0xD8 = 384x216; done). `config.bib`
+   needs nothing: the frame buffer is a `GPESurf` in GWES's RAM (338 KB at
+   320x528), not a reserved region.
 3. **Touch.** With a 528-row display the driver detects the panel itself,
    or `"Panel"=dword:1` under `HKLM\HARDWARE\DEVICEMAP\TOUCH` forces it;
    with this image it printed `display 384x216 -> no touch panel` and never

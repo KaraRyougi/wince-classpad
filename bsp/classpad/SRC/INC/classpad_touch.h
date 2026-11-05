@@ -31,8 +31,8 @@
 //  Unverified on hardware and under the translator: casio-emu's ClassPad
 //  profile runs the translator image since 2026-11-05 (make EMU_MODEL=fx-cp400,
 //  dbt/emu-patch/add_classpad_addin.py; HLE_CB_TOUCH="x,y" presses the stylus
-//  headlessly), but the image must be built for the 528-row panel (or
-//  "Panel"=1) before this driver touches the bus; see docs/05 section 5.
+//  headlessly); platform.reg says 320x528 since the same day, so the next
+//  image built exercises this driver there; see docs/05 section 5.
 //------------------------------------------------------------------------------
 #ifndef __CLASSPAD_TOUCH_H
 #define __CLASSPAD_TOUCH_H

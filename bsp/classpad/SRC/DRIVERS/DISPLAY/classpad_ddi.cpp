@@ -4,13 +4,17 @@
 //
 //  GDI draws into a RAM primary surface (GPE's software blt and line code).
 //  The controller cannot scan RAM out, so a thread pushes the rows GDI has
-//  touched to the R61524 through its data port: every Blt/Line on the primary
+//  touched to the panel through its data port: every Blt/Line on the primary
 //  surface widens a dirty row range, the thread pushes it at most every
-//  DISP_PUSH_MS. The emulator presents a frame when a full-width strip
-//  reaches the panel bottom, so a push always runs from the first dirty row
-//  to the last row. Panel geometry: classpad_lcd.h. Registry:
+//  DISP_PUSH_MS. The emulator's fx-CG100 panel presents a frame when a
+//  full-width strip reaches the panel bottom, so a push always runs from the
+//  first dirty row to the last row (the fx-CP400 panel shows every write).
+//  Two panels, classpad_lcd.h: the fx-CP400's DCS command set (default) and
+//  the fx-CG100's R61524 registers. Registry:
 //      HKLM\System\GDI\Drivers        "Display"="classpad_ddi.dll"
-//      HKLM\Drivers\Display\ClassPad  "Width", "Height" (optional overrides)
+//      HKLM\Drivers\Display\ClassPad  "Width", "Height" (optional; the
+//          panel's native size otherwise), "Panel" (0 = R61524 fx-CG100,
+//          1 = DCS fx-CP400; absent: a Height under 500 means the fx-CG100)
 //------------------------------------------------------------------------------
 #include <windows.h>
 #include <types.h>
@@ -57,6 +61,8 @@ class ClasspadGPE : public GPE
     int                 m_dirtyTop;
     int                 m_dirtyBottom;
     DWORD               m_pushes;
+    int                 m_panel;            // LCD_PANEL_DCS / LCD_PANEL_R61524
+    volatile BOOL       m_displayOn;        // DCS: DISPON sent (after the first push)
 
 public:
     ClasspadGPE();
@@ -73,8 +79,9 @@ public:
     virtual SCODE   Line(GPELineParms *pParms, EGPEPhase phase);
     virtual SCODE   BltPrepare(GPEBltParms *pParms);
     virtual SCODE   BltComplete(GPEBltParms *) { return S_OK; }
-    virtual VOID    PowerHandler(BOOL) { }
+    virtual VOID    PowerHandler(BOOL bOff);
 
+    void            PanelInit();
     SCODE           WrappedLine(GPELineParms *pParms);
     SCODE           WrappedBlt(GPEBltParms *pParms);
     void            Dirty(int top, int bottom);
@@ -94,10 +101,22 @@ static DWORD RegDword(LPCTSTR name, DWORD dflt)
 
 ClasspadGPE::ClasspadGPE()
 {
-    int width  = (int)RegDword(TEXT("Width"),  LCD_WIDTH);
-    int height = (int)RegDword(TEXT("Height"), LCD_HEIGHT);
-    if (width <= 0 || width > LCD_WIDTH)   width  = LCD_WIDTH;
-    if (height <= 0 || height > LCD_HEIGHT) height = LCD_HEIGHT;
+    int panel  = (int)RegDword(TEXT("Panel"),  0xFFFFFFFF);
+    int width  = (int)RegDword(TEXT("Width"),  0);
+    int height = (int)RegDword(TEXT("Height"), 0);
+    int maxWidth, maxHeight;
+    // The panel: the registry, else the configured height (a short display
+    // is the fx-CG100 panel of the emulator's fx-cg100 profile), else the
+    // ClassPad. Width/Height default to the panel's native size and cannot
+    // exceed it.
+    if (panel != LCD_PANEL_R61524 && panel != LCD_PANEL_DCS)
+        panel = (height > 0 && height < LCD_PANEL_MIN_ROWS) ? LCD_PANEL_R61524 : LCD_PANEL_DCS;
+    maxWidth  = panel == LCD_PANEL_DCS ? LCD_CP400_WIDTH  : LCD_CG100_WIDTH;
+    maxHeight = panel == LCD_PANEL_DCS ? LCD_CP400_HEIGHT : LCD_CG100_HEIGHT;
+    if (width <= 0 || width > maxWidth)   width  = maxWidth;
+    if (height <= 0 || height > maxHeight) height = maxHeight;
+    m_panel     = panel;
+    m_displayOn = FALSE;
 
     m_mode.modeId    = 0;
     m_mode.width     = width;
@@ -115,6 +134,8 @@ ClasspadGPE::ClasspadGPE()
     if (m_pPrimarySurface && m_pPrimarySurface->Buffer())
         memset(m_pPrimarySurface->Buffer(), 0, m_pPrimarySurface->Stride() * height);
 
+    if (m_panel == LCD_PANEL_DCS) PanelInit();
+
     InitializeCriticalSection(&m_cs);
     m_dirtyTop = 0; m_dirtyBottom = height;             // first push: the whole screen
     m_pushes = 0;
@@ -123,8 +144,9 @@ ClasspadGPE::ClasspadGPE()
     m_hThread = CreateThread(NULL, 0, PushThread, this, 0, NULL);
     if (m_hThread) CeSetThreadPriority(m_hThread, 250);  // below normal application threads
 
-    RETAILMSG(1, (TEXT("CLASSPAD DDI: %dx%d 16bpp, frame buffer %08x, stride %d\r\n"),
-                  width, height, m_pPrimarySurface ? m_pPrimarySurface->Buffer() : NULL,
+    RETAILMSG(1, (TEXT("CLASSPAD DDI: %dx%d 16bpp, %s panel, frame buffer %08x, stride %d\r\n"),
+                  width, height, m_panel == LCD_PANEL_DCS ? TEXT("DCS fx-CP400") : TEXT("R61524 fx-CG100"),
+                  m_pPrimarySurface ? m_pPrimarySurface->Buffer() : NULL,
                   m_pPrimarySurface ? m_pPrimarySurface->Stride() : 0));
 }
 
@@ -223,26 +245,71 @@ SCODE ClasspadGPE::WrappedBlt(GPEBltParms *pParms)
     return sc;
 }
 
+// DCS panel: wake it and set 16 bpp. DISPON follows the first push, so the
+// panel never shows GRAM the driver has not written (and the emulator stays
+// blank until then). The 120 ms is the DCS sleep-out settling time; the
+// emulator needs none of this sequence beyond SLPOUT and DISPON.
+void ClasspadGPE::PanelInit()
+{
+    LcdCommand(LCD_DCS_SLPOUT);
+    Sleep(120);
+    LcdCommand(LCD_DCS_COLMOD);
+    LcdParam(LCD_DCS_COLMOD_16BPP);
+}
+
 // Stream rows top..height-1 of the primary surface into the panel window.
 void ClasspadGPE::PushRows(int top)
 {
     const BYTE *fb = (const BYTE *)m_pPrimarySurface->Buffer();
     int stride = m_pPrimarySurface->Stride(), width = m_nScreenWidth, height = m_nScreenHeight, x, y;
     if (!fb) return;
-    LcdWriteReg(LCD_REG_HSTART, (USHORT)((LCD_GRAM_COLS - 1) - (LCD_COL0 + width - 1)));
-    LcdWriteReg(LCD_REG_HEND,   (USHORT)((LCD_GRAM_COLS - 1) - LCD_COL0));
-    LcdWriteReg(LCD_REG_VSTART, (USHORT)top);
-    LcdWriteReg(LCD_REG_VEND,   (USHORT)(height - 1));
-    LcdWriteReg(LCD_REG_HADDR,  0);
-    LcdWriteReg(LCD_REG_VADDR,  0);
-    LcdSelect(LCD_REG_DATA);
+    if (m_panel == LCD_PANEL_DCS) {
+        // window columns 0..width-1, rows top..height-1; RAMWR resets the cursor to its corner
+        LcdCommand(LCD_DCS_CASET);
+        LcdParam(0);                        LcdParam(0);
+        LcdParam((UCHAR)((width - 1) >> 8)); LcdParam((UCHAR)(width - 1));
+        LcdCommand(LCD_DCS_PASET);
+        LcdParam((UCHAR)(top >> 8));         LcdParam((UCHAR)top);
+        LcdParam((UCHAR)((height - 1) >> 8)); LcdParam((UCHAR)(height - 1));
+        LcdCommand(LCD_DCS_RAMWR);
+    } else {
+        LcdWriteReg(LCD_REG_HSTART, (USHORT)((LCD_CG100_GRAM_COLS - 1) - (LCD_CG100_COL0 + width - 1)));
+        LcdWriteReg(LCD_REG_HEND,   (USHORT)((LCD_CG100_GRAM_COLS - 1) - LCD_CG100_COL0));
+        LcdWriteReg(LCD_REG_VSTART, (USHORT)top);
+        LcdWriteReg(LCD_REG_VEND,   (USHORT)(height - 1));
+        LcdWriteReg(LCD_REG_HADDR,  0);
+        LcdWriteReg(LCD_REG_VADDR,  0);
+        LcdSelect(LCD_REG_DATA);
+    }
     for (y = top; y < height; y++) {
         const USHORT *row = (const USHORT *)(fb + y * stride);
         for (x = 0; x < width; x++) LcdWriteData(row[x]);
     }
+    if (m_panel == LCD_PANEL_DCS && !m_displayOn) {
+        LcdCommand(LCD_DCS_DISPON);
+        m_displayOn = TRUE;
+    }
     m_pushes++;
     if (m_pushes <= 3 || (m_pushes % 200) == 0)
         RETAILMSG(1, (TEXT("CLASSPAD DDI: push %d from row %d\r\n"), m_pushes, top));
+}
+
+// Power off / on from GWES. Called with the system mostly stopped: register
+// writes only, no synchronisation. Off: blank and sleep the DCS panel (GRAM
+// kept). On: wake it and let the push thread, whose wait times out every
+// DISP_PUSH_MS, repaint the whole screen; DISPON follows that push. The
+// R61524 path does nothing, as before.
+VOID ClasspadGPE::PowerHandler(BOOL bOff)
+{
+    if (m_panel != LCD_PANEL_DCS) return;
+    if (bOff) {
+        LcdCommand(LCD_DCS_DISPOFF);
+        LcdCommand(LCD_DCS_SLPIN);
+        m_displayOn = FALSE;
+    } else {
+        LcdCommand(LCD_DCS_SLPOUT);
+        m_dirtyTop = 0; m_dirtyBottom = m_nScreenHeight;
+    }
 }
 
 DWORD WINAPI ClasspadGPE::PushThread(LPVOID pThis)
