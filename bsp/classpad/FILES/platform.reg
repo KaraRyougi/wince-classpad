@@ -17,10 +17,13 @@
     "Width"=dword:140
     "Height"=dword:210
 
-; the first window, after GWES (Launch30)
-[HKEY_LOCAL_MACHINE\init]
-    "Launch60"="classpad_hello.exe"
-    "Depend60"=hex:1e,00
+; classpad_hello.exe used to start here as Launch60 (after GWES, Launch30). With
+; the Standard Shell in the image that full-screen window hid the desktop and
+; the key collided with common.reg's Launch60 (servicesStart.exe), so it is no
+; longer launched at boot: start \Windows\classpad_hello.exe from the shell
+; when needed. Put the two lines back for a shell-less image:
+;   "Launch60"="classpad_hello.exe"
+;   "Depend60"=hex:1e,00
 ; @CESYSGEN ENDIF CE_MODULES_DISPLAY
 
 ; Keyboard: Layout Manager + KEYSC matrix PDD in kbdmouse.dll (SRC\DRIVERS\KEYBD).
