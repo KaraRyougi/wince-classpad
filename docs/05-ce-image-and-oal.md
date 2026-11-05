@@ -289,9 +289,10 @@ What the kernel sources settled (2026-11-02, notes/ce/kernel-sh-notes.md):
    stays INFINITE). The kernel patch is verified (2026-11-05, rebuilt kernel,
    write watch on the event: the hole fired once at the first paint, the
    patched exit path unlinked the proxy and the IST went on; the window
-   ticked for the whole 600 s run). The two driver changes and the hello
-   frame fix still wait for the VM copies of KEYBD and HELLO to be
-   refreshed and rebuilt.
+   ticked for the whole 600 s run). With all of it rebuilt (same day) the
+   keyboard IST runs without a failure and the window shows bars, grey
+   field, frame and text for the whole run (`notes/ce/hello-fix3.png`);
+   the touch sample thread is not exercised on the fx-CG100 profile.
 7. Keyboard and touch (written 2026-11-03, not yet compiled):
    `SRC\DRIVERS\KEYBD` is the Layout Manager MDD with a PDD that programs
    the SH7305 KEYSC like the fx-CG100 OS does, requests a SYSINTR for its

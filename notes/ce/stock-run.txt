@@ -202,3 +202,13 @@ Open (2026-11-04 evening): with the three fixes above the blit-logging image sti
   booting in 330 s. Kernel-patch verification therefore: confirmed on one firing. Still to test: the new kbd_pdd.cpp
   and hello.c (frame via FillRects), once the VM copy of SRC\DRIVERS\KEYBD and SRC\APPS\HELLO is refreshed.
 
+2026-11-05, image with everything current (~/Downloads/CLASSPAD_SH4_Release rebuilt 04:52 VM time: patched kernel,
+  kbd_pdd.cpp with KeyscPoll, classpad_touch.cpp with SampleThread, hello.c with the FillRect frame; copy
+  notes/ce/NK-fix3.bin, screenshot notes/ce/hello-fix3.png, both ignored): 330 s under the default translator build,
+  "KEYBD: IST running, SYSINTR 16, poll 20 ms", one KEYSC interrupt at start, no failure message, hello ticks 10..40 and
+  the screenshot shows tick 45: colour bars, grey field, orange frame and the three white text lines are all visible.
+  The paint round is now: black erase, 8 bars, grey field, 4 frame FillRects (4,40-380,43 / 4,209-380,212 / 4,40-7,212 /
+  377,40-380,212), 3 text blits; no interior fill. Touch: no panel on the fx-CG100 profile, so the sample thread is
+  not exercised (needs the ClassPad profile, which cannot run the translator image). Next: inject keys in casio-emu
+  and see them in hello's log.
+
