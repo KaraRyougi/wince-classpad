@@ -223,3 +223,11 @@ Open (2026-11-04 evening): with the three fixes above the blit-logging image sti
   a press and 0 for a release. Fixed in kbd_pdd.cpp; needs the next VM build. The scan code -> VK mapping of the
   fx-CG100 layout (22 -> '1', 38 -> '7') is right.
 
+2026-11-05, image with the KeyStateDownFlag change (NK-fix4.bin, run on EMU_MODEL=fx-cp400 with the chord): same
+  inversion as before (hello: key up, key up, key down, key down, then '7' repeats for ever), so that diagnosis was
+  wrong. The Layout Manager's PDD callback is KeybdEventCallback(UINT uiPddId, UINT32 uiScanCode, BOOL fKeyUp)
+  (PUBLIC\COMMON\OAK\DRIVERS\KEYBD\LAYMGR\laymgr.cpp line ~2358): the third argument is a key-UP flag, whatever
+  keybdpdd.h calls it; 1 and 0x80 both mean "released". The PDD now passes 0 for a press and 1 for a release.
+  Needs another KEYBD rebuild. The ClassPad profile run otherwise matched the fx-CG100 one line for line (IST up,
+  interrupts 2 and 3 for the chord, scans 22/38).
+
