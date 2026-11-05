@@ -101,14 +101,19 @@ digit 7 is 74, 4 is 73, 1 is 72, EXE 31, OK 48) at `updateTimers` ticks,
 about 9000 ticks per second on an M-series Mac, a Release boot reaching
 GWES after 150-200 s:
 
-    HLE_CB_KEYSWEEP=72,74 HLE_CB_KEY_AT=1800000 HLE_CB_KEY_EVERY=90000 \
-        make -C dbt NKBIN=/abs/NK.bin RUN_SECS=420 nkshot
+    HLE_CB_CHORD=72,74 HLE_CB_CHORD_AT=1200000 HLE_CB_CHORD_HOLD=30000 \
+        make -C dbt NKBIN=/abs/NK.bin RUN_SECS=400 nkshot
 
-presses the keys 1, 4 and 7 (the sweep walks the codes 72, 73, 74) one
-after the other, 10 s apart, each printing `[INJECT] code=N` on the
-emulator side and the driver's `scan` / hello's `key down` lines on the
-console; `dbt/build/nk.png` shows the event log. The tick count is only a
-guide: pick `HLE_CB_KEY_AT` from the `[INJECT]` time stamps of a first run. Touch cannot
+holds the keys 1 and 7 together for 30000 ticks (about 0.9 s of guest
+time) from tick 1.2 million, printing `[INJECTCHORD down] 72 74` and
+`[INJECTCHORD up]` on the emulator side and the driver's `scan 22 down`,
+`scan 38 down`, then `scan .. up` lines and hello's `key down vk=31 sc=22`
+/ `char '1'` lines on the console; `dbt/build/nk.png` shows the event log.
+The single-press forms (`HLE_CB_KEY`, `HLE_CB_KEYSWEEP`, `HLE_CB_KEYSEQ`)
+hold a key for only 20 ticks, under 1 ms of guest time: the interrupt
+fires but the key is up again before the IST or the 20 ms poll reads the
+matrix, so they show nothing with this driver. The tick count is a guide:
+the window is up well before tick 1.2 million in a Release image. Touch cannot
 be exercised this way: casio-emu's ClassPad profile only cold-boots the
 real OS from a 64 MiB NOR image and refuses an add-in, so the touch driver
 is written against the emulator's model but has not run yet.

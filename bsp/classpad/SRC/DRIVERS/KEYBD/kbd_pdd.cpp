@@ -22,6 +22,7 @@
 //------------------------------------------------------------------------------
 #include <windows.h>
 #include <nkintr.h>
+#include <keybd.h>          // KeyStateDownFlag
 #include <keybddbg.h>
 #include <keybdpdd.h>
 #include <laymgr.h>
@@ -122,7 +123,10 @@ static UINT KeyscScan(void)
                 g_events++;
                 if (g_events <= 40 || (g_events % 100) == 0)
                     RETAILMSG(1, (TEXT("CLASSPAD KEYBD: scan %d %s (word %d bit %d)\r\n"), sc, down ? TEXT("down") : TEXT("up"), w, b));
-                if (g_pfnKeybdEvent) g_pfnKeybdEvent(g_uiPddId, sc, down);
+                // KEY_STATE_FLAGS, not a BOOL: 1 is KeyStateToggledFlag, which the Layout
+                // Manager read as "up" and then reported the release as a down that
+                // auto-repeated for ever (2026-11-05 injection run).
+                if (g_pfnKeybdEvent) g_pfnKeybdEvent(g_uiPddId, sc, down ? KeyStateDownFlag : 0);
                 n++;
             }
         }

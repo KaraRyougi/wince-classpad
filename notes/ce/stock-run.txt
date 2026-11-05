@@ -212,3 +212,14 @@ Open (2026-11-04 evening): with the three fixes above the blit-logging image sti
   not exercised (needs the ClassPad profile, which cannot run the translator image). Next: inject keys in casio-emu
   and see them in hello's log.
 
+2026-11-05, key injection into the NK-fix3 image. HLE_CB_KEYSWEEP=72,74 (the README recipe) shows the KEYSC interrupts
+  (KIUINTREG 4866) but no "scan" line: the sweep holds a key for 20 updateTimers ticks, under 1 ms of guest time, so
+  the matrix is clear again before the IST reads it. HLE_CB_CHORD=72,74 HLE_CB_CHORD_AT=1200000 HLE_CB_CHORD_HOLD=30000
+  works end to end: "scan 22 down", "scan 38 down", 30000 ticks later "scan 22 up", "scan 38 up"; hello receives
+  vk=31 ('1') sc=22 and vk=37 ('7') sc=38 with WM_CHAR '1' and '7'. Two defects seen: hello logged "key up" for the
+  driver's down events and "key down" for its up events, after which GWES auto-repeated '7' for the rest of the run
+  (64 repeats) and the window's 1 s timer never fired again. Cause: kbd_pdd.cpp passed the BOOL down (1) as the
+  KEY_STATE_FLAGS argument; 1 is KeyStateToggledFlag (keybd.h), the Layout Manager wants KeyStateDownFlag (0x80) for
+  a press and 0 for a release. Fixed in kbd_pdd.cpp; needs the next VM build. The scan code -> VK mapping of the
+  fx-CG100 layout (22 -> '1', 38 -> '7') is right.
+
