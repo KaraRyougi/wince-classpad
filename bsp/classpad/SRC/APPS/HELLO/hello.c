@@ -46,14 +46,16 @@ static void Paint(HWND hWnd)
         RECT b; b.left = i * w / 8; b.right = (i + 1) * w / 8; b.top = 0; b.bottom = h / 6;
         hbr = CreateSolidBrush(bars[i]); FillRect(hdc, &b, hbr); DeleteObject(hbr);
     }
-    // grey field below with a frame (Rectangle fills with the DC's brush, white
-    // by default, which hid the field and the white text: use the hollow brush)
+    // grey field below with a frame. Not Rectangle(): GWES filled its interior
+    // white even with the hollow brush selected (blit log, 2026-11-05), which
+    // hid the field and the white text; four FillRects depend on nothing.
     { RECT b = rc; b.top = h / 6; hbr = CreateSolidBrush(RGB(96,96,96)); FillRect(hdc, &b, hbr); DeleteObject(hbr); }
-    hpen = CreatePen(PS_SOLID, 3, RGB(255,160,0)); hold = (HPEN)SelectObject(hdc, hpen);
-    hbr = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
-    Rectangle(hdc, 4, h / 6 + 4, w - 4, h - 4);
-    SelectObject(hdc, hbr);
-    SelectObject(hdc, hold); DeleteObject(hpen);
+    hbr = CreateSolidBrush(RGB(255,160,0));
+    { RECT e; e.left = 4; e.right = w - 4; e.top = h / 6 + 4; e.bottom = e.top + 3; FillRect(hdc, &e, hbr);   // top
+      e.top = h - 7; e.bottom = h - 4; FillRect(hdc, &e, hbr);                                                  // bottom
+      e.top = h / 6 + 4; e.bottom = h - 4; e.right = 7; FillRect(hdc, &e, hbr);                                 // left
+      e.left = w - 7; e.right = w - 4; FillRect(hdc, &e, hbr); }                                                // right
+    DeleteObject(hbr);
 
     // text (needs a font in the image; without one GDI draws nothing here)
     SetBkMode(hdc, TRANSPARENT); SetTextColor(hdc, RGB(255,255,255));

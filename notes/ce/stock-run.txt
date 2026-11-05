@@ -169,3 +169,19 @@ Open (2026-11-04 evening): with the three fixes above the blit-logging image sti
   rebuild the kernel) and kbd_pdd.cpp waits INFINITE with a separate poll thread. The touch DDSI used the same
   pattern (gdwTouchIstTimeout = sample period while pressed); it now wakes the MDD's IST from its own thread with
   SetEvent on the interrupt event. Not yet run: all of it needs a rebuilt image.
+
+2026-11-05, image rebuilt in the VM after the fixes (~/Downloads/ClasspadUI, NK.bin 2468355 bytes; scratchpad copy NK-fix1.bin,
+  `make BUILD=build-fix1 NKBIN=... RUN_SECS=330 nkshot`): the window appears and keeps running (hello ticks 10..40, pushes
+  continue, no failure message in 330 s). But the image is not what was meant: kernel.dll in RelDir is still the
+  2026-11-03 build (Sysgen links kernel.dll from PUBLIC\COMMON\OAK\LIB\SH4\retail\nkmain.lib, which only a `build -c`
+  in PRIVATE\WINCEOS\COREOS\NK\KERNEL regenerates; Sysgen never compiles PRIVATE), and classpad_kbd.dll was built
+  from the pre-2026-11-04 kbd_pdd.cpp (its strings: "IST running, SYSINTR %d, poll %d ms" without the "%s", no
+  "WaitForSingleObject failed" message, no KeyscPoll; the VM copy of SRC\DRIVERS\KEYBD is stale). classpad_touch.dll
+  has SampleThread and classpad_hello.exe imports GetStockObject, so those two are current. So this run is the old
+  timed-wait keyboard driver on the unpatched kernel not hitting the hole this time (timing differs with every image),
+  not a test of the fixes. Separate finding: the hello window's interior is still filled white (blit 5,41-379,211
+  colour FFFF between the grey field and the frame edges) although the hollow brush is selected before Rectangle();
+  GWES fills anyway. hello.c now draws the frame with four FillRects. Checking a RelDir binary's source version:
+  UTF-16 strings (python re over the file) and the linker .map next to it (symbols such as ?SampleThread@@YAKPAX@Z,
+  imports such as __imp_GetStockObject).
+
