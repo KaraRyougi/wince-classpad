@@ -113,10 +113,26 @@ The single-press forms (`HLE_CB_KEY`, `HLE_CB_KEYSWEEP`, `HLE_CB_KEYSEQ`)
 hold a key for only 20 ticks, under 1 ms of guest time: the interrupt
 fires but the key is up again before the IST or the 20 ms poll reads the
 matrix, so they show nothing with this driver. The tick count is a guide:
-the window is up well before tick 1.2 million in a Release image. Touch cannot
-be exercised this way: casio-emu's ClassPad profile only cold-boots the
-real OS from a 64 MiB NOR image and refuses an add-in, so the touch driver
-is written against the emulator's model but has not run yet.
+the window is up well before tick 1.2 million in a Release image.
+
+The same works on the emulator's ClassPad profile (`EMU_MODEL=fx-cp400`,
+needs `dbt/emu-patch/add_classpad_addin.py` applied to casio-emu; the
+320x528 panel, the IIC0 sensor and INTC priorities), which also takes a
+headless stylus press:
+
+    HLE_CB_CHORD=72,74 HLE_CB_CHORD_AT=1200000 HLE_CB_CHORD_HOLD=30000 \
+    HLE_CB_TOUCH=160,264 HLE_CB_TOUCH_AT=1350000 HLE_CB_TOUCH_HOLD=30000 \
+        make -C dbt EMU_MODEL=fx-cp400 NKBIN=/abs/NK.bin RUN_SECS=400 nkshot
+
+(`[INJECTTOUCH down] 160 264 at tick ...` on the emulator side). The
+2026-11-05 image boots there to the same hello window and key events, but
+it is built for 384x216: the touch driver decides "display 384x216 -> no
+touch panel" and never touches IIC0, and the display driver's R61524
+register writes mean nothing to the ClassPad panel model (a DCS panel:
+commands 0x2A/0x2B/0x2C, 0x11, 0x29), so the emulated screen stays blank
+and no `nk.png` is written. Touch is exercised once the image is built for
+the ClassPad panel (registry `Width`/`Height` 320x528 or `"Panel"=dword:1`,
+a DCS variant of the DDI, `Matrix`=1); docs/05 section 5 lists the details.
 
 ## What the files are
 

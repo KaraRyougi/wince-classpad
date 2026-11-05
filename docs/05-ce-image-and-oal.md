@@ -310,12 +310,101 @@ What the kernel sources settled (2026-11-02, notes/ce/kernel-sh-notes.md):
    platform.reg is computed from the emulator's stylus mapping for 320x528.
    The touch driver only touches the bus when a panel is present (registry
    `Panel`, else a display with 528 rows), because the fx-CG100 profile
-   does not emulate IIC0. casio-emu cannot run the translator image on its
-   ClassPad profile (that profile only cold-boots the real OS from a 64 MiB
-   NOR image, `src/gui/sdl/runtime_paths.c`), so the keyboard is verified
-   on the fx-CG100 with the emulator's key injection
-   (`HLE_CB_KEYSWEEP`, `bsp/classpad/README.md`) and the touch driver stays
-   unverified until the ClassPad profile can start an add-in or the real
-   device runs. `hello.c` logs key and touch events on screen and on the
-   console. The OS design needs "Touch Screen (Stylus)" (SYSGEN_TOUCH) for
-   touch.dll; the keyboard MDD comes with Minimal Input.
+   does not emulate IIC0. The keyboard is verified on the fx-CG100 with the
+   emulator's key injection (`HLE_CB_CHORD`, `bsp/classpad/README.md`).
+   casio-emu's ClassPad profile used to refuse an add-in (cold boot of the
+   real OS only); since 2026-11-05 `dbt/emu-patch/add_classpad_addin.py`
+   lets it run the translator image (`make -C dbt EMU_MODEL=fx-cp400 ...`,
+   section 5), so the touch driver can be exercised once the image is built
+   for the ClassPad panel (section 5 lists what that takes). `hello.c` logs
+   key and touch events on screen and on the console. The OS design needs
+   "Touch Screen (Stylus)" (SYSGEN_TOUCH) for touch.dll; the keyboard MDD
+   comes with Minimal Input.
+
+## 5. casio-emu's ClassPad profile (2026-11-05)
+
+All runs so far used casio-emu's fx-CG100 profile (`CALCEMU_MODEL=fx-cg100`,
+a 396x224 panel, the R61524 register protocol, no IIC0, peripheral
+interrupts delivered only at SR.IMASK = 0). The ClassPad profile
+(`fx-cp400`, `fx-cg500`; `build/generated/machine_profiles.inc` from
+`machine-profiles.js`) models the 320x528 panel, the IIC0 touch sensor and
+INTC priority arbitration, but `configureClasspad` in
+`src/gui/sdl/runtime_paths.c` only cold-booted the verified OS from a
+64 MiB NOR image and answered a `.g3a` with "ClassPad requires real-OS cold
+boot". `dbt/emu-patch/add_classpad_addin.py` (applied to the local emulator
+like the other patches; rerun after updating it, then `cmake --build
+build`) changes three things:
+
+- `configureClasspad`: with a `.g3a` on the command line (no `HLE_COLDBOOT`)
+  the profile is selected and the NOR left erased; `HLE_NORFILE`/`HLE_OSROM`
+  are not set, so `memory.c` places `HLE_OSROM` at `HLE_OSROM_PAD` exactly
+  as on the fx-CG100 and loads the `.g3a` into the 2 MiB window behind the
+  64 MiB NOR (0x84000000, aliased at 0x00300000, where the launcher starts).
+  The CE image still lands at NOR offset 16 MiB (P1 0x81000000). Cold boot
+  is unchanged.
+- `display.c`: `HLE_FBDUMP` also writes the ClassPad frame (320x528 PPM,
+  near-uniform frames skipped), so `make nkshot` works on this profile.
+- `timers.c`: `HLE_CB_TOUCH="x,y" HLE_CB_TOUCH_AT=<tick> HLE_CB_TOUCH_HOLD=<ticks>`
+  presses the stylus headlessly (x 0..319, y 0..575; rows 528..575 are the
+  icon strip) through `classpadSetTouch`, like a click on the skin: sensor
+  packet, Port R bit 5, INTEVT 0x700 on the down edge. It prints
+  `[INJECTTOUCH down] x y at tick N` and `[INJECTTOUCH up]`.
+
+`dbt/Makefile` has `EMU_MODEL ?= fx-cg100`; `EMU_MODEL=fx-cp400` selects
+the ClassPad profile for `run`, `nkrun`, `nkshot` and `screenshot`:
+
+    HLE_CB_CHORD=72,74 HLE_CB_CHORD_AT=1200000 HLE_CB_CHORD_HOLD=30000 \
+    HLE_CB_TOUCH=160,264 HLE_CB_TOUCH_AT=1350000 HLE_CB_TOUCH_HOLD=30000 \
+        make -C dbt EMU_MODEL=fx-cp400 BUILD=build-cp400 \
+             NKBIN=/abs/NK.bin RUN_SECS=330 nkshot
+
+Result with `notes/ce/NK-fix3.bin` (the 2026-11-05 Release image built for
+384x216): the `tmu` and `nkxip` guests pass on the ClassPad profile, the CE
+image boots to "CLASSPAD OAL: POSTINIT", GWES, the display driver, the
+keyboard driver (the chord gives the same `scan 22/38 down`, `key down
+vk=31 sc=22`, `char '7'` lines as on the fx-CG100, at the same ticks: the
+profile's tick rate is the same) and the hello window; nothing in the run
+differs from the fx-CG100 run except the touch driver's panel decision. So
+the ClassPad's INTC arbitration (priority against IMASK instead of
+IMASK = 0) and its sleep semantics (an interrupt is accepted in `sleep`
+even with BL = 1, `handleSleepInterrupt`) change nothing for the kernel and
+the OAL. What the image still needs for the ClassPad, none of it done here:
+
+1. **Display protocol.** The ClassPad LCD model (`src/hardware/classpad/
+   classpad.c`) is not an R61524: it is a DCS panel on the same 16-bit port
+   at 0xB4000000 with Port R bit 4 selecting command (0) or data (1). A
+   command is the low byte of a 16-bit write; `0x2A`/`0x2B` take four
+   parameter bytes (one per 16-bit write: start high, start low, end high,
+   end low) for the column/row window; `0x2C` starts a memory write and
+   every following 16-bit data write is one RGB565 pixel (a 32-bit write is
+   two), advancing column-first inside the window; `0x11` (sleep out) and
+   `0x29` (display on) must both be sent before anything is shown
+   (`classpadFrame()` returns a blank frame until then); `0x28`/`0x10`
+   blank and sleep; reading with bit 4 clear returns the last command, `0xDA`
+   reads panel ID 0x16. The current DDI pushes R61524 register writes
+   (0x200-0x202, 0x210-0x213) through `LcdWriteReg`, which the ClassPad
+   model takes as commands 0x00-0x13: the hello window is drawn in the frame
+   buffer but the emulated panel stays blank, so `nkshot` produces no
+   `nk.png` on this profile. The DDI needs a panel variant (registry or
+   `Height` >= 500) that speaks this protocol, and `classpad_lcd.h`'s
+   `LCD_WIDTH`/`LCD_HEIGHT` ceilings (384x216) raised to 320x528.
+2. **Geometry.** `platform.reg`: `Width`=0x140, `Height`=0x210 for the
+   `ClassPad` display key (today 0x180 x 0xD8 = 384x216); `config.bib`'s
+   frame buffer size follows from the DDI.
+3. **Touch.** With a 528-row display the driver detects the panel itself,
+   or `"Panel"=dword:1` under `HKLM\HARDWARE\DEVICEMAP\TOUCH` forces it;
+   with this image it printed `display 384x216 -> no touch panel` and never
+   touched IIC0, so the DDSI (`classpad_touch.cpp`) is still unexercised. Do
+   not force the panel in an image that will also run on the fx-CG100
+   profile: that profile has no IIC0 registers and an access is a fatal
+   undefined-MMIO fault.
+4. **Keypad.** `"Matrix"=dword:1` under `HKLM\HARDWARE\DEVICEMAP\KEYBD`
+   for the fx-CP400 key table (the emulator's key codes are the same on both
+   profiles; the hello run above used the fx-CG100 layout).
+5. **Undefined registers.** None were hit: the ClassPad profile defines a
+   superset of the fx-CG100's registers for everything the OAL and the
+   drivers touch (KEYSC with KIUSTATEREG at +0x12, Port R with the contact
+   bit, IIC0, the DCS panel port).
+
+A faceplate warning (`ClassPad photo not loaded`) under the headless SDL
+driver is harmless.

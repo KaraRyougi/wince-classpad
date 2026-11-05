@@ -659,7 +659,11 @@ casio-emu checkout on 2026-10-22; rerun it after updating the emulator, then
 `node scripts/genDispatch.mjs && cmake --build build`); `add_ccn_regs.py`
 adds the TTB and PTEA registers (2026-11-02) and `add_oc_arrays.py` makes the
 operand-cache address and data arrays (0xF4000000/0xF5000000) accepted
-(the OAL's whole-cache flush walks them). The emulator starts a
+(the OAL's whole-cache flush walks them); `add_classpad_addin.py`
+(2026-11-05) lets the ClassPad profile (`make EMU_MODEL=fx-cp400 ...`,
+320x528 panel, IIC0 touch, INTC priorities) start an add-in, adds
+`HLE_FBDUMP` for its frame and the headless stylus `HLE_CB_TOUCH`
+(docs/05 section 5). The emulator starts a
 raw `.g3a` payload at 0x00300000; `dbt/loader` copies the translator image to
 `IMAGE_BASE` (0x8CC80000, see the layout in `dbt/Makefile`) and jumps.
 `make -C dbt run` builds everything and runs it headless;

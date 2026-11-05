@@ -45,9 +45,12 @@ NK_FLASH_OFF ?= 0x01000000
 NK_PADDED = $(BUILD)/nk-flash.bin
 NK_OFF_FILE = $(BUILD)/nk-flash.off
 NK_ENV = $(if $(NKBIN),HLE_OSROM=$(abspath $(NK_PADDED)) HLE_OSROM_PAD=$$(cat $(NK_OFF_FILE)),)   # recursive: nkrun sets NKBIN per target
-# casio-emu remembers the last machine profile (model.txt); the translator is an
-# fx-CG100 add-in, so pin the profile or a remembered ClassPad refuses to boot
-EMU_ENV = CALCEMU_MODEL=fx-cg100
+# casio-emu remembers the last machine profile (model.txt), so pin it. fx-cg100
+# is the default; EMU_MODEL=fx-cp400 runs the add-in on the ClassPad profile
+# (320x528 panel, IIC0 touch sensor, INTC priorities), which needs
+# dbt/emu-patch/add_classpad_addin.py applied to the emulator
+EMU_MODEL ?= fx-cg100
+EMU_ENV = CALCEMU_MODEL=$(EMU_MODEL)
 # seconds before run-headless.sh kills the emulator (a CE boot needs minutes: make RUN_SECS=300 NKBIN=... run)
 RUN_SECS ?= 20
 # make DEVALL=1 GUEST=x run: the guest asks for device-aware translation of its whole code (start.S)

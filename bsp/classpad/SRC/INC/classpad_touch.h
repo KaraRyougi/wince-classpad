@@ -28,9 +28,11 @@
 //  release and the samples while down come from polling (the MDD's IST
 //  timeout, gdwTouchIstTimeout).
 //
-//  Unverified on hardware and under the translator: casio-emu cannot run the
-//  translator image on its ClassPad profile (that profile only cold-boots the
-//  real OS from a 64 MiB NOR image), see docs/05.
+//  Unverified on hardware and under the translator: casio-emu's ClassPad
+//  profile runs the translator image since 2026-11-05 (make EMU_MODEL=fx-cp400,
+//  dbt/emu-patch/add_classpad_addin.py; HLE_CB_TOUCH="x,y" presses the stylus
+//  headlessly), but the image must be built for the 528-row panel (or
+//  "Panel"=1) before this driver touches the bus; see docs/05 section 5.
 //------------------------------------------------------------------------------
 #ifndef __CLASSPAD_TOUCH_H
 #define __CLASSPAD_TOUCH_H
