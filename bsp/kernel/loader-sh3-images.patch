@@ -1,0 +1,15 @@
+--- a/PRIVATE/WINCEOS/COREOS/NK/KERNEL/loader.c
++++ b/PRIVATE/WINCEOS/COREOS/NK/KERNEL/loader.c
+@@ -1906,6 +1906,12 @@
+                 return ERROR_BAD_EXE_FORMAT;
+ #elif defined(ARMV4I)
+             if (e32ptr->e32_cpu != IMAGE_FILE_MACHINE_ARM)
++                return ERROR_BAD_EXE_FORMAT;
++#elif defined(SHx)
++            // SH-3 user-mode code is a subset of SH-4 (software floating point,
++            // no SH-4-only instructions), so SH3 and SH3DSP images run unchanged
++            // on this kernel; only the machine type in the header differs.
++            if ((e32ptr->e32_cpu != IMAGE_FILE_MACHINE_SH3) && (e32ptr->e32_cpu != IMAGE_FILE_MACHINE_SH3DSP))
+                 return ERROR_BAD_EXE_FORMAT;
+ #else
+             return ERROR_BAD_EXE_FORMAT;

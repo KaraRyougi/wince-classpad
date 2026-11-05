@@ -283,3 +283,16 @@ The first message from a working OAL is therefore the kernel sign-on
   scanned for the thread by `bBPrio`/`bCPrio`, and the fact that the
   emulator's runs are deterministic, so counts line up between runs.
 
+## 11. Loader: SH3 images on the SH4 kernel (patched)
+
+`KERNEL/loader.c` (~1900) rejects a PE whose `e32_cpu` differs from
+`THISCPUID` (IMAGE_FILE_MACHINE_SH4 on every SHx build, `INC/nkshx.h`)
+unless the image is CPU-independent (`e32_unit[14].rva`) or loaded as a
+data file. The `#ifdef SH3 / MIPS / ARMV4I` chain has no SHx case, so
+Pocket PC 2000 SH3 binaries (0x1A2) get ERROR_BAD_EXE_FORMAT. SH-3
+user-mode code runs on SH-4 (subset ISA, software floating point), so
+`bsp/kernel/loader-sh3-images.patch` adds an `#elif defined(SHx)` case
+accepting SH3 and SH3DSP. Whether such a program then works depends on its
+imports (CE 3.0 coredll ordinals, aygshell, commctrl CommandBar, MFC CE
+3.0 runtime) and on the CE 6 memory model (no 32 MB slots).
+
