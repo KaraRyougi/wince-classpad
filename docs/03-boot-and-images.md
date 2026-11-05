@@ -145,3 +145,72 @@ loosely (`docs/04` "Limits"); the window not being free on that OS version
   mapped to SYSINTR ids in `OEMInterruptHandler`.
 - Debug serial: SCIF; KITL over the same port.
 - Memory: `MainMemoryEndAddress` = 0x8CFFFFFF on 16 MiB units.
+
+## The eActivity area as an alternative window (experiment, 2026-11-05)
+
+The Standard Shell image is 6.95 MB (`notes/ce/NK-shell1.bin`, not
+committed) and does not fit the 3.875 MiB hole, so the eActivity area
+0x3860000-0x3FFFFFF (7.625 MiB raw, a Fugue FAT12 volume of 5.5 MiB logical)
+was tried in casio-emu's ClassPad cold boot (OS 02.01.7003, the NOR behind
+the flash map above; stylus and key injection by
+`dbt/emu-patch/add_classpad_touchseq.py`, a patched OS accepted with
+`HLE_CLASSPAD_NOVERIFY=1` from `add_classpad_noverify.py`; the harness that
+drives the first-boot wizard, opens eActivity and creates a folder is in the
+hand-over note). Results:
+
+1. **Foreign data over the whole area** (a recognisable pattern in every
+   page): at boot the OS erases all 61 sectors and reformats the volume
+   before the first dialog; it also rewrites four sectors of the MCS backup
+   area. Nothing survives.
+2. **Valid volume header kept** (the two formatted sectors at 0x3860000 and
+   0x3880000: Fugue header, FAT12 boot sector, FATs, root directory) with
+   the pattern behind it: the boot, the menu and opening the eActivity
+   application leave every sector alone. The first write to the volume
+   (creating a folder from the save dialog) rewrote pages of the header
+   sector and **erased ten of the pattern sectors** (0x38A0000-0x39C0000):
+   Fugue is log-structured and reclaims "free" physical sectors by erasing
+   them as it needs them, whether or not the FAT lists their clusters as
+   free. So an image behind a valid header lives exactly until the user
+   saves an eActivity, then it is gone. Not acceptable as the only copy.
+3. **Shrinking or disabling the volume by an OS patch**: the volume table at
+   OS offset 0x6473E0 (`... 000000F2 0000003D ...`: the storage volume's 242
+   and the eActivity volume's 61 sectors; the device descriptor size
+   0x025E0000 = 303 sectors from 0x1A20000 appears at OS offsets 0x7B280,
+   0x1731C0, 0x61D240, 0x9F1224, 0x9F122C; the eActivity start is the
+   literal 0x01E40000 at 0x48695C and 0x03860000 at 0x4A9958, in the mount
+   code near P1 0x804A98xx) was patched one word at a time: a sector count
+   of 0, 6 or 8 ends in "DRV0 INITIALIZE Format Error!" with all 61 sectors
+   erased; 12 formats the same 11542-sector volume and still erases all 61;
+   the device size reduced to 0x1F00000 (with either count) gives the format
+   error again. The erase extent and the logical size come from the Fugue
+   mount/format code itself, so the patch needs that code disassembled
+   (start at the function holding 0x4A9958). Its size is unknown; it is not
+   a one-word change.
+4. **Translator side** (done, default unchanged): `make -C dbt
+   NK_WINDOW=eact ...` sets `NK_FLASH` 0x83860000 and `NK_FLASH_MAX`
+   0x7A0000 for the translator, `wince.hhk`, `nkflash.hhk` and the `nkxip`
+   test guest (which passes at that address: `make NK_WINDOW=eact
+   GUEST=nkxip nkrun`); `tools/nkflash.py` accepts P1 addresses up to the
+   64 MiB chip. `config.bib` carries the alternative `ROMSTART=83860000
+   ROMSIZE=007A0000` as a comment: an image built with it is needed before
+   that window can be exercised with CE in the emulator. The shell image
+   as built (ROMSTART 0x81000000) boots in casio-emu with the window check
+   relaxed, `make -C dbt NK_FLASH_MAX=0x00800000 NKBIN=/abs/NK-shell1.bin
+   RUN_SECS=900 nkshot` (POSTINIT, hello window; the emulator's NOR has no
+   OS image, so the overlap with the real chip's OS data at 0x13E0000 does
+   not show).
+
+Why the eActivity volume is 5.5 MiB in 7.625 MiB raw: not a FAT12 limit
+(8 sectors per cluster allow 16 MiB; the volume has 1440 clusters) but the
+OS's fixed geometry (11542 logical sectors; the storage volume is FAT16 with
+49503 sectors because its 6188 clusters exceed FAT12's 4084) and Fugue's
+overhead: it writes 4 KiB pages with a 512-byte header (the formatted
+sectors show data only at 4 KiB multiples) and keeps spare sectors for
+wear levelling, more of them in proportion on the small volume (storage
+24.17 of 30.25 MiB = 80 %, eActivity 5.64 of 7.625 MiB = 74 %).
+
+Conclusion: the eActivity area holds a CE image safely only with an OS
+patch that stops Fugue from using it, which is disassembly work still to
+do; without it the image survives until the first eActivity save. For a
+7 MiB image the alternatives are a smaller image (compression on, fewer
+components) or that patch.

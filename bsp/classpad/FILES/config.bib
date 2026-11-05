@@ -15,6 +15,7 @@ MEMORY
 ;   -------     --------  --------  ----
     BOOTARGS    8C100000  00001000  RESERVED    ; OAL argument page (unused for now)
     NK          81000000  003E0000  RAMIMAGE    ; 3.875 MiB of NOR, run in place (RAMIMAGE is the only image type; XIP follows from the address)
+;   NK          83860000  007A0000  RAMIMAGE    ; alternative: the eActivity area (make NK_WINDOW=eact; docs/03: needs an OS patch first)
     RAM         8C101000  00B7E000  RAM         ; up to 0x8CC7F000
     DBGRING     8CC7F000  00001000  RESERVED    ; translator debug ring (image_cfg.h CLASSPAD_DBG_RING_PA)
 
@@ -23,6 +24,7 @@ CONFIG
     AUTOSIZE=OFF
     ROMSTART=81000000
     ROMSIZE=003E0000
+;   ROMSTART=83860000  ROMSIZE=007A0000           ; the eActivity-area variant (with the NK line above)
     ROMWIDTH=32
     PROFILE=OFF
 ; No compression: the writable sections are stored as is, so the kernel

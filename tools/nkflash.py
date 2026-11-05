@@ -8,7 +8,7 @@ A RAMIMAGE build (image start inside the guest RAM window, 0x8C000000 up) is
 written as is, padded to a multiple of 4 bytes (casio-emu copies flash files
 in 32-bit units), at the default offset (16 MiB): the runtime finds the
 B000FF records there and copies them into RAM. A ROMIMAGE build (image start
-in the NOR's P1 range 0x80000000-0x81FFFFFF) is flattened to the bytes the
+in the NOR's P1 range 0x80000000-0x83FFFFFF) is flattened to the bytes the
 NOR must hold and written at start - 0x80000000: the kernel then executes in
 place and the loader only reads its ROMHDR.
 """
@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import nkbin
 
 NOR_P1 = 0x80000000
-NOR_SIZE = 0x02000000
+NOR_SIZE = 0x04000000          # the fx-CP400 chip (32 MiB on the fx-CG100: its images stay below)
 
 def main(argv):
     if len(argv) < 3:

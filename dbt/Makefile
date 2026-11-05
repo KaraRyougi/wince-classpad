@@ -45,9 +45,19 @@ NKBIN       ?=
 # in the erased hole inside Casio's 21 MiB OS image (0x00EE0000-0x013E0000,
 # docs/03); the window ends at 0x013E0000, so an image has 3.875 MiB
 # (config.bib ROMSIZE). NK_FLASH is the same offset as a P1 address.
+# NK_WINDOW=hole (default) or eact: the eActivity area 0x3860000-0x3FFFFFF
+# (7.625 MiB raw) for images larger than the hole; what Casio's OS does to it
+# is in docs/03. NK_FLASH_OFF/NK_FLASH_MAX can also be given directly (an
+# emulator run of a 7 MiB image linked at 0x81000000: NK_FLASH_MAX=0x00800000).
+NK_WINDOW    ?= hole
+ifeq ($(NK_WINDOW),eact)
+NK_FLASH_OFF ?= 0x03860000
+NK_FLASH_MAX ?= 0x007A0000
+else
 NK_FLASH_OFF ?= 0x01000000
-NK_FLASH     := 0x81000000
-NK_FLASH_MAX := 0x003E0000
+NK_FLASH_MAX ?= 0x003E0000
+endif
+NK_FLASH     := $(shell printf '0x%08X' $$((0x80000000 + $(NK_FLASH_OFF))))
 FLASH_DEFS   := -DNK_FLASH=$(NK_FLASH)u -DNK_FLASH_MAX=$(NK_FLASH_MAX)u
 HOST_CFLAGS  += $(FLASH_DEFS)
 # make DEVICE=1 hhk: a translator without the emulator's debug port (byte
@@ -97,7 +107,7 @@ GUEST_EXTRA     := $(GUEST_EXTRA_$(GUEST))
 GUEST_START_nkimg := guest/nkimg_start.S
 GUEST_START_nkxip := guest/nkxip_start.S
 GUEST_START     := $(or $(GUEST_START_$(GUEST)),guest/start.S)
-GUEST_LD_nkxip  := guest/guest_xip.ld
+GUEST_LD_nkxip  := $(BUILD)/guest_xip.ld
 GUEST_LD        := $(or $(GUEST_LD_$(GUEST)),guest/guest.ld)
 
 # guests are rebuilt when DEVALL changes (the flag lives in a stamp file name)
@@ -110,8 +120,12 @@ $(BUILD)/$(GUEST).elf: $(GUEST_START) guest/$(GUEST).c $(GUEST_EXTRA) guest/hype
 	$(CC) $(GUEST_CFLAGS) -T $(GUEST_LD) -o $@ $(GUEST_START) guest/$(GUEST).c $(GUEST_EXTRA)
 
 # the guest wrapped as a CE .bin (records + ROMHDR pointer) for the loader test;
-# nkxip is linked at the NOR address and tools/nkflash.py puts it back flat
-NK_IMG_BASE := $(if $(filter nkxip,$(GUEST)),0x81000000,0x8C100000)
+# nkxip is linked at the NOR address (NK_FLASH, through a build-dir copy of
+# its linker script) and tools/nkflash.py puts it back flat
+NK_IMG_BASE := $(if $(filter nkxip,$(GUEST)),$(NK_FLASH),0x8C100000)
+GUEST_CFLAGS += $(if $(filter nkxip,$(GUEST)),-DROM_BASE=$(NK_FLASH)u,)
+$(BUILD)/guest_xip.ld: guest/guest_xip.ld | $(BUILD)
+	sed 's/0x81000000/$(NK_FLASH)/' $< > $@
 $(BUILD)/$(GUEST).nk.bin: $(BUILD)/$(GUEST).bin ../tools/mkbin.py
 	python3 ../tools/mkbin.py $< $(NK_IMG_BASE) $(NK_IMG_BASE) $@ --chunk 256
 

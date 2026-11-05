@@ -19,7 +19,10 @@ struct romhdr {                        /* ROMHDR, CE 6.0 layout */
     unsigned pExtensions, ulTrackingStart, ulTrackingLen;
 };
 
-#define ROM_BASE 0x81000000u
+#ifndef ROM_BASE
+#define ROM_BASE 0x81000000u            /* dbt/Makefile passes NK_FLASH */
+#endif
+#define ROM_MASK 0xFFF00000u
 
 /* A module table with one entry, "kernel.dll", whose single code section
  * lies below its load address (as ROMIMAGE lays out a Release kernel.dll):
@@ -63,14 +66,14 @@ void guest_main(void)
     const struct romhdr *h;
     unsigned i, nz = 0, pc = here();
     hc_puts(banner);
-    check("code runs from the NOR", (pc & 0xFF000000u) == 0x81000000u && pc >= ROM_BASE);
+    check("code runs from the NOR", (pc & ROM_MASK) == (ROM_BASE & ROM_MASK) && pc >= ROM_BASE);
     check(".data copied to RAM intact", data_probe[0] == 0x11223344u && data_probe[1] == 0xDEADBEEFu
           && ((unsigned)data_probe & 0xFF000000u) == 0x8C000000u);
     for (i = 0; i < 64; i++) nz |= bss_probe[i];
     check(".bss is zero", nz == 0);
     check("ECEC marker at image+0x40", marker[0] == 0x43454345u);    /* "ECEC" little-endian */
     h = (const struct romhdr *)marker[1];
-    check("ROMHDR pointer", h == &nk_romhdr.h && ((unsigned)h & 0xFF000000u) == 0x81000000u);
+    check("ROMHDR pointer", h == &nk_romhdr.h && ((unsigned)h & ROM_MASK) == (ROM_BASE & ROM_MASK));
     check("ROMHDR fields", h->usCPUType == 0x01A6 && h->physfirst == ROM_BASE && h->ulRAMEnd == GUEST_RAM_HI);
     data_probe[2] = 0x55;                                              /* RAM is writable, flash was not touched */
     check("RAM data writable", data_probe[2] == 0x55);
