@@ -65,7 +65,8 @@ the console shows "CLASSPAD DDI: ..." and "CLASSPAD HELLO: ..." on the way.
 `SRC\DRIVERS\KEYBD` builds `kbdmouse.dll` (file name `classpad_kbd.dll`):
 the Layout Manager MDD from `layoutmanager.lib`, the US input language, a
 PDD that scans the SH7305 KEYSC (`kbd_pdd.cpp`: the register sequence of
-the fx-CG100 OS, an IST on the KEYSC interrupt plus a 20 ms poll, one key
+the fx-CG100 OS, an IST on the KEYSC interrupt plus a 20 ms poll thread
+(same reason as for touch: no timed wait on the interrupt event), one key
 event per changed bit of the six KIUDATA words, scan code = 8 * row +
 column) and two device layouts (`kbd_layout.cpp`: the fx-CG100 keypad and
 the fx-CP400 keypad, chosen by `HKLM\HARDWARE\DEVICEMAP\KEYBD` "Matrix",
@@ -77,7 +78,10 @@ beyond "Minimal Input Configuration" is needed in the catalog
 MDD and calibration from `tchmdd.lib`/`tch_cal.lib` with a DDSI layer for
 the fx-CP400 panel as casio-emu models it (`SRC\INC\classpad_touch.h`): a
 sensor on IIC0, the contact line on Port R bit 5, INTEVT 0x700 when the
-stylus lands, samples while pressed from the MDD's IST timeout. The
+stylus lands, samples while pressed from a DDSI thread that sets the
+IST's event every 1000 / rate ms (not from a timeout on the IST's wait: a
+timed wait on an interrupt event hits a CE 6.0 R3 kernel hole, see
+`notes/ce/kernel-sh-notes.md` section 10 and `bsp/kernel/`). The
 registry holds a `CalibrationData` computed from the emulator's stylus
 mapping, so no calibration screen is needed. The driver decides at start
 whether a panel exists ("Panel" in `HKLM\HARDWARE\DEVICEMAP\TOUCH`, else

@@ -166,5 +166,6 @@ Open (2026-11-04 evening): with the three fixes above the blit-logging image sti
   and otherwise leaves them linked; every other end of such a wait (NextThread, RunqDequeue, KillThread) has the
   interrupt-event special case. Needs the timeout (20+1 ms) to pass between two KCalls of the thread, which the
   translator's first translation of the paint path does. Fix: bsp/kernel/kcalls-waitonemore.patch (apply in the VM,
-  rebuild the kernel) and kbd_pdd.cpp waits INFINITE with a separate poll thread. The touch MDD's sample wait is
-  the same pattern. Not yet run: both need a rebuilt image.
+  rebuild the kernel) and kbd_pdd.cpp waits INFINITE with a separate poll thread. The touch DDSI used the same
+  pattern (gdwTouchIstTimeout = sample period while pressed); it now wakes the MDD's IST from its own thread with
+  SetEvent on the interrupt event. Not yet run: all of it needs a rebuilt image.

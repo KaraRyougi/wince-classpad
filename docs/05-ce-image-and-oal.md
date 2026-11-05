@@ -282,10 +282,11 @@ What the kernel sources settled (2026-11-02, notes/ce/kernel-sh-notes.md):
    6 ERROR_INVALID_HANDLE) is a CE 6.0 R3 kernel hole, not a translator
    bug: WaitOneMore's timed-out retry path returns without unlinking an
    interrupt-event proxy (`notes/ce/kernel-sh-notes.md` section 10,
-   `bsp/kernel/kcalls-waitonemore.patch`). The keyboard driver no longer
-   waits with a timeout (a poll thread does the rescan); the touch MDD's
-   sample-rate wait is the same pattern, so the kernel patch is the fix
-   for it. Both wait for a rebuilt image (2026-11-05).
+   `bsp/kernel/kcalls-waitonemore.patch`). Neither driver waits on its
+   interrupt event with a timeout any more: the keyboard rescans from a
+   poll thread, the touch DDSI drives the sampling while pressed from its
+   own thread by setting the MDD's event (the MDD's `gdwTouchIstTimeout`
+   stays INFINITE). All of it waits for a rebuilt image (2026-11-05).
 7. Keyboard and touch (written 2026-11-03, not yet compiled):
    `SRC\DRIVERS\KEYBD` is the Layout Manager MDD with a PDD that programs
    the SH7305 KEYSC like the fx-CG100 OS does, requests a SYSINTR for its
@@ -298,7 +299,8 @@ What the kernel sources settled (2026-11-02, notes/ce/kernel-sh-notes.md):
    MDD with a DDSI layer for the fx-CP400 panel as casio-emu models it: a
    sensor on IIC0 (address 0x40, command 0x84 returns x, y, contact), the
    contact line on Port R bit 5 and INTEVT 0x700 on the down edge; samples
-   while pressed come from the MDD's IST timeout; `CalibrationData` in
+   while pressed come from a DDSI thread that sets the MDD's event at the
+   sample rate; `CalibrationData` in
    platform.reg is computed from the emulator's stylus mapping for 320x528.
    The touch driver only touches the bus when a panel is present (registry
    `Panel`, else a display with 528 rows), because the fx-CG100 profile

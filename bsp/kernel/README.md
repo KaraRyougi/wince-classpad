@@ -10,8 +10,9 @@ against that file applies cleanly.
   (`notes/ce/kernel-sh-notes.md` section 10). Without it a timed
   `WaitForSingleObject` on an interrupt event fails for ever with
   ERROR_INVALID_HANDLE once its timeout expires between the wait's kernel
-  calls, which the translator makes routine for the keyboard IST and the
-  touch MDD.
+  calls, which the translator makes routine (the keyboard IST and the touch
+  MDD used such waits; both BSP drivers now avoid them, so the patch
+  protects whatever else does).
 
 ## Applying in the VM
 

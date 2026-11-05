@@ -1,13 +1,21 @@
 //------------------------------------------------------------------------------
 //  classpad_touch.cpp - DDSI layer of touch.dll for the fx-CP400 panel
 //
-//  The common touch MDD (tchmdd.lib) owns the IST: it waits for gIntrTouch
-//  or for gdwTouchIstTimeout and calls DdsiTouchPanelGetPoint. Here
-//  gIntrTouch is the contact interrupt (INTEVT 0x700, logical IRQ_TOUCH_PEN)
-//  that fires once when the stylus lands; while the panel is pressed the
-//  samples come from the timeout (1000 / sample rate ms), each one reading
-//  the sensor on IIC0; the first sample without contact is the pen-up
-//  (TouchSampleValidFlag without the down flag) and re-enables the
+//  The common touch MDD (tchmdd.lib) owns the IST: it waits on its event
+//  hTouchPanelEvent (the interrupt event of gIntrTouch) and calls
+//  DdsiTouchPanelGetPoint. Here gIntrTouch is the contact interrupt (INTEVT
+//  0x700, logical IRQ_TOUCH_PEN) that fires once when the stylus lands;
+//  while the panel is pressed the samples (1000 / sample rate ms apart, each
+//  reading the sensor on IIC0) are driven by this file's sample thread,
+//  which sets hTouchPanelEvent itself (SetEvent on an interrupt event goes
+//  through the kernel's EventModIntr, the ISR's path). The MDD's own way,
+//  a timeout on the IST's wait (gdwTouchIstTimeout), is NOT used: a timed
+//  wait on an interrupt event hits a CE 6.0 R3 kernel hole (WaitOneMore's
+//  retry path, notes/ce/kernel-sh-notes.md section 10) whenever the
+//  timeout expires between the kernel calls that set the wait up, which
+//  the translator makes routine; the event then refuses every later wait.
+//  The first sample without contact is the pen-up (TouchSampleValidFlag
+//  without the down flag), stops the sample thread and re-enables the
 //  interrupt with InterruptDone. gIntrTouchChanged is not used. Hardware
 //  details and the casio-emu model: classpad_touch.h.
 //
@@ -39,9 +47,10 @@
 #define TOUCH_PANEL_MIN_ROWS        500         // a display this tall is the fx-CP400 panel
 #define TOUCH_IIC_POLLS             64          // DTE polls between 1 ms sleeps
 #define TOUCH_IIC_ROUNDS            100         // 100 ms per byte at most
+#define TOUCH_THREAD_PRIORITY       109         // the MDD's default for its IST ("Priority256")
 
-// MDD globals
-extern "C" DWORD gdwTouchIstTimeout;            // the IST's wait (tchmain.c)
+// MDD globals (tchmain.c). gdwTouchIstTimeout is left at its INFINITE default.
+extern "C" HANDLE hTouchPanelEvent;             // the IST's event
 extern "C" const int MIN_CAL_COUNT = 1;         // samples before a calibration point is accepted
 DWORD gIntrTouch        = SYSINTR_NOP;
 DWORD gIntrTouchChanged = SYSINTR_NOP;
@@ -65,6 +74,10 @@ static BOOL     g_prevDown;
 static INT      g_lastX, g_lastY;
 static LONG     g_attached;
 static DWORD    g_samples, g_contacts, g_busErrors;
+static HANDLE   g_hSampler;                     // sample thread
+static HANDLE   g_hevSample;                    // wakes it when the stylus lands
+static volatile BOOL g_sampling;                // stylus down: keep waking the IST
+static volatile BOOL g_quit;
 
 static DWORD RegDword(LPCTSTR name, DWORD dflt)
 {
@@ -133,6 +146,23 @@ fail:
 static BOOL PenDown(void)
 {
     return (MMIO_R8(SH7305_REG_PA_PRDR) & TOUCH_PRDR_CONTACT) == 0;
+}
+
+//------------------------------------------------------------------------------
+//  Sampling while pressed: wake the MDD's IST every 1000 / rate ms. Started by
+//  DdsiTouchPanelGetPoint on the down transition, stopped by the pen-up.
+//
+static DWORD WINAPI SampleThread(LPVOID)
+{
+    CeSetThreadPriority(GetCurrentThread(), (int)RegDword(TEXT("Priority256"), TOUCH_THREAD_PRIORITY));
+    while (!g_quit) {
+        WaitForSingleObject(g_hevSample, INFINITE);     // an ordinary event: no interrupt-event wait here
+        while (g_sampling && !g_quit) {
+            Sleep(1000 / (DWORD)g_rate);
+            SetEvent(hTouchPanelEvent);
+        }
+    }
+    return 0;
 }
 
 //------------------------------------------------------------------------------
@@ -222,9 +252,16 @@ BOOL DdsiTouchPanelEnable(void)
     }
     gIntrTouchChanged = SYSINTR_NOP;
     g_prevDown = FALSE;
+    g_sampling = FALSE;
     if (g_panel) {
         MMIO_W8(IIC0_ICIC, 0);                      // polled
         IicIdle();
+        if (!g_hSampler) {
+            g_quit = FALSE;
+            g_hevSample = CreateEvent(NULL, FALSE, FALSE, NULL);
+            if (g_hevSample) g_hSampler = CreateThread(NULL, 0, SampleThread, NULL, 0, NULL);
+            if (!g_hSampler) RETAILMSG(1, (TEXT("CLASSPAD TOUCH: no sample thread (%d), pen-up will not be seen\r\n"), GetLastError()));
+        }
     }
     RETAILMSG(1, (TEXT("CLASSPAD TOUCH: enabled, SYSINTR %d, %s\r\n"), gIntrTouch,
                   g_panel ? TEXT("IIC0 sensor") : TEXT("no panel (interrupt never fires)")));
@@ -234,6 +271,13 @@ BOOL DdsiTouchPanelEnable(void)
 void DdsiTouchPanelDisable(void)
 {
     RETAILMSG(1, (TEXT("CLASSPAD TOUCH: disabled after %d samples, %d contacts\r\n"), g_samples, g_contacts));
+    if (g_hSampler) {
+        g_quit = TRUE; g_sampling = FALSE;
+        SetEvent(g_hevSample);
+        WaitForSingleObject(g_hSampler, 500);
+        CloseHandle(g_hSampler); g_hSampler = NULL;
+        CloseHandle(g_hevSample); g_hevSample = NULL;
+    }
     if (gIntrTouch != SYSINTR_NOP && gIntrTouch != SYSINTR_UNDEFINED) {
         KernelIoControl(IOCTL_HAL_RELEASE_SYSINTR, &gIntrTouch, sizeof gIntrTouch, NULL, 0, NULL);
         gIntrTouch = SYSINTR_NOP;
@@ -284,15 +328,16 @@ void DdsiTouchPanelGetPoint(P_TOUCH_PANEL_SAMPLE_FLAGS pTipState, INT *pUncalX, 
             g_contacts++;
             if (g_contacts <= 20 || (g_contacts % 50) == 0)
                 RETAILMSG(1, (TEXT("CLASSPAD TOUCH: down raw (%d,%d) contact %d\r\n"), g_lastX, g_lastY, g_contacts));
+            g_sampling = TRUE;                      // the sample thread wakes the IST from here on
+            if (g_hevSample) SetEvent(g_hevSample);
         }
-        gdwTouchIstTimeout = 1000 / (DWORD)g_rate;
     } else {
         if (g_prevDown) {
             *pTipState = TouchSampleValidFlag;      // pen up at the last point
             if (g_contacts <= 20 || (g_contacts % 50) == 0)
                 RETAILMSG(1, (TEXT("CLASSPAD TOUCH: up raw (%d,%d) after %d samples\r\n"), g_lastX, g_lastY, g_samples));
         }
-        gdwTouchIstTimeout = INFINITE;
+        g_sampling = FALSE;                         // a stray wakeup after this lands here again: harmless
         if (gIntrTouch != SYSINTR_NOP && gIntrTouch != SYSINTR_UNDEFINED) InterruptDone(gIntrTouch);
     }
     g_prevDown = down;

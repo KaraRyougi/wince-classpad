@@ -264,8 +264,13 @@ The first message from a working OAL is therefore the kernel sign-on
 - **Fix**: `bsp/kernel/kcalls-waitonemore.patch` adds the same unlink to
   `exitfunc`, guarded by `lpe->pProxList == pProx` (`bsp/kernel/README.md`
   for the rebuild). `kbd_pdd.cpp` waits INFINITE and rescans from a poll
-  thread. The common touch MDD waits on its interrupt event with the sample
-  timeout while the stylus is down: same pattern, needs the kernel patch.
+  thread. The common touch MDD waits on its interrupt event with
+  `gdwTouchIstTimeout`, which the DDSI used to set to the sample period
+  while the stylus is down (same pattern); `classpad_touch.cpp` now leaves
+  it INFINITE and wakes the IST from its own sample thread with
+  `SetEvent(hTouchPanelEvent)`, which the kernel routes through
+  `EventModIntr` like the ISR (syncobj.c ForceEventModify, `phdIntr`).
+  So both drivers are safe on an unpatched kernel too.
 - **Tools that found it**: write watches on the thread's fields and on
   `IntrEvents[SYSINTR - 8]` (KData + 0x1a0 + 4 * index), a RAM snapshot
   scanned for the thread by `bBPrio`/`bCPrio`, and the fact that the
