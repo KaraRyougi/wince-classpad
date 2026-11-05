@@ -271,6 +271,13 @@ The first message from a working OAL is therefore the kernel sign-on
   `SetEvent(hTouchPanelEvent)`, which the kernel routes through
   `EventModIntr` like the ISR (syncobj.c ForceEventModify, `phdIntr`).
   So both drivers are safe on an unpatched kernel too.
+- **Verified 2026-11-05** with the rebuilt kernel (`notes/ce/stock-run.txt`,
+  last entry): under the default translator build the hole fired once during
+  the hello window's first paint (a `pProxList` clear with PR in
+  WaitOneMore, 810136de, instead of NextThread's 810123ae) and the IST's
+  next wait linked again; 5064 waits in 600 s, the window kept ticking.
+  The image still had the old timed-wait keyboard driver, so this is the
+  kernel patch alone doing the work.
 - **Tools that found it**: write watches on the thread's fields and on
   `IntrEvents[SYSINTR - 8]` (KData + 0x1a0 + 4 * index), a RAM snapshot
   scanned for the thread by `bBPrio`/`bCPrio`, and the fact that the

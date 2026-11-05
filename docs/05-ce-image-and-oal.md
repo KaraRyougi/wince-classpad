@@ -286,7 +286,12 @@ What the kernel sources settled (2026-11-02, notes/ce/kernel-sh-notes.md):
    interrupt event with a timeout any more: the keyboard rescans from a
    poll thread, the touch DDSI drives the sampling while pressed from its
    own thread by setting the MDD's event (the MDD's `gdwTouchIstTimeout`
-   stays INFINITE). All of it waits for a rebuilt image (2026-11-05).
+   stays INFINITE). The kernel patch is verified (2026-11-05, rebuilt kernel,
+   write watch on the event: the hole fired once at the first paint, the
+   patched exit path unlinked the proxy and the IST went on; the window
+   ticked for the whole 600 s run). The two driver changes and the hello
+   frame fix still wait for the VM copies of KEYBD and HELLO to be
+   refreshed and rebuilt.
 7. Keyboard and touch (written 2026-11-03, not yet compiled):
    `SRC\DRIVERS\KEYBD` is the Layout Manager MDD with a PDD that programs
    the SH7305 KEYSC like the fx-CG100 OS does, requests a SYSINTR for its

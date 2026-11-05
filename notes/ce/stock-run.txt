@@ -185,3 +185,20 @@ Open (2026-11-04 evening): with the three fixes above the blit-logging image sti
   UTF-16 strings (python re over the file) and the linker .map next to it (symbols such as ?SampleThread@@YAKPAX@Z,
   imports such as __imp_GetStockObject).
 
+2026-11-05, image with the patched kernel (~/Downloads/CLASSPAD_SH4_Release, kernel.dll 235520 bytes; copy notes/ce/NK-fix2.bin,
+  not committed). kernel.map of this build lists the static kernel functions: WaitOneMore 81013678 (size 0x36c, the old
+  one was 0x2fa), NextThread 81012380, KCNextThread 8101257c, RunqDequeue 81011550, SleepOneMore 81011800, EventModIntr
+  8101339c, KCall 8100e466; the data addresses (KData 8c109800, IntrEvents[8] 8c1099c0, g_pNKGlobal 8c10aa04, RunList
+  8c10efa0) did not move. The patch is in the binary: exitfunc at 81013982 loads lpProxy (+52), pObject (+20), compares
+  the event's pProxList (+8) with the proxy and zeroes pProxList and pQDown (+12). classpad_kbd.dll in this image is
+  still the OLD timed-wait driver (the VM's kbd_pdd.cpp was not updated), which makes it the right test for the kernel
+  patch alone. Default translator build, HLE_WRITEWATCH=8cbb9008 (the event is 8cbb9000 again, IST THREAD 8cbb909c),
+  600 s: 5064 links (PR 810136de = WaitOneMore), 5062 clears by NextThread's sleep expiry (PR 810123ae), and ONE clear
+  with PR 810136de at link 525, between "HELLO: window" and "tick 10", i.e. during the first paint where the old
+  kernel stalled for good: the hole fired, the patched exitfunc unlinked the proxy, the next wait linked again and the
+  pattern went on; hello reached tick 80, the window kept pushing. The three slowed translator variants
+  (EXTRA_CFLAGS=-DMAX_BLOCKS=3072/2048/1536, 600 s each) also kept ticking (40/30/20 ticks) but their keyboard event is
+  not at 8cbb9000 (heap order changes with timing), so they carry no watch evidence; MAX_BLOCKS 512/256 do not finish
+  booting in 330 s. Kernel-patch verification therefore: confirmed on one firing. Still to test: the new kbd_pdd.cpp
+  and hello.c (frame via FillRects), once the VM copy of SRC\DRIVERS\KEYBD and SRC\APPS\HELLO is refreshed.
+
