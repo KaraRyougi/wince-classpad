@@ -260,4 +260,10 @@ Open (2026-11-04 evening): with the three fixes above the blit-logging image sti
   taskbar at ~10.5 min (Start button, clock, input panel icon), then idle with the clock advancing
   (notes/ce/desktop-cp400.png). QVGA portrait resources lay the icons out in one column. The 6.95 MB image exceeds
   the 3.875 MiB NOR hole of the real device (docs/03): emulator only for now.
+  Stylus on the desktop (same image, HLE_HB=1 HLE_CB_TOUCH=16,516 HLE_CB_TOUCH_AT=7500000 HLE_CB_TOUCH_HOLD=4000): tick
+  to wall time with one emulator ~9500 ticks/s (two in parallel ~6000); first frame (wait cursor) at ~4.1M ticks,
+  blue desktop + logo ~5.9M, icons ~6.8M, taskbar before 7.5M; the tap at 7.5M on the Start button opened the Start
+  menu (frame outline at 7.8M, the full menu Programs / Favorites / Documents / Settings / Run... / Suspend a minute
+  later, notes/ce/startmenu-cp400.png). A tap at 3.0M is too early (before the display). The startup logo stays on
+  the desktop throughout (it did not go away on the tap either); cosmetic, not investigated.
 
