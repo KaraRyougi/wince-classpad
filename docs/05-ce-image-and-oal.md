@@ -264,7 +264,8 @@ What the kernel sources settled (2026-11-02, notes/ce/kernel-sh-notes.md):
    the kernel initialises, then GWES dies in `WBITMAP::WBITMAP` with a null
    `Driver_t`: the kernel refused the driver's 65 KB data copy for low
    memory, the RAM file system having half of the 9 MiB RAM (block trace
-   in `notes/ce/stock-run.txt`); `config.bib` gives it 12.5% now and the
+   in `notes/ce/stock-run.txt`); `config.bib` gives it 3.1% now (12.5% until
+   2026-11-06; it holds the registry, so not zero) and the
    image is XIP. **Verified 2026-11-04** with the XIP GWES image: GWES
    loads the driver (`DisplayInit`, 384x216 frame buffer), the hello
    window appears in the emulator's screenshot (colour bars, orange

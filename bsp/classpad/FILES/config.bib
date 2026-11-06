@@ -33,9 +33,13 @@ CONFIG
 ; the image is a few hundred KB larger (the window has 8 MiB).
     COMPRESSION=OFF
     ROMFLAGS=00
-; RAM file system (object store) share of RAM: 32 of 256 (12.5%) in every
-; 2 MiB band instead of the default 128 (50%). With 9 MiB of RAM the
-; default left ~90 free pages after the boot, and the kernel refused the
-; display driver's data copy (AllocationExceedLowMemThreshold in
-; InitModule), so GWES started without a driver (2026-11-03).
-    FSRAMPERCENT=20202020
+; RAM file system (object store) share of RAM: 8 of 256 (3.1%, ~256 KiB of
+; the 8 MiB window) in every 2 MiB band instead of the default 128 (50%).
+; The kernel carves these pages at boot (loader.c CalcFSPages/CarveMem):
+; unused ones are not given back to applications. The object store is the
+; root file system and holds the registry, so it cannot be zero. With 9 MiB
+; of RAM the default left ~90 free pages after the boot, and the kernel
+; refused the display driver's data copy (AllocationExceedLowMemThreshold in
+; InitModule), so GWES started without a driver (2026-11-03); 12.5%
+; (20202020) until 2026-11-06.
+    FSRAMPERCENT=08080808

@@ -264,9 +264,6 @@ static int guest_pc_fetchable(sf_u32 gpc);
 static void deliver_synthetic(sf_u32 gpc, sf_u32 expevt);
 static void sample_init(const dbt_rt_config *cfg);
 static int g_window_kind, g_tail_from;      /* sampling profiler: see sample_tick */
-#ifdef DBT_LCD_DMA_STRIPS
-static sf_u32 g_lcd_dma_strips;
-#endif
 #if defined(DBT_CONST_DEVICE_ADDRESS) || defined(DBT_UNIFORM_STORE)
 static sf_u32 g_const_device_blocks;
 #endif
@@ -2075,97 +2072,11 @@ static void print_stats(void)
 #endif
 }
 
-#ifdef DBT_LCD_DMA_STRIPS
-/* Experimental native presenter: two whole X/Y RAM banks, like gpSP's
- * strip presenter. No DMA IRQ is enabled. Complete before returning to CE,
- * so its existing dirty-buffer and suspend ownership rules remain valid. */
-static void lcd_dma_wait(volatile sf_u32 *ch, volatile sf_u16 *operation)
-{
-    sf_u32 limit = 10000000u;
-    while (!(ch[3] & 2u)) {
-        if ((*operation & 6u) || !--limit) {
-            ch[3] = 0;
-            dbt_halt("LCD DMA failed");
-        }
-    }
-    ch[3] &= ~1u;                 /* disable before clearing TE */
-    ch[3] = 0;
-    dbt_lcd_sync();
-}
-
-static int lcd_dma_pixels(const sf_u8 *s, sf_u32 n, volatile sf_u16 *port)
-{
-    volatile sf_u32 *ch = (volatile sf_u32 *)0xFE008020u;
-    volatile sf_u16 *operation = (volatile sf_u16 *)0xFE008060u;
-    volatile sf_u32 *module_stop = (volatile sf_u32 *)0xA4150030u;
-    sf_u32 saved[4], saved_stop, i, bank = 0;
-    sf_u16 saved_operation;
-    int pending = 0;
-    if ((sf_u32)port != 0xB4000000u || n < 16) return 0;
-    /* Do not steal a channel or clear another owner's error flags. */
-    if ((ch[3] & 1u) || (*operation & 6u)) return 0;
-    for (i = 0; i < 4; ++i) saved[i] = ch[i];
-    saved_stop = *module_stop;
-    saved_operation = *operation;
-    *module_stop = saved_stop & ~((1u << 21) | (1u << 28)); /* DMAC0, RS */
-    dbt_lcd_sync();
-    *operation = saved_operation | 1u;
-    while (n >= 16) {
-        sf_u32 count = n > 4096 ? 4096 : (n & ~15u);
-        volatile sf_u16 *strip = (volatile sf_u16 *)(bank ? 0xE5017000u : 0xE5007000u);
-        /* The guest frame is little-endian; the native LCD bus wants a
-         * numeric RGB565 halfword. Prepare only the non-flight bank. */
-        if (!((sf_u32)s & 3u)) {
-            const sf_u32 *source = (const sf_u32 *)s;
-            volatile sf_u32 *target = (volatile sf_u32 *)strip;
-#ifdef DBT_LCD_DMA_UNROLL
-            /* Keep conversion order and the same volatile RAM writes,
-             * but amortize loop control over four pixel pairs. */
-#pragma GCC unroll 4
-#endif
-            for (i = 0; i < count / 2; ++i) {
-                sf_u32 pair = source[i];
-                /* Reverse bytes within each RGB565 halfword, retaining
-                 * pixel order. Full bswap followed by swap.w is four
-                 * native instructions, independent of compiler idioms. */
-                __asm__ volatile ("swap.b %0,%0\n\tswap.w %0,%0\n\t"
-                    "swap.b %0,%0\n\tswap.w %0,%0" : "+r"(pair));
-                target[i] = pair;
-            }
-        } else {
-            for (i = 0; i < count; ++i)
-                strip[i] = (sf_u16)(s[i*2] | ((sf_u16)s[i*2+1] << 8));
-        }
-        dbt_lcd_sync();
-        if (pending) lcd_dma_wait(ch, operation);
-        ch[0] = (sf_u32)strip;     /* on-chip addresses stay untranslated */
-        ch[1] = (sf_u32)port & 0x1FFFFFFFu;
-        ch[2] = count / 16;
-        ch[3] = 0x00101400u;      /* 32B, source++, fixed LCD, auto request */
-        ch[3] = 0x00101401u;      /* DE, no interrupt */
-        ++g_lcd_dma_strips;
-        pending = 1; bank ^= 1;
-        s += count * 2; n -= count;
-    }
-    if (pending) lcd_dma_wait(ch, operation);
-    for (; n; --n, s += 2) *port = (sf_u16)(s[0] | ((sf_u16)s[1] << 8));
-    dbt_lcd_sync();
-    for (i = 0; i < 4; ++i) ch[i] = saved[i];
-    *operation = saved_operation;
-    *module_stop = saved_stop;
-    dbt_lcd_sync();
-    return 1;
-}
-#endif
-
 /* HC_LCD_BLIT / HC_LCD_PUSH: n little-endian 16-bit pixels from guest memory to the panel's data port */
 static void lcd_pixels(const sf_u8 *s, sf_u32 n, volatile sf_u16 *port)
 {
     PROFILE_BEGIN;
     dbt_stat.lcd_pixels += n;
-#ifdef DBT_LCD_DMA_STRIPS
-    if (lcd_dma_pixels(s, n, port)) { PROFILE_END(PROF_LCD); return; }
-#endif
     if (((sf_u32)s & 3) == 0) {
         const sf_u32 *w = (const sf_u32 *)s;
         for (; n >= 2; n -= 2) {
@@ -2337,14 +2248,6 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
 #endif
 #ifdef DBT_DYNAMIC_P4_STORE
         case 405: v = 1; break;
-#endif
-#ifdef DBT_LCD_DMA_STRIPS
-        case 400:
-            v = 1;
-            break;
-        case 401:
-            v = g_lcd_dma_strips;
-            break;
 #endif
         case 59:
 #ifdef DBT_HASH_ASID_TAG

@@ -47,7 +47,8 @@ ClasspadUI CLASSPAD_SH4_Release directory and these four original DLLs:
 
 The CD's doclist.dll is an x86 emulator binary and is not suitable. Its SH3
 DOCLIST.LIB is an import library, not the implementation. A compatible native
-implementation is still needed before the 300 runtime can load. No fake
+implementation is still needed before the 300 runtime can load: that is
+`SRC\APPS\DOCLIST` (DocList.dll, in platform.bib with commctrl). No fake
 DocList_Create stub or binary patch has been installed. Export resolution is
 not a runtime compatibility test; neither pair has been LoadLibrary-tested in
 this change. Release-directory presence also does not prove inclusion in NK.bin;

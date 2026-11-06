@@ -2625,3 +2625,9 @@ Fast-DMA exact-binary fill-trace repeat matches 447042 ticks / 13.64263916015625
 Based on measured header pressure, DBT_HASH_HIGH_RAM tests a layout-only alternative to compact-header bitfields: retain 36-byte headers, move the existing 96-KiB tagged hash out of .lowbss, increase headers 21546 to 23702 (1693/bank), reduce metadata arena 2880 to 2720 KiB to cover relocated hash and larger side tables. Same 14 code banks, same CE memory and DMA path. Linker bounds and target regressions must pass; no speed claim.
 
 Exit-NOP-tail completes all four target regressions and CE build; callback/default host suite passes 180 checks. Feature-off binary matches 38528dbb... . Frozen-image CE timing starts.
+
+DBT_LCD_DMA_STRIPS was removed on 2026-11-06 (with the lcd_dma guest and
+HC_GETSTAT 400/401). The display driver pushes at most four rows per trap
+(1280-2112 pixels), below one 4096-pixel strip, so CE never overlapped CPU
+conversion with DMA: each push converted, started DMA and waited. Its only
+speed evidence was the emulator, whose DMA completes instantly.

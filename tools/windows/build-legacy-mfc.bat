@@ -33,7 +33,7 @@ call buildrel
 if errorlevel 1 exit /b 1
 call makeimg
 if errorlevel 1 exit /b 1
-echo Image built. MFCCE300 still requires a compatible doclist.dll.
+echo Image built. MFCCE300 needs DocList.dll from SRC\APPS\DOCLIST in the same image.
 echo Keep BSP_LEGACY_MFC=1 in OS Design environment settings for future builds.
 exit /b 0
 :noenv
