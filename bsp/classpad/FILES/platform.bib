@@ -26,3 +26,12 @@ MODULES
 
 MODULES
     classpad_rotatekey.exe $(_FLATRELEASEDIR)\classpad_rotatekey.exe NK S
+
+; Legacy MFC: preserve SH3 PE headers; load from ROM files, not XIP modules.
+IF BSP_LEGACY_MFC
+FILES
+   mfcce300.dll $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\legacy-mfc\mfcce300.dll NK S
+   olece300.dll $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\legacy-mfc\olece300.dll NK S
+   mfcce211.dll $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\legacy-mfc\mfcce211.dll NK S
+   olece211.dll $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\legacy-mfc\olece211.dll NK S
+ENDIF
