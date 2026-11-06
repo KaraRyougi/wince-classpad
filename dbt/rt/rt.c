@@ -2083,7 +2083,7 @@ void dbt_onchip_load(void)
     d = rxyram;
     n = (sf_u32)(exyram - rxyram);
     for (i = 0; i < n; i++) d[i] = 0;
-    __asm__ volatile ("synco" ::: "memory");
+    __asm__ volatile ("synco\n\ticbi @%0" :: "r"(rilram) : "memory");     /* SH7724 10.5.3 */
 }
 static void onchip_save(void)
 {
@@ -2098,7 +2098,9 @@ static void onchip_restore(void)
     d = rxyram;
     n = (sf_u32)(exyram - rxyram);
     for (i = 0; i < n; i++) d[i] = g_xyram_save[i];
-    __asm__ volatile ("synco" ::: "memory");
+    /* SH7724 10.5.3 IL memory coherency: SYNCO, then ICBI, before branching
+     * to instructions written into IL memory */
+    __asm__ volatile ("synco\n\ticbi @%0" :: "r"(rilram) : "memory");
 }
 extern const sf_u32 dbt_standby_stub[], dbt_standby_stub_end[];
 static sf_u32 g_standbys, g_standby_wakes;
