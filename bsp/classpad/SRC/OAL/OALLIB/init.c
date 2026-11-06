@@ -20,11 +20,11 @@ void OEMInit()
     // Cache geometry for IOCTL_HAL_GET_CACHE_INFO
     OALCacheGlobalsInit();
 
-    // INTC and the timer tick (TMU0, 1 ms)
+    // INTC and the timer tick (TMU0, variable period up to TICK_MAX_MSEC; bsp_cfg.h)
     if (!OALIntrInit()) {
         OALMSG(OAL_ERROR, (L"ERROR: OEMInit: OALIntrInit failed\r\n"));
     }
-    OALTimerInit(1, COUNT_FREQUENCY / 1000, 0);
+    OALTimerInit(TICK_MAX_MSEC, COUNT_FREQUENCY / 1000, TICK_MARGIN_COUNTS);
 
     OALMSG(OAL_FUNC, (L"-OEMInit()\r\n"));
 }

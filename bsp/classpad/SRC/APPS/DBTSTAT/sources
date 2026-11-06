@@ -1,0 +1,15 @@
+!if 0
+classpad_dbtstat.exe - the translator's counters on the screen (HC_GETSTAT):
+the profiler for runs on the real machine. Started from the shell or as a
+Launch entry in platform.reg.
+!endif
+TARGETNAME=classpad_dbtstat
+TARGETTYPE=PROGRAM
+RELEASETYPE=PLATFORM
+WINCEOEM=1
+EXEENTRY=WinMainCRTStartup
+INCLUDES=$(INCLUDES);$(_TARGETPLATROOT)\src\inc
+TARGETLIBS= \
+    $(_COMMONSDKROOT)\lib\$(_CPUINDPATH)\coredll.lib
+SOURCES= \
+    dbtstat.c
