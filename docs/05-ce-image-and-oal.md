@@ -437,3 +437,33 @@ is unknown (Casio's boot code does it before the OS on the device).
 
 A faceplate warning (`ClassPad photo not loaded`) under the headless SDL
 driver is harmless.
+
+## 6. Image size: what the ROM carries without needing it (2026-11-06)
+
+NK.bin was 6.94 MB in the 7.625 MiB eActivity window. Module sizes from the
+release directory (largest first): gwes 593 KB, coredll + k.coredll 825 KB,
+commctrl 355 KB, tcpstk 287 KB, ceshell 265 KB, explorer 260 KB, kernel
+236 KB, filesys 228 KB, shdocvw 175 KB, mgtt_o 174 KB, ole32 + oleaut32
+309 KB, classpad_ddi 142 KB, cplmain 141 KB, pegcards 137 KB, wince.nls
+209 KB, mfcce300 408 KB, tahoma.ttf 136 KB, hives 180 KB.
+
+`bsp/classpad/FILES/PostFmergeBib.bat` (run by makeimg from the release
+directory between fmerge and romimage) drops what `romexclude.txt` lists:
+- the network stack, ~740 KB: tcpstk, ndis, afd, dhcp, netbios, cxport, ws2k,
+  ws2serv, ws2instl, winsock, wspm, nspm, uiproxy, serial. The Standard Shell
+  item depends on it in the catalog, but a PE import scan of the image shows
+  no shell module importing it (explorer, ceshell, shdocvw, mfcce300); only
+  servicesd.exe imports ws2.dll, which stays. The registry still lists NDIS,
+  AFD and Ws2Serv under Drivers\BuiltIn: device manager fails to load them and
+  goes on.
+- the 18 standard .wav files, 62 KB: forced by the Control Panel item
+  (SYSGEN_CTLPNL sets SYSGEN_AUDIO_STDWAVEFILES); there is no audio driver.
+
+The hook must be in the release directory (buildrel or the claude-build
+script copies it there); once there it applies to every makeimg until
+romexclude.txt is deleted from that directory.
+
+Also worth doing, in the OS design rather than here: only the English (US)
+locale (the design had all 68 code page 1252 locales: wince.nls 209 KB), no
+Solitaire (pegcards + solitare, 167 KB), and possibly Power Management
+(Minimal) instead of the full PM (pm.dll 42 KB, one thread fewer).
