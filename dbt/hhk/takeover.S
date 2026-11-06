@@ -8,8 +8,8 @@
  * 2. the OS's interrupt sources are quieted so nothing is pending or
  *    unmasked when the CE kernel lowers IMASK: TMU stopped (TSTR, TCR0-2),
  *    every INTC priority 0 (IPRA-IPRL), every INTC source masked (IMR0-12),
- *    RTC interrupts off (RCR1, RCR2 keeps the clock running); the IRQ pin
- *    mask INTMSK00 stays as Casio's OS left it. The OAL unmasks what it uses (bsp intr.c);
+ *    IRQ pins masked (INTMSK00, unless built with IRQPINS=keep), RTC
+ *    interrupts off (RCR1, RCR2 keeps the clock running). The OAL unmasks what it uses (bsp intr.c);
  * 3. MMU off with the TLB flushed (MMUCR = TI): Casio's OS keeps a TLB entry
  *    for the add-in window; we and the kernel run in P1/P2;
  * 4. the image copied to its link address (skipped when src == dst, the
@@ -59,9 +59,14 @@ _hhk_takeover:
         add     #4, r1
         dt      r2
         bf      3b
-        /* INTMSK00 (IRQ pins) is left as Casio's OS set it: the touch contact
-         * interrupt may be a pin interrupt the OAL cannot unmask itself (the
-         * first hardware run had a desktop that took no input) */
+#ifndef HHK_IRQPINS_KEEP
+        /* IRQ pins masked too (INTMSK00: write 1 masks). make IRQPINS=keep
+         * leaves them as Casio's OS set them, for the touch contact interrupt
+         * in case it is a pin interrupt the OAL cannot unmask itself; the
+         * translator then masks a pin that storms (rt/irqpins.c). */
+        mov.l   .Lintmsk, r1
+        mov.b   r3, @r1
+#endif
         /* RTC: carry/alarm interrupts off, periodic interrupt off, clock running */
         mov.l   .Lrcr1, r1
         mov.b   r0, @r1
@@ -104,6 +109,7 @@ _hhk_takeover:
 .Ltcr0:   .long 0xA4490010              /* TCR1 = +12, TCR2 = +24 */
 .Lipr:    .long 0xA4080000
 .Limr:    .long 0xA4080080
+.Lintmsk: .long 0xA4140044
 .Lrcr1:   .long 0xA413FEDC
 .Lrcr2:   .long 0xA413FEDE
 .Lmmucr:  .long 0xFF000010

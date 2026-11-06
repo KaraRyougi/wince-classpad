@@ -41,7 +41,7 @@ HOST_CFLAGS  := -mb -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-sta
 GUEST_CFLAGS := -ml -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables -Wall \
                 -DGUEST_RAM_LO=$(GUEST_RAM_LO)u -DGUEST_RAM_HI=$(GUEST_RAM_HI)u -DMAX_BLOCKS=$(BLOCKS)
 
-RT_SRC := rt/crt0.S rt/stubs.S rt/main.c rt/rt.c rt/lcdcon.c rt/nkbin.c rt/bench.c bench/loops.S src/sh4dec.c src/sh4emit.c src/translate.c \
+RT_SRC := rt/crt0.S rt/stubs.S rt/main.c rt/rt.c rt/lcdcon.c rt/irqpins.c rt/nkbin.c rt/bench.c bench/loops.S src/sh4dec.c src/sh4emit.c src/translate.c \
           ../fpuemu/src/fpuemu.c ../fpuemu/src/softfloat.c
 
 # A Windows CE .bin to run instead of the embedded guest, placed in the emulated
@@ -75,7 +75,7 @@ HOST_CFLAGS  += $(FLASH_DEFS)
 # stores to 0xFFFFF000, undefined on the real SoC); its prints then go only to
 # the debug ring. Use a private BUILD dir so emulator builds keep their port.
 DEVICE ?= 0
-HOST_CFLAGS  += $(if $(filter 1,$(DEVICE)),-DDBT_NO_DEBUG_PORT -DDBT_LCD_CONSOLE,)
+HOST_CFLAGS  += $(if $(filter 1,$(DEVICE)),-DDBT_NO_DEBUG_PORT -DDBT_LCD_CONSOLE -DDBT_IRQPIN_GUARD,)
 NK_PADDED = $(BUILD)/nk-flash.bin
 NK_OFF_FILE = $(BUILD)/nk-flash.off
 NK_ENV = $(if $(NKBIN),HLE_OSROM=$(abspath $(NK_PADDED)) HLE_OSROM_PAD=$$(cat $(NK_OFF_FILE)),)   # recursive: nkrun sets NKBIN per target
@@ -176,7 +176,11 @@ $(IMG).g3a: $(IMG)-loader.bin
 HHK_BASE   := 0x8CFF0000
 HHK_LIMIT  := 0x8D000000
 HHK_VERSION := $(shell git -C .. log -1 --format=%cd --date=short 2>/dev/null || echo dev)
-HHK_CFLAGS := $(HOST_CFLAGS) -I hhk -DHHK_APP_VERSION='"$(HHK_VERSION)"'
+# IRQPINS=mask (default): takeover masks the IRQ pins (INTMSK00) like every
+# other interrupt source; keep: leaves them as Casio's OS had them (the touch
+# contact interrupt may be one), with the translator's storm guard watching.
+IRQPINS    ?= mask
+HHK_CFLAGS := $(HOST_CFLAGS) -I hhk -DHHK_APP_VERSION='"$(HHK_VERSION)"' $(if $(filter keep,$(IRQPINS)),-DHHK_IRQPINS_KEEP,)
 HHK_LD     := -T hhk/hhk.ld -Wl,--defsym,HHK_BASE=$(HHK_BASE) -Wl,--defsym,HHK_LIMIT=$(HHK_LIMIT) -Wl,--defsym,PAYLOAD_BASE=$(IMAGE_BASE)
 HHK_COMMON := hhk/start.S hhk/util.c hhk/os.c
 PAYLOAD_H  := $(BUILD)/dbt-$(GUEST)-payload.h

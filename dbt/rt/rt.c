@@ -4,6 +4,7 @@
  */
 #include "rt.h"
 #include "lcdcon.h"
+#include "irqpins.h"
 
 typedef __SIZE_TYPE__ dbt_size_t;
 void *memcpy(void *d, const void *s, dbt_size_t n);
@@ -1267,6 +1268,9 @@ static int exc_c_body(dbt_gctx *ctx)
     }
 
 deliver:
+#ifdef DBT_IRQPIN_GUARD
+    if (ctx->vec_off == 0x600) dbt_irqpin_guard(ctx->intevt);   /* device: IRQ pins the OAL does not know (rt/irqpins.c) */
+#endif
     /* A data fault on the null page is almost always a wrong register in
      * translated code; the first few are described (host code and guest
      * registers) before the guest handles them. */
