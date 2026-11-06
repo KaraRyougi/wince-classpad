@@ -20,6 +20,7 @@
 #include <types.h>
 #include <winddi.h>
 #include <gpe.h>
+#include <pwingdi.h>
 #include "classpad_lcd.h"
 #include "classpad_hc.h"
 
@@ -87,6 +88,8 @@ public:
     virtual SCODE   BltPrepare(GPEBltParms *pParms);
     virtual SCODE   BltComplete(GPEBltParms *) { return S_OK; }
     virtual VOID    PowerHandler(BOOL bOff);
+    virtual ULONG   DrvEscape(SURFOBJ *, ULONG, ULONG, PVOID, ULONG, PVOID);
+    LONG            RotateDisplay(int angle);
 
     void            PanelInit();
     SCODE           WrappedLine(GPELineParms *pParms);
@@ -133,6 +136,7 @@ ClasspadGPE::ClasspadGPE()
     m_displayOn = FALSE;
     m_suspended = m_resumePending = FALSE;
 
+    m_iRotate = DMDO_0;
     m_mode.modeId    = 0;
     m_mode.width     = width;
     m_mode.height    = height;
@@ -154,8 +158,10 @@ ClasspadGPE::ClasspadGPE()
     m_pFrame  = (BYTE *)AllocPhysMem(width * 2 * height, PAGE_READWRITE, 0, 0, &m_framePa);
     if (m_pFrame) m_pPrimarySurface = new GPESurf(width, height, m_pFrame, width * 2, gpe16Bpp);
     else          m_pPrimarySurface = new GPESurf(width, height, gpe16Bpp);
-    if (m_pPrimarySurface && m_pPrimarySurface->Buffer())
+    if (m_pPrimarySurface && m_pPrimarySurface->Buffer()) {
+        m_pPrimarySurface->SetRotation(width, height, DMDO_0);
         memset(m_pPrimarySurface->Buffer(), 0, m_pPrimarySurface->Stride() * height);
+    }
 
     if (m_panel == LCD_PANEL_DCS) PanelInit();
 
@@ -200,6 +206,50 @@ SCODE ClasspadGPE::SetMode(int modeId, HPALETTE *pPalette)
     return S_OK;
 }
 
+// GWES calls these escapes through ChangeDisplaySettingsEx. The angle is
+// carried in cjIn (not a pointed-to input structure), as required by CE.
+ULONG ClasspadGPE::DrvEscape(SURFOBJ *pso, ULONG code, ULONG inSize,
+                            PVOID in, ULONG outSize, PVOID out)
+{
+    if (code == QUERYESCSUPPORT) {
+        if (!in || inSize < sizeof(DWORD)) return 0;
+        DWORD query = *(DWORD *)in;
+        if (query == DRVESC_GETSCREENROTATION || query == DRVESC_SETSCREENROTATION) return 1;
+        return GPE::DrvEscape(pso, code, inSize, in, outSize, out);
+    }
+    if (code == DRVESC_GETSCREENROTATION) {
+        if (!out || outSize < sizeof(DWORD)) return DISP_CHANGE_BADPARAM;
+        *(DWORD *)out = ((DMDO_90 | DMDO_180 | DMDO_270) << 8) | m_iRotate;
+        return DISP_CHANGE_SUCCESSFUL;
+    }
+    if (code == DRVESC_SETSCREENROTATION) return RotateDisplay((int)inSize);
+    return GPE::DrvEscape(pso, code, inSize, in, outSize, out);
+}
+
+LONG ClasspadGPE::RotateDisplay(int angle)
+{
+    if (angle != DMDO_0 && angle != DMDO_90 && angle != DMDO_180 && angle != DMDO_270)
+        return DISP_CHANGE_BADMODE;
+    if (!m_pPrimarySurface || !m_pPrimarySurface->Buffer()) return DISP_CHANGE_FAILED;
+    EnterCriticalSection(&m_cs);
+    if (angle != m_iRotate) {
+        BOOL sideways = angle == DMDO_90 || angle == DMDO_270;
+        m_iRotate = angle;
+        m_nScreenWidth = sideways ? m_nScreenHeightSave : m_nScreenWidthSave;
+        m_nScreenHeight = sideways ? m_nScreenWidthSave : m_nScreenHeightSave;
+        m_mode.width = m_nScreenWidth;
+        m_mode.height = m_nScreenHeight;
+        // GPE renders logical coordinates into the unchanged native buffer.
+        // Keep the physical stride, allocation, LCD window and push ABI.
+        m_pPrimarySurface->SetRotation(m_nScreenWidth, m_nScreenHeight, angle);
+        m_dirtyTop = 0;
+        m_dirtyBottom = m_nScreenHeightSave;
+        SetEvent(m_hEvent);
+    }
+    LeaveCriticalSection(&m_cs);
+    return DISP_CHANGE_SUCCESSFUL;
+}
+
 SCODE ClasspadGPE::AllocSurface(GPESurf **ppSurf, int width, int height, EGPEFormat format, int surfaceFlags)
 {
     if (surfaceFlags & GPE_REQUIRE_VIDEO_MEMORY) return E_OUTOFMEMORY;    // there is no video memory
@@ -212,7 +262,7 @@ SCODE ClasspadGPE::AllocSurface(GPESurf **ppSurf, int width, int height, EGPEFor
 void ClasspadGPE::Dirty(int top, int bottom)
 {
     if (top < 0) top = 0;
-    if (bottom > m_nScreenHeight) bottom = m_nScreenHeight;
+    if (bottom > m_nScreenHeightSave) bottom = m_nScreenHeightSave;
     if (top >= bottom) return;
     EnterCriticalSection(&m_cs);
     if (top < m_dirtyTop) m_dirtyTop = top;
@@ -233,7 +283,7 @@ SCODE ClasspadGPE::WrappedLine(GPELineParms *pParms)
     SCODE sc = EmulatedLine(pParms);
     if (pParms->pDst == m_pPrimarySurface) {
         if (pParms->prclClip) Dirty(pParms->prclClip->top, pParms->prclClip->bottom);
-        else Dirty(0, m_nScreenHeight);
+        else Dirty(0, m_nScreenHeightSave);
     }
     return sc;
 }
@@ -249,8 +299,11 @@ SCODE ClasspadGPE::WrappedBlt(GPEBltParms *pParms)
     static int logged;
     SCODE sc = EmulatedBlt(pParms);
     if (pParms->pDst == m_pPrimarySurface) {
-        if (pParms->prclDst) Dirty(pParms->prclDst->top, pParms->prclDst->bottom);
-        else Dirty(0, m_nScreenHeight);
+        if (pParms->prclDst) {
+            RECTL physical = *pParms->prclDst;
+            m_pPrimarySurface->RotateRectl(&physical);
+            Dirty(physical.top, physical.bottom);
+        } else Dirty(0, m_nScreenHeightSave);
     }
     // Diagnostic (2026-11-04): exact-colour fills and lines reach the frame
     // buffer, blits with a dithered brush or a glyph mask seem not to. Log
@@ -286,7 +339,7 @@ void ClasspadGPE::PanelInit()
 void ClasspadGPE::PushRows(int top, int bottom)
 {
     const BYTE *fb = (const BYTE *)m_pPrimarySurface->Buffer();
-    int stride = m_pPrimarySurface->Stride(), width = m_nScreenWidth, height = m_nScreenHeight, x, y;
+    int stride = m_pPrimarySurface->Stride(), width = m_nScreenWidthSave, height = m_nScreenHeightSave, x, y;
     if (!fb) return;
     if (top < m_consoleRows) top = m_consoleRows;          // the console's rows are not ours
     if (m_panel == LCD_PANEL_DCS && bottom < height) height = bottom;
@@ -386,11 +439,11 @@ DWORD WINAPI ClasspadGPE::PushThread(LPVOID pThis)
             LcdCommand(LCD_DCS_SLPOUT);
             Sleep(120); // panel recovery must run in thread context
             if (p->m_suspended) continue;
-            p->Dirty(0, p->m_nScreenHeight);
+            p->Dirty(0, p->m_nScreenHeightSave);
         }
         EnterCriticalSection(&p->m_cs);
         top = p->m_dirtyTop; bottom = p->m_dirtyBottom;
-        p->m_dirtyTop = p->m_nScreenHeight; p->m_dirtyBottom = 0;
+        p->m_dirtyTop = p->m_nScreenHeightSave; p->m_dirtyBottom = 0;
         LeaveCriticalSection(&p->m_cs);
         if (top < bottom) {
             p->PushRows(top, bottom);

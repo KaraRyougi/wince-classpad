@@ -46,6 +46,16 @@ static BOOL     g_panel;                        // sensor present (fx-CP400)
 static INT      g_rate = TOUCH_SAMPLE_RATE_HIGH;
 static INT      g_rateSetting = 1;              // 0 low, 1 high
 static BOOL     g_prevDown;
+static BOOL     g_stripContact, g_rotateArmed;
+static HANDLE   g_rotateEvent;
+
+// Physical sensor coordinates: icon strip is below the native 320x528 LCD.
+// Rotate occupies x=229..273, y=528..575, independent of desktop rotation.
+static BOOL InRotate(INT x, INT y)
+{
+    return x >= 0x20B + 229*0x9B6/256 && x < 0x20B + 274*0x9B6/256
+        && y >= 0xF4 + 528*0x66F/256 && y < 0xF4 + 576*0x66F/256;
+}
 static INT      g_lastX, g_lastY;
 static LONG     g_attached;
 static DWORD    g_samples, g_contacts, g_busErrors;
@@ -115,9 +125,10 @@ static BOOL DetectPanel(void)
         RETAILMSG(1, (TEXT("CLASSPAD TOUCH: EnumDisplaySettings failed, no panel assumed\r\n")));
         return FALSE;
     }
+    BOOL tallPanel = dm.dmPelsHeight >= TOUCH_PANEL_MIN_ROWS || dm.dmPelsWidth >= TOUCH_PANEL_MIN_ROWS;
     RETAILMSG(1, (TEXT("CLASSPAD TOUCH: display %dx%d -> %s\r\n"), dm.dmPelsWidth, dm.dmPelsHeight,
-                  dm.dmPelsHeight >= TOUCH_PANEL_MIN_ROWS ? TEXT("fx-CP400 panel") : TEXT("no touch panel")));
-    return dm.dmPelsHeight >= TOUCH_PANEL_MIN_ROWS;
+                  tallPanel ? TEXT("fx-CP400 panel") : TEXT("no touch panel")));
+    return tallPanel;
 }
 
 //------------------------------------------------------------------------------
@@ -185,6 +196,8 @@ BOOL DdsiTouchPanelEnable(void)
     }
     gIntrTouchChanged = SYSINTR_NOP;
     g_prevDown = FALSE;
+    g_stripContact = g_rotateArmed = FALSE;
+    if (!g_rotateEvent) g_rotateEvent = CreateEvent(NULL, FALSE, FALSE, TEXT("ClassPadRotateKey"));
     g_sampling = FALSE;
     if (g_panel) {
         // Own the bus and pins instead of depending on the Casio OS state.
@@ -213,6 +226,7 @@ BOOL DdsiTouchPanelEnable(void)
 void DdsiTouchPanelDisable(void)
 {
     RETAILMSG(1, (TEXT("CLASSPAD TOUCH: disabled after %d samples, %d contacts\r\n"), g_samples, g_contacts));
+    if (g_rotateEvent) { CloseHandle(g_rotateEvent); g_rotateEvent = NULL; }
     if (g_hSampler) {
         g_quit = TRUE; g_sampling = FALSE;
         SetEvent(g_hevSample);
@@ -239,6 +253,7 @@ LONG DdsiTouchPanelDetach(void)
 void DdsiTouchPanelPowerHandler(BOOL bOff)
 {
     g_suspended = bOff;
+    g_rotateArmed = FALSE;
     if (!g_panel) return;
     if (bOff) MMIO_W8(IIC0_ICCR, 0);
     else { TouchBusReset(); g_sampling = TRUE; }
@@ -266,6 +281,25 @@ void DdsiTouchPanelGetPoint(P_TOUCH_PANEL_SAMPLE_FLAGS pTipState, INT *pUncalX, 
             // retry on the next poll; only the contact pin ends a stroke.
             if (PenDown()) return;
         }
+    }
+
+    if (down && !g_prevDown) {
+        g_stripContact = g_lastY >= 0xF4 + 528*0x66F/256;
+        g_rotateArmed = g_stripContact && InRotate(g_lastX, g_lastY);
+    }
+    if (g_stripContact) {
+        if (down && !InRotate(g_lastX, g_lastY)) g_rotateArmed = FALSE;
+        if (!down) {
+            if (g_rotateArmed && g_rotateEvent) {
+                SetEvent(g_rotateEvent);
+                RETAILMSG(1, (TEXT("CLASSPAD TOUCH: Rotate released\r\n")));
+            }
+            g_stripContact = g_rotateArmed = FALSE;
+            if (gIntrTouch != SYSINTR_NOP && gIntrTouch != SYSINTR_UNDEFINED) InterruptDone(gIntrTouch);
+        }
+        g_sampling = down;
+        g_prevDown = down;
+        return; // Never clamp an icon-strip contact into a desktop click.
     }
 
     if (down) {

@@ -1,3 +1,5 @@
 DIRS=\
     hello \
-    dbtstat
+    dbtstat \
+    ROTATE \
+    ROTATEKEY

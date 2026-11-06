@@ -306,3 +306,56 @@ were entirely black; after the second wake the desktop displayed the test
 completion dialog. The ignored dbt/build-power-confirm directory contains
 the images, run log, screenshots and binary/environment provenance.
 This validates the translated emulator path, not physical wake or battery drain.
+
+
+### Runtime portrait/landscape rotation
+
+The GPE driver implements CE's GET/SETSCREENROTATION escapes, reached via
+`ChangeDisplaySettingsEx` with `DM_DISPLAYORIENTATION`. Supported values
+are DMDO_0, DMDO_90, DMDO_180 and DMDO_270 (CE encodes 270 as 4).
+Logical geometry alternates between 320x528 and 528x320 on the fx-CP400.
+The native framebuffer allocation/stride and LCD push geometry stay
+320x528; GPE renders into the rotated primary surface directly. Blit dirty
+rectangles are transformed back to native rows; GPE stroke clips already
+arrive in native coordinates. Resume marks the full native height dirty.
+Touch panel detection accepts either dimension being 528, so starting in
+landscape does not disable the sensor. Raw sensor coordinates remain in
+the calibration coordinate system; rotation is performed by GWES.
+
+Open `\Windows\classpad_rotate.exe` for orientation buttons. Closing the
+program leaves the selected orientation active. The change is runtime
+only; this version boots in portrait.
+
+`tools/windows/build-rotation.bat` builds the display/touch drivers and the
+control program, then generates `NK-rotation.bin` and an emulator-only
+`NK-rotation-test.bin`. The latter autoruns the program's test mode and
+turns off automatic sleep for the test. The batch restores the normal
+registry and release NK afterward. `app` rebuilds only the control program
+and images; `image` only repackages them.
+
+`tools/test_rotation_emulator.py` injects four physical IIC contacts, each
+at the panel location corresponding to logical (40,40) in the next
+orientation. It checks mode dimensions, application-reported touch
+coordinates, GDI pixel readback, and the blue target's physical framebuffer
+location. It saves all four frames and the final return-to-portrait frame.
+This test does not establish physical-device LCD or suspend/resume behavior.
+
+The fixed Rotate icon below the LCD now toggles portrait (0) / landscape (90)
+on release. Touch DDSI consumes contacts starting on the icon strip, cancels
+Rotate when dragged outside its region, and signals `ClassPadRotateKey` once.
+`classpad_rotatekey.exe` starts at Launch94 and waits without polling, querying
+live orientation and calling ChangeDisplaySettingsEx from outside GWES. The
+strip remains in physical sensor coordinates in either orientation. Manual
+four-direction selection remains available in `classpad_rotate.exe`.
+`python3 tools/test_rotate_key.py` tests the actual GetPoint routing with stubbed
+hardware, including hold, drag cancellation, adjacent icon, bus failure and
+normal desktop contacts. `test_rotation_emulator.py --soft-key` tests four
+physical strip taps against the background service in the diagnostic image.
+
+2026-11-06 emulator verification: all four manual orientations passed live
+orientation query, USER/GDI dimensions, framebuffer target and calibrated touch
+checks. With the Rotate service image, four IIC strip taps at physical (251,550)
+produced exactly 90,0,90,0 with successful returns and matching 528x320/320x528
+geometry (`ROTATION HARNESS: PASS`). Normal NK SHA256:
+`04eb54538c61b387ae178c1384c8360c38435232b00b6499cc41b49cf80f8af9`.
+Hardware icon-strip hit regions still require confirmation on the device.

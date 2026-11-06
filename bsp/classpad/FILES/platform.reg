@@ -81,3 +81,8 @@
     "BattSystemIdle"=dword:3c
     "BattSuspend"=dword:b4
 ; @CESYSGEN ENDIF CE_MODULES_PM
+
+; Handle the fixed Rotate touch-strip icon outside GWES.
+[HKEY_LOCAL_MACHINE\init]
+    "Launch94"="classpad_rotatekey.exe"
+    "Depend94"=hex:14,00,1e,00,32,00
