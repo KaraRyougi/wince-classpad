@@ -856,6 +856,20 @@ static void tr_priv(tctx *t, const sh_insn *d)
         int rn = d->priv_mem ? -1 : (int)((d->op >> 8) & 0xF);
         int dst = d->priv_mem ? pick_scratch(t, R(d->base)) : rn;
         int rT = pick_scratch(t, R(dst) | (d->priv_mem ? R(d->base) : 0));
+#ifdef DBT_SR_ONE_SCRATCH
+        /* Reuse one scratch: clear native MD, then merge guest MD.
+         * Neither AND nor OR modifies SR.T. */
+        if (d->priv_mem) spill(t, dst, SC(t));
+        spill(t, rT, SA(t));
+        emit16(e, OP_STC_SR(dst));
+        emit_mov_lit(e, rT, ~SR_MD, TAG_NONE);
+        emit16(e, 0x2009u | ((sf_u32)dst << 8) | ((sf_u32)rT << 4));
+        emit_mov_lit(e, rT, t->env->shadow_md_addr, TAG_NONE);
+        emit16(e, OP_MOVL_LOAD(rT, rT));
+        emit16(e, 0x200Bu | ((sf_u32)dst << 8) | ((sf_u32)rT << 4));
+        if (d->priv_mem) { swap32(t, dst, dst); commit(t, FIX_NONE, 0); emit16(e, OP_MOVL_PREDEC(dst, d->base)); }
+        restore(t, rT, SA(t));
+#else
         int rU = pick_scratch(t, R(dst) | R(rT) | (d->priv_mem ? R(d->base) : 0));
         if (d->priv_mem) spill(t, dst, SC(t));
         spill(t, rT, SA(t)); spill(t, rU, SB(t));
@@ -867,6 +881,7 @@ static void tr_priv(tctx *t, const sh_insn *d)
         emit16(e, 0x200Bu | ((sf_u32)dst << 8) | ((sf_u32)rT << 4));   /* or rT,dst */
         if (d->priv_mem) { swap32(t, dst, dst); commit(t, FIX_NONE, 0); emit16(e, OP_MOVL_PREDEC(dst, d->base)); }
         restore(t, rU, SB(t)); restore(t, rT, SA(t));
+#endif
         if (d->priv_mem) restore(t, dst, SC(t));
     }
 }

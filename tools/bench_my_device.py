@@ -49,6 +49,10 @@ def main():
                     print(event, flush=True)
         proc.wait()
     result = dict(inputs=inputs, tap_tick=a.tap_tick, flash_offset=a.flash_offset,
+                  host_sample_start=os.environ.get('HLE_DBT_SAMPLE'),
+                  host_sample_layout={k: os.environ[k] for k in (
+                      'HLE_DBT_SAMPLE_BLOCKS', 'HLE_DBT_SAMPLE_COUNTS',
+                      'HLE_DBT_SAMPLE_PER_BANK') if k in os.environ},
                   events=events, returncode=proc.returncode,
                   total_wall_seconds=time.monotonic()-start)
     loaded = next((e for e in events if '[BENCH loaded]' in e['message']), None)

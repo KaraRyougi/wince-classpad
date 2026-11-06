@@ -42,8 +42,10 @@ BOOL OALTimerInit(UINT32 msecPerSysTick, UINT32 countsPerMSec, UINT32 countsMarg
 //------------------------------------------------------------------------------
 //  Timer ISR: runs in bank 0 with SR.IMASK = IRQ_TMU0_PRIORITY
 //
+extern BOOL ClasspadPowerTimerIsr(void);
 UINT32 OALTimerIntrHandler()
 {
+    if (ClasspadPowerTimerIsr()) return SYSINTR_NOP;
     // Acknowledge: clear UNF (the counter has already reloaded)
     MMIO_W16(TMU_TCR0, MMIO_R16(TMU_TCR0) & ~TMU_TCR_UNF);
 

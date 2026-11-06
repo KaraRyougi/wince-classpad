@@ -27,6 +27,10 @@ extern char guest_vectors[];
 volatile unsigned fault_pr;
 static int fails;
 typedef unsigned (*fn_t)(void);
+extern unsigned call_user_with_t(fn_t f, unsigned t);
+__asm__(".text\n.align 2\n.global _call_user_with_t\n_call_user_with_t:\n"
+        "sts.l pr,@-r15\n mov r4,r1\n mov r5,r0\n cmp/eq #1,r0\n"
+        "jsr @r1\n nop\n movt r0\n lds.l @r15+,pr\n rts\n nop\n");
 
 static void check(const char *name, int ok)
 {
@@ -55,6 +59,14 @@ static void tlb_map(unsigned v, unsigned p, unsigned asid, int shared)
 static void set_asid_stock(unsigned asid) { mmio_w32(PTEH, asid); set_sr(get_sr()); }
 /* the paravirtual way */
 static void set_asid_pv(unsigned asid) { mmio_w32(PTEH, asid); hc_asid(asid); }
+
+static unsigned __attribute__((noinline)) alternate_user_targets(unsigned count)
+{
+    unsigned i, sum = 0;
+    for (i = 0; i < count; ++i)
+        sum += ((fn_t)(V_CODE + ((i & 1) ? 0x20 : 0)))();
+    return sum;
+}
 
 /* call f and report how many translations it caused. The first use also
  * translates this function's own blocks; later uses only see f's. */
@@ -88,6 +100,23 @@ void guest_main(void)
     tlb_map(V_CODE, P_A, 1, 0);
     r = call_counted((fn_t)V_CODE, &n);                   /* also translates call_counted itself */
     check("ASID 1: V_CODE -> page A", r == 1);
+    if (hc_getstat(23)) {
+        unsigned before;
+        put_ret(P_A + 0x20, 5);
+        hc_flush(V_CODE + 0x20, 8);
+        check("alternate user targets warmed", alternate_user_targets(16) == 48);
+        before = hc_getstat(4);
+        r = alternate_user_targets(4096);
+        n2 = hc_getstat(4) - before;
+        check("alternating user hash hits return correct values", r == 12288);
+        /* A monomorphic IC would otherwise enter C thousands of times.
+         * Allow a few cold surrounding kernel returns, not per-call misses. */
+        check("user hash hits bypass C IC refill", n2 < 16);
+        check("user hash target preserves T=1", call_user_with_t((fn_t)V_CODE, 1) == 1);
+        check("alternate user hash target preserves T=0", call_user_with_t((fn_t)(V_CODE + 0x20), 0) == 0);
+        check("user hash target preserves T=0", call_user_with_t((fn_t)V_CODE, 0) == 0);
+        check("alternate user hash target preserves T=1", call_user_with_t((fn_t)(V_CODE + 0x20), 1) == 1);
+    }
     set_asid_stock(2);
     tlb_map(V_CODE, P_B, 2, 0);
     r = call_counted((fn_t)V_CODE, &n);

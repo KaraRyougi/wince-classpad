@@ -103,6 +103,7 @@ void guest_main(void)
     hc_puts("tmu test: VBR, TMU0 via pre-swapped MMIO, interrupts under the translator\n");
     __asm__ volatile ("ldc %0, vbr" :: "r"(guest_vectors));
 
+    check("boot cache policy ICE/OCE/CB on, WT off", (mmio_r32(0xff00001cu) & 0x107u) == 0x105u);
     tmu_setup();
     check("TCOR0 reads back through the swap convention", mmio_r32(TCOR0) == PERIOD);
     check("TCR0 reads back (16-bit)", mmio_r16(TCR0) == 0x0020);

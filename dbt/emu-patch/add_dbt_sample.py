@@ -11,17 +11,59 @@ import sys
 INSERT = r"""/* Host-only diagnostic: never alters guest registers, clocks or RAM. */
 static unsigned dbtSampleStart, dbtSampleTotal, dbtSampleSleep, dbtSampleCode, dbtSampleOther;
 static unsigned dbtSampleC[65536];
+/* Optional block-owner attribution. Exact ELF symbols and MAX_BLOCKS must
+ * be supplied by the caller. Read backing RAM directly: do not perform
+ * emulated MMIO/cache/TLB operations or change guest timing. */
+extern void *pageTable[0x100000];
+static unsigned dbtSampleBlocks, dbtSampleCounts, dbtSamplePerBank, dbtSampleUnmapped;
+static struct { unsigned pc, hits; } dbtSampleGuest[32768];
+static unsigned dbtSampleWord(unsigned address) {
+  if(address<0x8c900000u || address>=0x8cd00000u || (address&3))return 0;
+  const unsigned *page=(const unsigned *)pageTable[address>>12];
+  return page ? page[(address&4095u)>>2] : 0;
+}
+static void dbtSampleGuestPc(unsigned pc) {
+  if(!dbtSampleBlocks || !dbtSampleCounts || !dbtSamplePerBank)return;
+  unsigned bank=(pc-0x8cd00000u)/0x40000u;
+  unsigned count=dbtSampleWord(dbtSampleCounts+bank*4);
+  if(count>dbtSamplePerBank){dbtSampleUnmapped++;return;}
+  unsigned lo=bank*dbtSamplePerBank, hi=lo+count;
+  while(lo<hi){
+    unsigned mid=lo+(hi-lo)/2, block=dbtSampleBlocks+mid*36;
+    unsigned base=dbtSampleWord(block+4), length=dbtSampleWord(block+20)&65535u;
+    if(pc<base)hi=mid;
+    else if(pc-base>=length)lo=mid+1;
+    else {
+      unsigned guest=dbtSampleWord(block), slot=((guest>>1)^(guest>>16))&32767u;
+      for(unsigned n=0;n<32768;n++,slot=(slot+1)&32767u){
+        if(!dbtSampleGuest[slot].hits || dbtSampleGuest[slot].pc==guest){
+          dbtSampleGuest[slot].pc=guest;dbtSampleGuest[slot].hits++;return;
+        }
+      }
+      break;
+    }
+  }
+  dbtSampleUnmapped++;
+}
 static void dbtSampleDump(void) {
   if (!dbtSampleStart) return;
   printf("[DBTSAMPLE] total=%u sleep=%u code=%u other=%u\n", dbtSampleTotal, dbtSampleSleep, dbtSampleCode, dbtSampleOther);
   for (unsigned i=0;i<65536;i++) if (dbtSampleC[i])
     printf("[DBTSAMPLE pc] %08x %u\n", 0x8c900000u+i*64u, dbtSampleC[i]);
+  if(dbtSampleBlocks){
+    printf("[DBTSAMPLE guest-unmapped] %u\n",dbtSampleUnmapped);
+    for(unsigned i=0;i<32768;i++)if(dbtSampleGuest[i].hits)
+      printf("[DBTSAMPLE guest] %08x %u\n",dbtSampleGuest[i].pc,dbtSampleGuest[i].hits);
+  }
 }
 static void dbtSampleTick(unsigned tick) {
   static int initialized;
   if (!initialized) {
     const char *s=getenv("HLE_DBT_SAMPLE");
     if (s) { dbtSampleStart=(unsigned)strtoul(s,0,0); atexit(dbtSampleDump); }
+    s=getenv("HLE_DBT_SAMPLE_BLOCKS");if(s)dbtSampleBlocks=(unsigned)strtoul(s,0,0);
+    s=getenv("HLE_DBT_SAMPLE_COUNTS");if(s)dbtSampleCounts=(unsigned)strtoul(s,0,0);
+    s=getenv("HLE_DBT_SAMPLE_PER_BANK");if(s)dbtSamplePerBank=(unsigned)strtoul(s,0,0);
     initialized=1;
   }
   if (!dbtSampleStart || tick<dbtSampleStart) return;
@@ -29,7 +71,7 @@ static void dbtSampleTick(unsigned tick) {
   dbtSampleTotal++;
   if (cpu.isSleeping) dbtSampleSleep++;
   else if (pc>=0x8c900000u && pc<0x8cd00000u) dbtSampleC[(pc-0x8c900000u)>>6]++;
-  else if (pc>=0x8cd00000u && pc<0x8d000000u) dbtSampleCode++;
+  else if (pc>=0x8cd00000u && pc<0x8d000000u) { dbtSampleCode++; dbtSampleGuestPc(pc); }
   else dbtSampleOther++;
 }
 """
@@ -38,6 +80,10 @@ def main():
     path = Path(sys.argv[1]) / 'src/hardware/timers/timers.c'
     source = path.read_text()
     if 'static void dbtSampleTick(' in source:
+        start = source.index('/* Host-only diagnostic:')
+        end = source.index('\nextern void setKeydown(', start)
+        source = source[:start] + INSERT + source[end:]
+        path.write_text(source)
         return
     anchor = 'extern CpuState cpu;'
     tick = '  count++;\n  hleTimerTick();'

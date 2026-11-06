@@ -1223,3 +1223,100 @@ a deterministic failure of these commands in the native Casio environment,
 but does not validate their translated CE execution or scheduling. The next
 controlled hardware check is build-device-lcdsync/wince.hh3 with unchanged
 NK.bin; its boot-power-init experiment remains off.
+
+
+### Sub-five-second work after baseline commit 9675991
+
+Keep the normal NK SHA bec974fca710d06f1832f1d665fa9696ac33d6342facec3ef2521590413b73f5
+and native LCD SYNCO barriers fixed. DEVICE=1/PROFILE=0, O3/LTO,
+20160 headers, 2528 KiB metadata, 16-instruction cap, no borrowed register,
+linear metadata, inline device reads, literal deduplication, IRQ/interior
+entry caches, interior hash publication and UTLB slot hints form the new
+comparison configuration. They are opt-in, not Makefile defaults.
+
+`DBT_USER_IC_HASH_HIT` lets the IC miss stub probe the ASID-scoped hash for
+user targets. A hit jumps directly without publishing a new IC, so no
+active-owner registration is required. Hash misses still call the existing
+C resolver. SR.T restoration remains unchanged. HC_GETSTAT 23 indicates
+this feature. The ASID guest verifies 4096 alternating user calls avoid
+per-call C refill, both T values survive alternate targets, and all existing
+ASID/remap tests pass. TMU interrupt/register tests also pass.
+
+Measured exact-frame times with the current normal NK:
+
+| Configuration | Ticks after second release | Modeled seconds |
+| --- | ---: | ---: |
+| Optimizations plus LCD synchronization | 584088 | 17.824951 |
+| Plus user IC hash-hit bypass | 568800 | 17.358398 |
+
+These are emulator times, not hardware speed claims. Both runs use host-side
+sampling from tick 7512000. Baseline samples: 1694 sleep, 245156 translated
+code, 337239 runtime; candidate: 1666 sleep, 243663 translated code, 323472
+runtime. Sampling includes the release tick and hence totals one more tick
+than the load duration. The improvement is about 2.6%, not the requested
+sub-five-second result. No new artifact has replaced the hardware baseline.
+
+The host sampler can now attribute cached PCs to current 36-byte block
+headers, using caller-supplied exact ELF table addresses and bank sizes.
+It reads backing RAM without emulated accesses. A TMU test mapped all 36330
+translated-code samples with zero unresolved owners. `analyze_dbt_samples.py`
+checks category totals; `analyze_ce_samples.py` maps guest block PCs through
+NK ROM sections and timestamp-matching CE MAP files. Overlapping EXE VAs
+remain ambiguous, and mismatching MAPs are skipped. This machinery is for
+profiling, not part of the device runtime.
+
+The 32-instruction variant (`userhash32-sync`) matched the final frame in
+564978 ticks / 17.241760 seconds. This is a small gain, still far from 5 s.
+An optional `DBT_HOST_OWNER_CACHE` now caches 256 host-to-block lookups,
+checking the containing range and bank generation before reuse. Both full
+flush and bank recycling advance generations. The ASID regression passes;
+the interior-entry pressure regression passes after 13 bank evictions.
+The production-size 32-instruction timing run is `owner32-sync`.
+
+The shared Windows MAP files have since changed and no longer match the
+fixed NK timestamps. The analyzer now retains ROM section/module attribution
+without accepting mismatching function symbols. Across all 243663 guest
+samples, kernel.dll accounts for 173621 (5.298492 modeled seconds), the display
+driver for 26886 (0.820496 s), and GWES for 18152 (0.553955 s). These totals
+cover all guest samples rather than only the top 50 function rows; runtime
+samples are separate. Current function names cannot be validated from the
+changed shared MAPs. Keep the test NK fixed for comparisons.
+
+The host-owner lookup cache measured 545322 ticks / 16.641907 s with the
+normal image (`owner32-sync`), versus 564978 / 17.241760 s without it. Both
+matched the reference. The separate 10-ms diagnostic image completed at
+tick 7878234 (`owner32-tick10`); this is not a same-NK comparison.
+
+### Physical suspend failure and recovery scan
+
+User reports Suspend gives a white panel and Clear cannot resume, while
+normal direction keys and EXE work. This invalidates the earlier emulator
+success as evidence of physical suspend readiness. Normal keyboard operation
+has a polling fallback; the old suspend path stopped every TMU and depended
+entirely on KEYSC interrupts. The emulator injects key-edge IRQs directly and
+does not prove the physical scanner produces those IRQs in this state.
+
+The revised retained-RAM path preserves TMU0 reload/counter/control and uses
+it for a 20-ms recovery scan while CE is suspended. The ISR returns NOP,
+without updating CE time or scheduling threads; only Clear sets the resume
+flag. It restores the previous timer and masks before returning. This is
+light sleep with periodic internal CPU wakeups, not verified deep standby or
+verified low power consumption. KEYSC and TMU clock gates are kept enabled.
+The translated power regression masks KEYSC for the first cycle and verifies
+Clear still resumes, EXE does not, two cycles complete and timer configuration
+is restored. Hardware and rebuilt full NK validation remain outstanding.
+The display PowerHandler still lacks backlight control; its white-panel
+behavior is unresolved and must not be reported as fixed by this change.
+
+`owner32-tick10` completed in 366234 ticks / 11.176575 modeled seconds with
+an exact reference match. The same Loader on normal NK took 16.641907 s.
+This supports measuring timer overhead separately; it does not justify a
+production timer change without a rebuilt image and power/input checks.
+A repeat with guest/native PC sampling is `owner32-tick10-sample`.
+
+`DBT_SR_ONE_SCRATCH` reuses the MD-mask temporary for the shadow-MD load
+when translating STC SR and STC.L SR. It removes one scratch spill/restore
+pair, without changing the MD calculation, memory byte order, or SR.T.
+The 175 host translator checks pass with the flag, as does the interrupt
+recovery/T/register TMU guest. The same-normal-NK benchmark is `sr32-normal`;
+no speedup is claimed before that run completes. This flag remains opt-in.

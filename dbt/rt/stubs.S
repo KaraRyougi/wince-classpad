@@ -121,11 +121,16 @@ _dbt_sync_code:
         add     r5, r0                 /* end */
         mov     #-32, r1
         and     r1, r4                 /* line align */
+        mov     r4, r2                 /* retain first aligned line */
 1:      ocbwb   @r4
-        ICBI    4
         add     #32, r4
         cmp/hs  r0, r4
         bf      1b
+        SYNCO                         /* dirty bytes reach RAM before I invalidation */
+2:      ICBI    2
+        add     #32, r2
+        cmp/hs  r0, r2
+        bf      2b
         SYNCO
         rts
         nop
@@ -145,10 +150,12 @@ _dbt_\name:
         mov.l   .Llookup_srA, r2
 \ts:    mov.l   r1, @r2
         .if \ic
+#ifndef DBT_USER_IC_HASH_HIT
         /* User-target refills must register the IC in the active-ASID list.
          * The translated site's own IC hit remains the unchanged fast path. */
         cmp/pz  r0
         bt      2f
+#endif
         .endif
         .if \link
         bra     2f                     /* a link is resolved once: let C patch and chain it */
@@ -179,6 +186,13 @@ _dbt_\name:
         mov.l   r1, @r2                /* patch the link literal */
         .endif
         .if \ic
+#ifdef DBT_USER_IC_HASH_HIT
+        /* A user hash hit is already scoped to the current ASID. Jump
+         * directly without publishing an IC that would need C-side owner
+         * registration. Cold/hash-miss targets retain the normal C path. */
+        cmp/pz  r0
+        bt      3f
+#endif
         /* Refill the inline cache. Interrupts are live here, and a handler
          * may run this very site: write the pair so that no interleaving
          * can pair the new pc with the old host (the halt at host 0, or a
@@ -191,6 +205,7 @@ _dbt_\name:
         STSX    SLOT_X0, 0
         mov.l   r0, @r2
         .endif
+3:
         mov.l   .Llookup_srA, r0
         mov.l   @r0, r0
         ldc     r0, sr

@@ -7,6 +7,7 @@
 #include "lcd_io.h"
 #include "irqpins.h"
 #include "profile.h"
+#include "hw_diag.h"
 
 typedef __SIZE_TYPE__ dbt_size_t;
 void *memcpy(void *d, const void *s, dbt_size_t n);
@@ -98,6 +99,8 @@ static unsigned g_bank, g_bank_count[CACHE_BANKS], g_allocated, g_bank_evictions
 #ifndef DBT_INTERIOR_ENTRY
 #error DBT_INTERIOR_CACHE requires DBT_INTERIOR_ENTRY
 #endif
+#endif
+#if defined(DBT_INTERIOR_CACHE) || defined(DBT_HOST_OWNER_CACHE)
 static sf_u32 g_bank_generation[CACHE_BANKS];
 #endif
 #ifdef DBT_KERNEL_BANKS
@@ -588,6 +591,7 @@ static void tlb_hook(void)
     sf_u32 sz = ((ptel >> 4) & 1) | ((ptel >> 6) & 2), mask = ~((1u << shift_of_sz[sz]) - 1);
     sf_u32 vpn = pteh & 0xFFFFFC00u & mask, asid = pteh & 0xFF, shared = (ptel >> 1) & 1;
     int i, j;
+    hw_diag_ptel(vpn, ptel);
     dbt_stat.tlb_hooks++;
     note_asid();
     if (!may_have_user_code(vpn, shift_of_sz[sz])) {
@@ -732,7 +736,7 @@ static void cache_flush_all(void)
 #ifdef DBT_INTERIOR_HASH
     memset(g_alias_blocks, 0, sizeof g_alias_blocks);
 #endif
-#ifdef DBT_INTERIOR_CACHE
+#if defined(DBT_INTERIOR_CACHE) || defined(DBT_HOST_OWNER_CACHE)
     for (i = 0; i < CACHE_BANKS; ++i) ++g_bank_generation[i];
 #endif
 #ifdef DBT_KERNEL_BANKS
@@ -803,7 +807,7 @@ static void cache_next_bank(void)
     lo = g_cfg.cache_base + bank * bank_code_bytes();
     hi = lo + bank_code_bytes();
     if (count) {
-#ifdef DBT_INTERIOR_CACHE
+#if defined(DBT_INTERIOR_CACHE) || defined(DBT_HOST_OWNER_CACHE)
         ++g_bank_generation[bank];
 #endif
         g_nic = 0;
@@ -1149,6 +1153,12 @@ sf_u32 dbt_resolve_ic(sf_u32 gpc, sf_u32 ic_addr)
     return host;
 }
 
+#ifdef DBT_HOST_OWNER_CACHE
+/* Ownership survives guest invalidation, but not bank reuse. A matching
+ * generation and explicit host range keep recycled headers out of hits. */
+static struct { dbt_block *block; sf_u32 generation; } g_host_owner[256];
+#endif
+
 /* Block containing a host address (blocks are sorted by host_base). */
 static dbt_block *block_of_host(sf_u32 host)
 {
@@ -1156,13 +1166,28 @@ static dbt_block *block_of_host(sf_u32 host)
     int lo, hi;
     if (host < g_cfg.cache_base || host >= g_cfg.cache_base + CACHE_BANKS * bank_code_bytes()) return 0;
     bank = bank_of_code(host);
+#ifdef DBT_HOST_OWNER_CACHE
+    unsigned slot = (host >> 4) & 255u;
+    dbt_block *cached = g_host_owner[slot].block;
+    if (cached && g_host_owner[slot].generation == g_bank_generation[bank] &&
+        host >= cached->host_base && host < cached->host_base + (sf_u32)cached->host_len) {
+        touch_code(host);
+        return cached;
+    }
+#endif
     lo = (int)(bank * BANK_BLOCKS); hi = lo + (int)g_bank_count[bank] - 1;
     while (lo <= hi) {
         int mid = (lo + hi) / 2;
         dbt_block *b = &g_blocks[mid];
         if (host < b->host_base) hi = mid - 1;
         else if (host >= b->host_base + (sf_u32)b->host_len) lo = mid + 1;
-        else { touch_code(host); return b; }
+        else {
+#ifdef DBT_HOST_OWNER_CACHE
+            g_host_owner[slot].block = b;
+            g_host_owner[slot].generation = g_bank_generation[bank];
+#endif
+            touch_code(host); return b;
+        }
     }
     return 0;
 }
@@ -1334,6 +1359,7 @@ static void print_stats(void)
     dbt_puts("\n");
     print_trace();
     profile_print();
+    hw_diag_print();
 #ifdef DBT_CE_TIME_PROBE
     /* Diagnostic only: pointer location and dwCurMSec offset verified from
      * the frozen benchmark NK's OALTimerIntrHandler, not a platform ABI. */
@@ -1443,6 +1469,9 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
         case 8: v = dbt_stat.fpu_disabled; break;
         case 9: v = g_env.dev_lo; break;
         case 10: v = g_env.dev_hi; break;
+#ifdef DBT_USER_IC_HASH_HIT
+        case 23: v = 1; break;
+#endif
 #ifdef DBT_INTERIOR_ENTRY
         case 17: v = g_interior_hits; break;
         case 18: v = 1; break;
@@ -1825,6 +1854,7 @@ static int exc_c_body(dbt_gctx *ctx);
 int dbt_exc_c(dbt_gctx *ctx)
 {
     int act;
+    hw_diag_exception(ctx);
     bank_normalize(ctx);
     act = exc_c_body(ctx);
     bank_normalize(ctx);

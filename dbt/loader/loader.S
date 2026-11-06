@@ -37,6 +37,15 @@ _start:
         cmp/hs  r0, r4
         bf      2b
         .word   0x00AB                 /* synco */
+#ifdef DBT_TEST_BOOT_CCR
+#ifdef DBT_NO_DEBUG_PORT
+#error inherited-CCR injection is emulator-only
+#endif
+        mov.l   .Ltest_ccr, r0
+        mov.l   .Ltest_ccr_value, r1
+        mov.l   r1, @r0
+        .word   0x00AB
+#endif
         mov.l   .Ldst, r0
         jmp     @r0
         nop
@@ -45,6 +54,10 @@ _start:
 .Lend:  .long _image_end
 .Ldst:  .long IMAGE_BASE               /* from the Makefile layout */
 .Lsize: .long _image_end - _image_start
+#ifdef DBT_TEST_BOOT_CCR
+.Ltest_ccr: .long 0xff00001c
+.Ltest_ccr_value: .long DBT_TEST_BOOT_CCR
+#endif
 #ifdef DBT_TEST_BOOT_POWER_SEED
 .Ltest_stbcr: .long 0xA4150020
 .Ltest_mstp:  .long 0xA4150030

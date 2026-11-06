@@ -2,6 +2,57 @@
         .text
         .global _start
 _start:
+        /* Establish cache policy before any C code or BSS stores. The
+         * loader has already written this image back. SH7305 has four
+         * 8-KiB operand-cache ways; purge their address arrays from P2,
+         * without a stack spill, before invalidating or changing CCR.
+         * Clearing a tag writes back its dirty line (SH4 cache-array rule).
+         * Both HollyHock and the emulator loader enter this same path. */
+        stc     sr, r0
+        or      #0xf0, r0
+        ldc     r0, sr
+        mova    .Lcache_p2, r0
+        mov.l   .Lp2_bit, r1
+        or      r1, r0
+        jmp     @r0
+        nop
+        .align 2
+.Lcache_p2:
+        mov.l   .Lccr, r1
+        mov.l   @r1, r4
+        mov     r4, r0
+        tst     #1, r0
+        bt      .Lcache_clean
+        mov.l   .Loc_begin, r2
+        mov.l   .Loc_end, r3
+        mov     #0, r0
+.Lcache_purge:
+        mov.l   r0, @r2
+        add     #32, r2
+        cmp/hs  r3, r2
+        bf      .Lcache_purge
+.Lcache_clean:
+        .word   0x00ab                 /* SYNCO: finish dirty writebacks */
+        mov     #-3, r0               /* clear WT; preserve unrelated bits */
+        and     r0, r4
+        mov.l   .Lcache_enable, r0
+        or      r0, r4
+        mov.l   r4, @r1
+        mov.l   @r1, r0               /* ordered readback, no UI/log */
+        .word   0x00ab
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        mov.l   .Lcached_entry, r0
+        jmp     @r0
+        nop
+        .align 2
+.Lcached:
         mov.l   .Lstack, r15
         mov.l   .Lbss_start, r0
         mov.l   .Lbss_end, r1
@@ -22,3 +73,10 @@ _start:
 .Lbss_start: .long _bss_start
 .Lbss_end:   .long _bss_end
 .Lmain:      .long _dbt_main
+
+.Lp2_bit:       .long 0x20000000
+.Lccr:          .long 0xff00001c
+.Loc_begin:     .long 0xf4000000
+.Loc_end:       .long 0xf4008000
+.Lcache_enable: .long 0x0000090d /* ICI|ICE|OCI|CB|OCE; stored policy 0x105 */
+.Lcached_entry: .long .Lcached

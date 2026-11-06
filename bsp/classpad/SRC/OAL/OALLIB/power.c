@@ -15,6 +15,13 @@ BOOL ClasspadPowerKeyIsr(void)
     return TRUE; /* no keyboard IST or scheduler while the system is suspended */
 }
 
+BOOL ClasspadPowerTimerIsr(void)
+{
+    if (!g_power.active) return FALSE;
+    ClasspadPowerTimerInterrupt(&g_power);
+    return TRUE;
+}
+
 BOOL OALIoCtlHalPresuspend(UINT32 code, VOID *in, UINT32 insize,
     VOID *out, UINT32 outsize, UINT32 *returned)
 {
@@ -34,7 +41,7 @@ VOID OEMPowerOff(void)
     RETAILMSG(1, (L"CLASSPAD POWER: suspend, Clear/ON wake only\r\n"));
     g_oalWakeSource = SYSWAKE_UNKNOWN;
     ClasspadRtcSuspend();
-    ClasspadPowerPrepare(&g_power);
+    ClasspadPowerPrepare(&g_power, g_oalTimer.countsPerMSec);
     while (!g_power.wake) ClasspadSleepUntilInterrupt(&g_power.wake);
     ClasspadPowerRestore(&g_power);
     ClasspadRtcResume();

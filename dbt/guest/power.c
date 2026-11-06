@@ -13,14 +13,17 @@
 extern char guest_vectors[];
 static ClasspadPowerState state;
 volatile unsigned fatal_vec, irq_regs[18];
-static unsigned bad_irq, wakes;
+static unsigned bad_irq, wakes, timer_wakes;
 void guest_trap(void) {}
 void guest_fatal(void) { hc_puts("FAIL exception in suspend\n"); hc_exit(2); }
 void guest_irq(unsigned event)
 {
-    if (event != 0xBE0 || !state.active) { bad_irq++; return; }
-    ClasspadPowerKeyInterrupt(&state);
-    if (state.wake) wakes++;
+    unsigned before = state.wake;
+    if (!state.active) { bad_irq++; return; }
+    if (event == 0x400) ClasspadPowerTimerInterrupt(&state);
+    else if (event == 0xBE0) ClasspadPowerKeyInterrupt(&state);
+    else { bad_irq++; return; }
+    if (!before && state.wake) { wakes++; if (event == 0x400) timer_wakes++; }
 }
 static void check(const char *name, int ok)
 {
@@ -43,6 +46,7 @@ void guest_main(void)
     unsigned cycle, i;
     __asm__ volatile("ldc %0,vbr" :: "r"(guest_vectors));
     MMIO_W16(INTC_IPRF, 0xD000);
+    MMIO_W16(INTC_IPRA, 0xC000);
     MMIO_W16(KEYSC_KOUTPINSET, KEYSC_KOUT_ALL);
     MMIO_W16(KEYSC_KINPINSET, KEYSC_KIN_ALL);
     MMIO_W16(KEYSC_KIUMODEREG, KEYSC_MODE_VALUE);
@@ -51,19 +55,23 @@ void guest_main(void)
     for (i = 0; i < 13; ++i) MMIO_W8(INTC_IMR(i), 0xFF);
     MMIO_W8(TMU_TSTR, 5);
     for (cycle = 0; cycle < 2; ++cycle) {
-        ClasspadPowerPrepare(&state);
-        check("timers stopped, only Clear matrix armed", MMIO_R8(TMU_TSTR) == 0 &&
+        ClasspadPowerPrepare(&state, 7372);
+        /* Inject a missing keyboard interrupt: Clear must still wake via TMU. */
+        if (cycle == 0) MMIO_W8(INTC_IMR(5), INTC_IMR5_KEYSC);
+        check("recovery timer running, only Clear matrix armed", MMIO_R8(TMU_TSTR) == 1 &&
             MMIO_R16(KEYSC_KOUTPINSET) == 1 && MMIO_R16(KEYSC_KINPINSET) == 2);
         hc_puts("POWER sleeping\n");
         while (!state.wake) wait_irq();
-        check("Clear/ON woke CPU through KEYSC", ClasspadClearDown() && !bad_irq);
+        check("Clear/ON woke suspended CPU", ClasspadClearDown() && !bad_irq);
         ClasspadPowerRestore(&state);
         check("timer, masks and matrix restored", MMIO_R8(TMU_TSTR) == 5 &&
-            MMIO_R8(INTC_IMR(5)) == 0xFF && MMIO_R16(KEYSC_KOUTPINSET) == KEYSC_KOUT_ALL &&
+            MMIO_R8(INTC_IMR(5)) == 0xFF && MMIO_R32(TMU_TCOR0) == state.tcor &&
+            MMIO_R16(TMU_TCR0) == state.tcr && MMIO_R16(KEYSC_KOUTPINSET) == KEYSC_KOUT_ALL &&
             MMIO_R16(KEYSC_KINPINSET) == KEYSC_KIN_ALL);
         for (i = 0; i < 10000000 && ClasspadClearDown(); ++i) {}
         check("wake key released", !ClasspadClearDown());
     }
     check("two suspend/resume cycles", wakes == 2);
+    check("Clear wake with KEYSC interrupt masked", timer_wakes >= 1);
     hc_puts("RESULT: PASS\n"); hc_exit(0);
 }
