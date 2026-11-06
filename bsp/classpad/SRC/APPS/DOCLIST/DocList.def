@@ -1,0 +1,8 @@
+; DocList.dll exports. Pocket PC binaries import these by name; the ordinals
+; are the Pocket PC 2000 ones. The CDocList C++ members it also exported are
+; not provided (nothing outside the shell used them).
+LIBRARY DocList
+EXPORTS
+    DocList_Create                      @50
+    DocList_GetFirstSelectedWaveFile    @51
+    DocList_GetNextSelectedWaveFile     @52

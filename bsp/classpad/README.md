@@ -159,6 +159,37 @@ no `nk.png` was written. The sources now carry the ClassPad geometry, the
 DCS display variant and `Matrix`=1 (above); the next image built from them
 should show the window at 320x528 and exercise touch with this recipe.
 
+## Pocket PC compatibility: DocList.dll and MFC CE 3.0
+
+`SRC\APPS\DOCLIST` builds `DocList.dll`, a stand-in for the Pocket PC
+shell's document list control. MFC CE 3.0 for Pocket PC (`MFCCE300.DLL`,
+SH3, from the Pocket PC 2000 SDK's `MFC\LIB\SH3`) imports
+`DocList.dll!DocList_Create` by name for `CCeDocList`. CE 6.0 has no
+DocList, and the "AYGShell API Set" catalog item only adds `aygshell.dll`,
+so without this DLL the loader refuses `mfcce300.dll` (and `olece300.dll`
+and every program linked to them). Checked against the 2026-11-05 shell
+image (`notes/ce/NK-latest.bin`): the 8 AYGSHELL ordinals MFC imports (4,
+21, 34, 40, 56, 69, 83, 84), its 9 commctrl ordinals and every coredll
+ordinal of both DLLs are exported there; DocList.dll was the only gap.
+
+The control is a child window over the parent's client area: a filter
+combo box (when there is more than one filter) and a report list view
+(Name, Folder, Date, Size) of the files in the folder (default
+`\My Documents`) and its first-level subfolders. A tap or Enter sends
+`DLN_ITEMACTIVATED` with the full path (what `CCeDocListDocTemplate` opens);
+the `DLM_*` messages of the SDK's `doclist.h` are handled, except the shell
+services (infrared, e-mail, rename/move dialog), which answer "not done".
+Delete asks for confirmation. Exports: `DocList_Create`,
+`DocList_GetFirstSelectedWaveFile`, `DocList_GetNextSelectedWaveFile` (the
+Pocket PC ordinals 50 to 52); not the `CDocList` C++ members. It goes into
+the image with commctrl (`CE_MODULES_COMMCTRL`).
+
+The MFC DLLs themselves are staged separately in `FILES\legacy-mfc`
+(`BSP_LEGACY_MFC=1`, see its README); the 300 pair are SH3 binaries and
+need `bsp/kernel/loader-sh3-images.patch`. Untested so far:
+written and syntax-checked on the host only (2026-11-06), not yet built in
+Platform Builder or run.
+
 ## What the files are
 
 - `SRC\OAL\OALLIB\startup.src`: `StartUp` (image entry: SR, VBR, jump to

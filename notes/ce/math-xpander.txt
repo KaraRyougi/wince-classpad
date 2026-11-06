@@ -20,8 +20,12 @@ External dependencies:
   ordinals (it does with Minimal GWES/GDI/Window Manager + Standard Shell).
 - mfcce300.dll: MFC CE 3.0 runtime, SH3 build, NOT in the cabinet (Pocket PC 2000 had it in ROM) and not in
   CE 6 or on the VM. Needed by 8 of the binaries (460 symbols). Source: eMbedded Visual C++ 3.0 /
-  Pocket PC 2000 SDK (Windows CE Tools\wce300\MS Pocket PC\mfc\lib\sh3\mfcce300.dll). Its own imports (commctrl,
-  possibly olece300/oleaut) are to be checked when the file is in hand.
+  Pocket PC 2000 SDK (Windows CE Tools\wce300\MS Pocket PC\mfc\lib\sh3\mfcce300.dll). Its own imports, checked
+  2026-11-06 against NK-latest.bin: coredll and commctrl ordinals all present, AYGSHELL ordinals 4, 21, 34, 40,
+  56, 69, 83 (SHHandleWMSettingChange), 84 (SHHandleWMActivate) all present in CE 6's aygshell.dll, and
+  DocList.dll!DocList_Create, which CE 6 does not have at all -> bsp/classpad/SRC/APPS/DOCLIST. olece300.dll
+  imports only mfcce300 and coredll. Math Xpander itself uses CSingleDocTemplate (Workbook.dll only references
+  CCeDocListDocTemplate's CRuntimeClass), so it never opens a DocList window; it only needs DocList.dll to load.
 - ndosspal.dll (856 exports, imports coredll only): Saltire's own base library, in the cabinet.
 - commctrl: not imported directly (through MFC); in the image.
 
