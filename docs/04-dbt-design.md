@@ -383,7 +383,10 @@ via hypercall 0xF1):
   F9 user mappings changed in a range (`hc_tlb_inval`), FA address space
   switched to an ASID (`hc_asid`), FB read a statistic (0 translations,
   1 blocks, 2 invalidations, 3 ASID switches, 4 inline-cache misses,
-  5 debug-ring bytes, 6 device accesses), FC translate a range device-aware
+  5 debug-ring bytes, 6 device accesses, ... up to the tick-sample
+  histogram at 128-383; the full index list is in
+  `bsp/classpad/SRC/INC/classpad_hc.h`, "Measuring on the device" below),
+  FC translate a range device-aware
   from now on (tests), FD push pixels to the LCD data port natively
   (`hc_lcd_blit`: r4 = pixels as the guest stores them at a P1/P2 address,
   r5 = count, r6 = port; the display driver's row push, 2026-11-05), FE the
@@ -636,6 +639,72 @@ the old layout, measured by the HollyHock session), which the 8192-block
 layout addresses, and the prepass/main-loop double decode is already
 avoided (`g_pre`).
 
+### Measuring on the device (2026-11-06)
+
+Everything above was measured in casio-emu, whose cost model is one tick per
+instruction: no caches, no SDRAM latency, no branch penalties. The real
+fx-CP400 is slower than that model predicts and nothing had been measured
+there, so the runtime now carries a profiler that needs no output channel
+but a window on the CE desktop:
+
+- **Tick sampling** (`sample_tick`, always on): every TMU0 interrupt
+  (vector 0x600, INTEVT 0x400) classifies the interrupted host pc the way
+  `trace_exc` does (inside a block, in an exit stub, in a lookup/helper stub
+  window, inside a translation, inside a helper) and the guest pc it resumes
+  at: the kernel's idle `sleep`, a user-mode pc (translated through the UTLB
+  so XIP module code lands in the same histogram as the kernel), or a
+  kernel pc. The histogram has 256 buckets over the ROM image by physical
+  address (`hist_base`, `hist_shift`), 16 KiB each for the 3.875 MiB window;
+  `tools/cesym.py` names them. A tick that lands in masked translator C is
+  delivered at the first instruction after the re-enabling `ldc` in the
+  stubs' full tail, so the stub-window samples are split by where in the
+  stubs they land and by which C entry returned last (`g_tail_from`):
+  after a lookup or translation (translator time), after the `ldc sr`
+  helper (kernel code that ran with interrupts disabled), after an FPU or
+  fallback helper, the cheap entry windows, the asm hash hit, and the
+  trampolines. The guest pc of such a sample is the one that entered the
+  stub (the "where=3 caveat" above), so those samples still sit in the
+  histogram at the code that caused them. The PROFILE=1 buckets measure the
+  same time in TMU1 counts; the two should agree.
+- **Exception counters**: every delivery by vector (general, TLB miss,
+  interrupt) and the first 16 INTEVT codes seen with their counts, so a
+  storming source or an unexpected TLB-miss rate shows at once.
+- **PROFILE=1 buckets** gained `exc` (the C side of a delivery, handler
+  translation included), `rte` and `lookup` (`dbt_resolve`, translation and
+  full flushes included). On the device TMU1 counts real time: 7,372,800
+  per second at the stock clock, so the buckets are seconds, not model
+  ticks. The build reserves TMU1, which the OAL never touches.
+- **Machine state**: CCR, MMUCR, FRQCR and the RTC's seconds of day. The CE
+  kernel programs CCR itself in `SHInit` (`CACHE_ENABLE | 0x80000105`:
+  both caches on, P1 copy-back, no write-through), which `mdsh3.c` in the
+  shared source confirms; the read-out shows what the hardware actually
+  holds. The RTC seconds against GetTickCount give the real TMU clock
+  (bsp_cfg.h assumes Pphi 29.4912 MHz, from casio-emu).
+
+All of it is read with `HC_GETSTAT` (indices 64 up; the list is in
+`bsp/classpad/SRC/INC/classpad_hc.h`), which works from user mode: a
+`trapa` is a general exception the translator takes before the kernel sees
+it. `bsp/classpad/SRC/APPS/DBTSTAT` (`classpad_dbtstat.exe`) polls it every
+2 s and shows rates, sample shares, C-time percentages and the hottest code
+buckets on the panel; `print_stats` prints the same `[sample]` lines in the
+emulator (every 4096 rte in PROFILE builds, and at HC_STATS/exit).
+
+First emulator numbers (power image, ClassPad profile, PROFILE=1, 360 s
+wall / 270 s of guest ticks to idle): 88 % of the ticks idle once the
+desktop is up; before that, translated code 3/4 and the stub windows 1/4,
+of which almost all is "after lookup C" (translations under the mask); TLB
+misses 0.4 per tick (45 k); of the TMU1 time, translate 8 %, exception
+delivery 6 %, lookup 5 %, invalidate 4 %. The kernel pcs outside the
+histogram were P3 addresses 0xC010Bxxx (the KPage's interlocked APIs), now
+translated through the UTLB like user pcs.
+
+The first thing it is for: deciding whether the device's slowness is the
+translated code (block share high, histogram concentrated), the interrupt
+rate (irq/s, TLB misses/s), the translator's C (PROFILE buckets) or idle
+that is not idle. Until those numbers exist, the hardware-only costs the
+emulator cannot show (I-cache misses from the 3-5x code expansion, literal
+loads through the operand cache, `jmp @rT` penalties) are guesses.
+
 ### Profiling a CE boot (2026-11-03)
 
 The 1 ms TMU tick is a sampling profiler: `-DDBT_TRACE_EXC` prints every
@@ -758,8 +827,9 @@ cache flushes. Statistics are printed by HC_STATS and every 4096 guest RTES
 in profiling builds. Normal builds do not read the profiling timer.
 HC_GETSTAT 11 reports whether profiling is enabled; 12 is elapsed TMU1 ticks;
 13 is skipped same-ASID notifications; 14 is TLB scans skipped by the user-code
-page filter. Indices 32..49 are six triplets (calls,total,max), in the order
-above. Counters wrap modulo 2^32; take deltas less than one timer wrap apart.
+page filter. Indices 32..58 are nine triplets (calls,total,max), in the order
+above plus exception delivery, rte and lookup (2026-11-06, "Measuring on the
+device"). Counters wrap modulo 2^32; take deltas less than one timer wrap apart.
 Buckets overlap (TLB includes any invalidation); do not sum them. Translation
 only measures completed attempts, not C work abandoned on a guest fault.
 Do not combine PROFILE with a guest that owns/reprograms TMU1. At the stock
@@ -1237,7 +1307,7 @@ comparison configuration. They are opt-in, not Makefile defaults.
 `DBT_USER_IC_HASH_HIT` lets the IC miss stub probe the ASID-scoped hash for
 user targets. A hit jumps directly without publishing a new IC, so no
 active-owner registration is required. Hash misses still call the existing
-C resolver. SR.T restoration remains unchanged. HC_GETSTAT 23 indicates
+C resolver. SR.T restoration remains unchanged. HC_GETSTAT 30 indicates
 this feature. The ASID guest verifies 4096 alternating user calls avoid
 per-call C refill, both T values survive alternate targets, and all existing
 ASID/remap tests pass. TMU interrupt/register tests also pass.
@@ -1320,3 +1390,42 @@ pair, without changing the MD calculation, memory byte order, or SR.T.
 The 175 host translator checks pass with the flag, as does the interrupt
 recovery/T/register TMU guest. The same-normal-NK benchmark is `sr32-normal`;
 no speedup is claimed before that run completes. This flag remains opt-in.
+
+### Integration of claude/device-profiler-tickless
+
+The test branch combines b05c23f with the current translator/cache/wake
+work, keeping main and the Claude worktree unchanged. HC_GETSTAT 23 retains
+the branch's exceptions counter; the user-IC optimization feature moves to
+30, with its regression updated. The power recovery ISR runs before normal
+timer accounting. The device stats app uses the proven CE test-app include
+and library paths. Tick-sample shares are event-biased under variable tick;
+PROFILE builds use independent TMU1 time for interval rates.
+
+A production-timer register-model regression reproduced a missing-latency
+bug before the fix: after underflow, CountsSinceSysTick clamped instead of
+including the elapsed reloaded counter. It now reads a consistent side of
+the reload and includes that latency. Reschedule updates mask interrupts,
+restore the prior enable state, and SetPeriod re-reads TCNT at programming
+time instead of using a stale pre-call sample. Tests cover pending reload,
+reload during a read, programming delay, earlier/past deadlines and bypass
+of normal timing during suspend. Fine-grained timing between the final
+counter read and write still requires real-target clock-drift validation.
+
+Host tests, TMU interrupt recovery and the ASID/remap guest pass for the
+integrated runtime. A Windows rebuild and a complete tickless NK run remain
+required before claiming boot, suspend, touch or sub-five-second timing.
+`tools/windows/build-tickless.bat` builds OAL and the optional stats app;
+the app is available under Windows and is not launched automatically.
+
+The cache initialization now runs from P2 before BSS/C initialization,
+purges the four operand-cache ways without stack spills, and enables
+ICE/OCE/CB with WT clear. There is no new launcher display or prompt.
+The dirty-purge/cache-control order follows the SH4 startup pattern in
+https://github.com/torvalds/linux/blob/master/arch/sh/kernel/cpu/init.c;
+SH4A cache geometry is described by its companion sh4/probe.c. Runtime
+code synchronization now completes writeback before instruction invalidation.
+Tests cover cache-off and inherited write-through entry, IRQ recovery,
+ASID/remaps, and cache-bank recycling. On the existing fixed normal NK,
+cachefast-normal matched My Device at tick 8055684 (543684 load ticks,
+16.591919 modeled seconds). The emulator's operand-cache backing is coherent;
+this does not prove physical dirty-line writeback or hardware speedup.

@@ -155,6 +155,8 @@ static sf_u32 helper_return_address(void)
 static sf_u32 helper_guest_pc(sf_u32 ret, int *in_insn_range);
 static int guest_pc_fetchable(sf_u32 gpc);
 static void deliver_synthetic(sf_u32 gpc, sf_u32 expevt);
+static void sample_init(const dbt_rt_config *cfg);
+static int g_window_kind, g_tail_from;      /* sampling profiler: see sample_tick */
 static void print_stats(void);
 
 /* ------------------------------------------- address spaces and the TLB */
@@ -967,6 +969,7 @@ void dbt_rt_init(const dbt_rt_config *cfg)
     memset(&dbt_stat, 0, sizeof dbt_stat);
     dbgring_init();
     profile_init();
+    sample_init(cfg);
     cache_flush_all();
     fpuemu_reset(&g_fpu);
     memset(&g_env, 0, sizeof g_env);
@@ -1150,6 +1153,7 @@ sf_u32 dbt_resolve_ic(sf_u32 gpc, sf_u32 ic_addr)
         }
         ic[0] = 1; ic[1] = host; ic[0] = gpc;
     }   /* data: read by mov.l @(disp,PC) through the operand cache; not after a flush (the cache is gone) */
+    g_tail_from = 1;
     return host;
 }
 
@@ -1228,6 +1232,7 @@ static int g_devrange_pending;
 sf_u32 dbt_resolve(sf_u32 gpc, sf_u32 link_lit)
 {
     sf_u32 host, gen;
+    PROFILE_BEGIN;
     dbt_dbgring_drain();
     if (g_devrange_pending) {
         /* HC_DEVRANGE: retranslate everything with the new range; the link
@@ -1243,6 +1248,8 @@ sf_u32 dbt_resolve(sf_u32 gpc, sf_u32 link_lit)
     /* a full flush inside the lookup freed the block holding the link
      * literal (and maybe reused its memory for the new one): leave it alone */
     if (link_lit && dbt_stat.flushes == gen) link_direct(link_lit, host);
+    PROFILE_END(PROF_LOOKUP);
+    g_tail_from = 1;
     return host;
 }
 
@@ -1286,7 +1293,9 @@ static void invalidate_all_but_rom(void)
 #define HC_SYNTH  0xF8                  /* translator-internal: deliver a synthetic exception (r4 = guest pc, r5 = EXPEVT) */
 #define HC_TLB_INVAL 0xF9               /* kernel: user mappings in [r4, r4+r5) changed (r5 = 0: all) */
 #define HC_ASID   0xFA                  /* kernel: address space switched to ASID r4 */
-#define HC_GETSTAT 0xFB                 /* r4 = index -> r0 (0 translations, 1 blocks, 2 invalidations, 3 asid switches, 4 ic misses, 5 debug-ring bytes, 6 device accesses, 7 full flushes, 8 FPU-disable exceptions, 9/10 device-aware range lo/hi) */
+#define HC_GETSTAT 0xFB                 /* r4 = index -> r0 (0 translations, 1 blocks, 2 invalidations, 3 asid switches, 4 ic misses, 5 debug-ring bytes, 6 device accesses, 7 full flushes, 8 FPU-disable exceptions, 9/10 device-aware range lo/hi,
+                                         * 11-14 profile.h, 23-29 more counters, 32+3b profile bucket b, 64-116 tick samples / exceptions / machine registers, 128-383 the code histogram:
+                                         * the complete list is kept in bsp/classpad/SRC/INC/classpad_hc.h) */
 #define HC_DEVRANGE 0xFC                /* tests: translate [r4, r5) device-aware from now on (drops all translations at the next lookup) */
 #define HC_LCD_BLIT 0xFD                /* r4 = pixels as the guest stores them (P1/P2 address), r5 = pixel count, r6 = 16-bit LCD data port: written natively */
 #define HC_LCD_PUSH 0xFE                /* DCS panel: r4 = pixels (P1/P2), r5 = first row, r6 = rows, r7 = width: CASET/PASET/RAMWR and the pixels in one go */
@@ -1318,6 +1327,216 @@ static void deliver_synthetic(sf_u32 gpc, sf_u32 expevt)
 }
 
 static void print_trace(void);
+
+/* ------------------------------------------------------------ sampling profiler
+ * Every system tick (vector 0x600, INTEVT 0x400 = TMU0) classifies the host
+ * pc it interrupted and the guest pc it resumes at, so a run on the real
+ * machine can be profiled with nothing but HC_GETSTAT (indices 64 up, read by
+ * bsp/classpad/SRC/APPS/DBTSTAT): the share of ticks in translated guest
+ * code, in the lookup/helper stub windows, inside a translation or a helper,
+ * in the kernel's idle `sleep`; and a 256-bucket histogram of guest code by
+ * physical address over the ROM image (kernel and XIP DLLs alike: a user pc
+ * is translated through the UTLB), to symbolise with tools/cesym.py. A tick
+ * that lands in masked translator C (lookups, hypercalls, the exception path)
+ * is delivered at the re-enabling instruction and so counts as guest code at
+ * the pc that entered the stub; the PROFILE=1 TMU1 buckets measure that
+ * time. Every exception is also counted by vector and INTEVT code, so a
+ * storming source shows up. Counters wrap modulo 2^32: take deltas. */
+#define SAMPLE_HIST     256
+#define SAMPLE_INTEVTS  16
+#define SAMPLE_KOTHER   5
+static struct {
+    sf_u32 total, in_block, exit_stub, stub_window, translating, helper;
+    sf_u32 idle;                  /* the resume pc is a `sleep` in P1/P2 code: OEMIdle */
+    sf_u32 user, user_ram;        /* TLB-mapped pcs; of those, pages outside the ROM image (RAM-loaded code) */
+    sf_u32 kernel_other;          /* P1/P2 pcs outside the histogram, and P4 */
+    sf_u32 hist_base, hist_shift; /* physical base and log2 of the bucket size */
+    sf_u32 hist[SAMPLE_HIST];
+    sf_u32 exc_general, exc_tlb, exc_irq;     /* every exception by vector (hypercalls excluded) */
+    sf_u32 intevt_n;
+    struct { sf_u32 code, count; } intevt[SAMPLE_INTEVTS];
+    /* the stub-window ticks split by what they stand for (see sample_tick) */
+    sf_u32 win_entry, win_hit, win_tail_lookup, win_tail_ldcsr, win_tail_helper, win_tramp;
+    sf_u32 kother_last[SAMPLE_KOTHER], kother_idx;   /* the last kernel pcs outside the histogram */
+} g_sample;
+/* Set by stub_window: 1 lookup entry (before the mask), 2 hit tail, 3 full
+ * tail (after C, or a helper's exit), 4 rte trampoline, 5 bank trampoline,
+ * 6 helper prologue. The full tail is where a tick deferred by the mask of
+ * translator C lands (the instruction after the re-enabling ldc), and
+ * g_tail_from says whose C it was: 1 lookup/translation, 2 the ldc-sr
+ * helper (= kernel code that ran with interrupts disabled), 3 fpu/fallback. */
+
+static void sample_init(const dbt_rt_config *cfg)
+{
+    sf_u32 lo, hi, shift = 10;
+    memset(&g_sample, 0, sizeof g_sample);
+    if (cfg->rom_hi > cfg->rom_lo) { lo = cfg->rom_lo; hi = cfg->rom_hi; }
+    else { lo = cfg->guest_ram_lo & 0x1FFFFFFFu; hi = cfg->guest_ram_hi & 0x1FFFFFFFu; }
+    while (((hi - lo) >> shift) >= SAMPLE_HIST) shift++;
+    g_sample.hist_base = lo; g_sample.hist_shift = shift;
+}
+
+static void sample_exception(const dbt_gctx *ctx)
+{
+    unsigned i;
+    if (ctx->vec_off == 0x100) { g_sample.exc_general++; return; }
+    if (ctx->vec_off == 0x400) { g_sample.exc_tlb++; return; }
+    g_sample.exc_irq++;
+    for (i = 0; i < g_sample.intevt_n; i++)
+        if (g_sample.intevt[i].code == ctx->intevt) { g_sample.intevt[i].count++; return; }
+    if (i < SAMPLE_INTEVTS) { g_sample.intevt[i].code = ctx->intevt; g_sample.intevt[i].count = 1; g_sample.intevt_n = i + 1; }
+}
+
+/* where: 1 exit stub, 2 inside a block, 3 stub window, 4 translating, 5 helper (as trace_exc) */
+static void sample_tick(sf_u32 gpc, int where)
+{
+    sf_u32 phys;
+    g_sample.total++;
+    switch (where) {
+    case 1: g_sample.exit_stub++; break;
+    case 2: g_sample.in_block++; break;
+    case 3:
+        g_sample.stub_window++;
+        switch (g_window_kind) {
+        case 1: case 6: g_sample.win_entry++; break;
+        case 2: g_sample.win_hit++; break;
+        case 3:
+            if (g_tail_from == 1) g_sample.win_tail_lookup++;
+            else if (g_tail_from == 2) g_sample.win_tail_ldcsr++;
+            else g_sample.win_tail_helper++;
+            break;
+        default: g_sample.win_tramp++; break;
+        }
+        break;
+    case 4: g_sample.translating++; return;           /* the pc being translated says nothing about time */
+    case 5: g_sample.helper++; break;
+    default: break;
+    }
+    if (IS_USER(gpc) || (gpc >= 0xC0000000u && gpc < 0xE0000000u)) {
+        /* TLB-mapped: user modules, and the kernel's P3 pages (the KPage's
+         * interlocked APIs at 0xC010Bxxx showed up here); XIP code lands in
+         * the ROM histogram either way */
+        if (IS_USER(gpc)) g_sample.user++;
+        phys = utlb_translate(gpc, g_asid);
+    } else if (gpc < 0xC0000000u) {
+        phys = gpc & 0x1FFFFFFFu;
+        /* OEMIdle's `sleep`: the resume pc is the sleep itself or, past its
+         * commit point, the instruction after it. The block was fetched from
+         * there, so the reads are safe; LE code: swapped halfwords. */
+        if (where == 2 && !(gpc & 1) &&
+            (bswap16(*(volatile sf_u16 *)gpc) == 0x001Bu ||
+             ((gpc & 0xFFFu) && bswap16(*(volatile sf_u16 *)(gpc - 2)) == 0x001Bu))) {
+            g_sample.idle++;
+            return;
+        }
+    } else { phys = PHYS_UNKNOWN; }
+    phys -= g_sample.hist_base;
+    if ((phys >> g_sample.hist_shift) < SAMPLE_HIST) g_sample.hist[phys >> g_sample.hist_shift]++;
+    else if (IS_USER(gpc)) g_sample.user_ram++;
+    else {
+        g_sample.kernel_other++;
+        g_sample.kother_last[g_sample.kother_idx++ % SAMPLE_KOTHER] = gpc;
+    }
+}
+
+/* Machine state worth a look on the device (HC_GETSTAT 80-83) */
+#define REG_CCR    (*(volatile sf_u32 *)0xFF00001Cu)
+#define REG_FRQCR  (*(volatile sf_u32 *)0xA4150000u)
+static sf_u32 rtc_seconds_of_day(void)
+{
+    /* SH7305 RTC, BCD counters (bsp rtc.c reads the same registers) */
+    sf_u32 s = *(volatile sf_u8 *)0xA413FEC2u, m = *(volatile sf_u8 *)0xA413FEC4u, h = *(volatile sf_u8 *)0xA413FEC6u;
+#define FROM_BCD(v) (((v) & 15u) + (((v) >> 4) & 15u) * 10u)
+    return FROM_BCD(h) * 3600u + FROM_BCD(m) * 60u + FROM_BCD(s);
+#undef FROM_BCD
+}
+
+static sf_u32 sample_stat(sf_u32 index)
+{
+    switch (index) {
+    case 64: return g_sample.total;
+    case 65: return g_sample.in_block;
+    case 66: return g_sample.exit_stub;
+    case 67: return g_sample.stub_window;
+    case 68: return g_sample.translating;
+    case 69: return g_sample.helper;
+    case 70: return g_sample.idle;
+    case 71: return g_sample.user;
+    case 72: return g_sample.user_ram;
+    case 73: return g_sample.kernel_other;
+    case 74: return g_sample.hist_base;
+    case 75: return g_sample.hist_shift;
+    case 76: return SAMPLE_HIST;
+    case 77: return g_sample.exc_general;
+    case 78: return g_sample.exc_tlb;
+    case 79: return g_sample.exc_irq;
+    case 80: return REG_CCR;
+    case 81: return REG_MMUCR;
+    case 82: return REG_FRQCR;
+    case 83: return rtc_seconds_of_day();
+    case 84: return g_sample.intevt_n;
+    case 117: return g_sample.win_entry;
+    case 118: return g_sample.win_tail_lookup;
+    case 119: return g_sample.win_tail_ldcsr;
+    case 120: return g_sample.win_tail_helper;
+    case 121: return g_sample.win_hit;
+    case 122: return g_sample.win_tramp;
+    default:
+        if (index >= 85 && index < 85 + 2 * SAMPLE_INTEVTS) {
+            unsigned k = (index - 85) / 2;
+            return (index - 85) & 1 ? g_sample.intevt[k].count : g_sample.intevt[k].code;
+        }
+        if (index >= 123 && index < 123 + SAMPLE_KOTHER) return g_sample.kother_last[index - 123];
+        if (index >= 128 && index < 128 + SAMPLE_HIST) return g_sample.hist[index - 128];
+        return 0;
+    }
+}
+
+static void print_samples(void)
+{
+    unsigned i, top[8], n = 0;
+    if (!g_sample.total && !g_sample.exc_irq) return;
+    dbt_puts("[sample] ticks="); dbt_puthex(g_sample.total);
+    dbt_puts(" block="); dbt_puthex(g_sample.in_block);
+    dbt_puts(" exit="); dbt_puthex(g_sample.exit_stub);
+    dbt_puts(" window="); dbt_puthex(g_sample.stub_window);
+    dbt_puts(" xlat="); dbt_puthex(g_sample.translating);
+    dbt_puts(" helper="); dbt_puthex(g_sample.helper);
+    dbt_puts(" idle="); dbt_puthex(g_sample.idle);
+    dbt_puts(" user="); dbt_puthex(g_sample.user); dbt_puts("/"); dbt_puthex(g_sample.user_ram);
+    dbt_puts(" kother="); dbt_puthex(g_sample.kernel_other);
+    for (i = 0; i < SAMPLE_KOTHER && i < g_sample.kother_idx; i++) { dbt_puts(i ? "," : "@"); dbt_puthex(g_sample.kother_last[i]); }
+    dbt_puts("\n[sample] window: entry="); dbt_puthex(g_sample.win_entry);
+    dbt_puts(" hit="); dbt_puthex(g_sample.win_hit);
+    dbt_puts(" after-lookup-C="); dbt_puthex(g_sample.win_tail_lookup);
+    dbt_puts(" after-ldcsr="); dbt_puthex(g_sample.win_tail_ldcsr);
+    dbt_puts(" after-helper="); dbt_puthex(g_sample.win_tail_helper);
+    dbt_puts(" tramp="); dbt_puthex(g_sample.win_tramp);
+    dbt_puts("\n[sample] exc gen="); dbt_puthex(g_sample.exc_general);
+    dbt_puts(" tlb="); dbt_puthex(g_sample.exc_tlb);
+    dbt_puts(" irq="); dbt_puthex(g_sample.exc_irq);
+    for (i = 0; i < g_sample.intevt_n; i++) {
+        dbt_puts(" "); dbt_puthex(g_sample.intevt[i].code); dbt_puts(":"); dbt_puthex(g_sample.intevt[i].count);
+    }
+    dbt_puts("\n[sample] ccr="); dbt_puthex(REG_CCR); dbt_puts(" mmucr="); dbt_puthex(REG_MMUCR);
+    dbt_puts(" frqcr="); dbt_puthex(REG_FRQCR);
+    /* the eight hottest buckets, physical and as the P1 address */
+    for (i = 0; i < SAMPLE_HIST; i++) {
+        unsigned j, k;
+        if (!g_sample.hist[i]) continue;
+        for (j = 0; j < n && g_sample.hist[top[j]] >= g_sample.hist[i]; j++) ;
+        if (j >= 8) continue;
+        for (k = (n < 8 ? n : 7); k > j; k--) top[k] = top[k - 1];
+        top[j] = i;
+        if (n < 8) n++;
+    }
+    dbt_puts("\n[sample] hot:");
+    for (i = 0; i < n; i++) {
+        sf_u32 pa = g_sample.hist_base + ((sf_u32)top[i] << g_sample.hist_shift);
+        dbt_puts(" "); dbt_puthex(pa | 0x80000000u); dbt_puts("="); dbt_puthex(g_sample.hist[top[i]]);
+    }
+    dbt_puts(" (bucket "); dbt_puthex(1u << g_sample.hist_shift); dbt_puts(")\n");
+}
 
 static void print_stats(void)
 {
@@ -1357,6 +1576,7 @@ static void print_stats(void)
     dbt_puts(" resumes="); dbt_puthex(dbt_stat.resumes);
     dbt_puts("/"); dbt_puthex(dbt_stat.resumes_committed);
     dbt_puts("\n");
+    print_samples();
     print_trace();
     profile_print();
     hw_diag_print();
@@ -1470,7 +1690,7 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
         case 9: v = g_env.dev_lo; break;
         case 10: v = g_env.dev_hi; break;
 #ifdef DBT_USER_IC_HASH_HIT
-        case 23: v = 1; break;
+        case 30: v = 1; break;
 #endif
 #ifdef DBT_INTERIOR_ENTRY
         case 17: v = g_interior_hits; break;
@@ -1490,7 +1710,14 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
         case 15: v = g_irq_entry_hits; break;
         case 16: v = 1; break;
 #endif
-        default: v = profile_stat(ctx->r[4]); break;
+        case 23: v = dbt_stat.exceptions; break;
+        case 24: v = dbt_stat.hypercalls; break;
+        case 25: v = dbt_stat.rte_calls; break;
+        case 26: v = dbt_stat.ldc_sr_calls; break;
+        case 27: v = dbt_stat.lookups_c; break;
+        case 28: v = dbt_stat.tlb_hooks; break;
+        case 29: v = g_bank_evictions; break;
+        default: v = ctx->r[4] >= 64 ? sample_stat(ctx->r[4]) : profile_stat(ctx->r[4]); break;
         }
         ctx->r[0] = v;
         return RT_ACT_RESUME;
@@ -1733,6 +1960,7 @@ static int stub_window(dbt_gctx *ctx, sf_u32 *guest_pc)
 
     /* lookup stubs before masking: r0/r1/r2 saved in order to Y0/Y1/A0; resume = X0 */
     if (IN(spc, dbt_lookup, dbt_hit_a)) {
+        g_window_kind = 1;
         if (IN(spc, dbt_lookup, dbt_lookup_link)) {
             if (AFTER(spc, dbt_lk_s1)) UNDO(ctx, 0, SLOT_Y0);
             if (AFTER(spc, dbt_lk_s2)) UNDO(ctx, 1, SLOT_Y1);
@@ -1755,6 +1983,7 @@ static int stub_window(dbt_gctx *ctx, sf_u32 *guest_pc)
     /* hit tail: r1 = host target */
     if (IN(spc, dbt_hit_a, dbt_hit_end)) {
         sf_u32 target = ctx->r[1];
+        g_window_kind = 2;
         if (!AFTER(spc, dbt_hit_a)) UNDO(ctx, 0, SLOT_Y0);
         if (!AFTER(spc, dbt_hit_b)) UNDO(ctx, 2, SLOT_A0);
         UNDO(ctx, 1, SLOT_Y1);
@@ -1764,6 +1993,7 @@ static int stub_window(dbt_gctx *ctx, sf_u32 *guest_pc)
     /* full tail (miss path and helper exits): r1 = host target, r3 in X1 */
     if (IN(spc, dbt_full_m1, dbt_full_end)) {
         sf_u32 target = ctx->r[1];
+        g_window_kind = 3;
         if (!AFTER(spc, dbt_full_m1)) UNDO(ctx, 3, SLOT_X1);
         if (!AFTER(spc, dbt_full_m2)) UNDO(ctx, 0, SLOT_Y0);
         if (!AFTER(spc, dbt_full_m3)) UNDO(ctx, 2, SLOT_A0);
@@ -1773,6 +2003,7 @@ static int stub_window(dbt_gctx *ctx, sf_u32 *guest_pc)
     }
     /* rte trampoline (target not translated at the rte): resume = the target */
     if (IN(spc, dbt_rte_tramp, dbt_rt_masked)) {
+        g_window_kind = 4;
         if (AFTER(spc, dbt_rt_s1)) UNDO(ctx, 0, SLOT_Y0);
         if (AFTER(spc, dbt_rt_s2)) UNDO(ctx, 1, SLOT_Y1);
         if (AFTER(spc, dbt_rt_s3)) UNDO(ctx, 2, SLOT_A0);
@@ -1781,6 +2012,7 @@ static int stub_window(dbt_gctx *ctx, sf_u32 *guest_pc)
     }
     /* bank-switch trampoline: resume = the guest instruction after the ldc */
     if (IN(spc, dbt_bank_tramp, dbt_bt_end)) {
+        g_window_kind = 5;
         if (AFTER(spc, dbt_bt_s1)) UNDO(ctx, 1, SLOT_X0);
         *guest_pc = guest_pc_of_host(dbt_ctx_rt.sw_target, ctx);
         return 1;
@@ -1797,6 +2029,7 @@ static int stub_window(dbt_gctx *ctx, sf_u32 *guest_pc)
         for (i = 0; i < 3; i++) {
             if (IN(spc, h[i].start, h[i].masked)) {
                 sf_u32 ret = ctx->slots[SLOT_X1];
+                g_window_kind = 6;
                 dbt_block *b = block_of_host(ret - 2);
                 int idx, committed;
                 sf_u32 off;
@@ -1854,10 +2087,12 @@ static int exc_c_body(dbt_gctx *ctx);
 int dbt_exc_c(dbt_gctx *ctx)
 {
     int act;
+    PROFILE_BEGIN;
     hw_diag_exception(ctx);
     bank_normalize(ctx);
     act = exc_c_body(ctx);
     bank_normalize(ctx);
+    PROFILE_END(PROF_EXC);
     return act;
 }
 
@@ -1865,7 +2100,7 @@ static int exc_c_body(dbt_gctx *ctx)
 {
     dbt_block *b = 0;                   /* set on the in-block paths only */
     sf_u32 guest_pc, handler;
-    int act;
+    int act, where = 0;                 /* where as trace_exc: 1 exit stub, 2 block, 3 stub window, 4 translating, 5 helper */
     dbt_stat.exceptions++;
 
     if (ctx->vec_off == 0x100 && ctx->expevt == 0x160) {
@@ -1884,8 +2119,10 @@ static int exc_c_body(dbt_gctx *ctx)
         }
         if (nr >= 0xF0) return hypercall(ctx, nr);
     }
+    sample_exception(ctx);
 
     if (stub_window(ctx, &guest_pc)) {
+        where = 3;
         trace_exc(ctx->host_spc, 0, 0, 0, 0, guest_pc, ctx->vec_off, 3);
     } else {
         b = block_of_host(ctx->host_spc);
@@ -1899,6 +2136,7 @@ static int exc_c_body(dbt_gctx *ctx)
                 g_translating = 0;
                 take_stub_context(ctx);
                 dbt_stat.probe_faults++;
+                where = 4;
                 trace_exc(ctx->host_spc, 0, 0, 0, 0, guest_pc, ctx->vec_off, 4);   /* 4: in the translator's C code (host = its pc) */
             } else if (g_helper_ret) {
                 /* a helper's guest memory access faulted (TLB miss on a page
@@ -1911,6 +2149,7 @@ static int exc_c_body(dbt_gctx *ctx)
                 g_helper_ret = 0;
                 take_stub_context(ctx);
                 dbt_stat.helper_faults++;
+                where = 5;
                 trace_exc(ctx->host_spc, 0, 0, 0, 0, guest_pc, ctx->vec_off, 5);   /* 5: in a helper's C code */
             } else {
                 dbt_puts("[dbt] exception outside translated code: spc="); dbt_puthex(ctx->host_spc);
@@ -1927,6 +2166,7 @@ static int exc_c_body(dbt_gctx *ctx)
                 if (k < 0) dbt_halt("exception in a block's literal pool");
                 if (off > (sf_u32)b->links[k].stub_off) ctx->r[1] = ctx->slots[SLOT_Y0];
                 guest_pc = b->links[k].guest_target;
+                where = 1;
                 trace_exc(ctx->host_spc, b->guest_pc, off, 0xEE, 0, guest_pc, ctx->vec_off, 1);
             } else {
                 int idx, committed;
@@ -1936,6 +2176,7 @@ static int exc_c_body(dbt_gctx *ctx)
                  * a scratch of its slot (translate.c slot_avoid). */
                 guest_pc = resume_pc(b, off, ctx, &idx, &committed);
                 apply_resume_state(b, idx, off, committed, ctx);
+                where = 2;
                 trace_exc(ctx->host_spc, b->guest_pc, off, dbt_meta_kind(b, idx), (sf_u32)committed, guest_pc, ctx->vec_off, 2);
                 if (ctx->vec_off == 0x100 && (ctx->expevt == 0x180 || ctx->expevt == 0x1A0)) {
                     /* an illegal instruction inside translated code is almost
@@ -1951,6 +2192,7 @@ static int exc_c_body(dbt_gctx *ctx)
     }
 
 deliver:
+    if (ctx->vec_off == 0x600 && ctx->intevt == 0x400) sample_tick(guest_pc, where);
 #ifdef DBT_IRQ_ENTRY_CACHE
     if (ctx->vec_off == 0x600) remember_irq_entry(b, guest_pc);
 #endif
@@ -2006,6 +2248,7 @@ deliver:
 
 sf_u32 dbt_rte_c(sf_u32 guest_spc, sf_u32 *ssr)
 {
+    PROFILE_BEGIN;
     dbt_stat.rte_calls++;
 #ifdef DBT_PROFILE
     if ((dbt_stat.rte_calls & 4095u) == 0) print_stats();
@@ -2038,12 +2281,14 @@ sf_u32 dbt_rte_c(sf_u32 guest_spc, sf_u32 *ssr)
     }
     dbt_shadow_md = *ssr & SR_MD;
     *ssr = (*ssr | SR_MD | SR_DSP);
+    PROFILE_END(PROF_RTE);
     return host;
 }
 
 int dbt_ldc_sr_c(dbt_gctx *ctx, sf_u32 newsr)
 {
     dbt_stat.ldc_sr_calls++;
+    g_tail_from = 2;
     /* ctx->sr is the SR at the helper's entry (SAVE_CTX_RT): compare banks.
      * When RB changes the stub returns through rte, since after the switch
      * no register of either bank may be touched (the old bank keeps the
@@ -2066,6 +2311,7 @@ void dbt_fpu_c(dbt_gctx *ctx, sf_u32 arg)
 {
     fpu_mem mem;
     int r;
+    g_tail_from = 3;
     sf_u32 opcode = arg & 0xFFFFu;
     g_helper_ret = helper_return_address();
     if (ctx->sr & SR_FD) {
@@ -2125,6 +2371,7 @@ static void dev_mem(dbt_gctx *ctx, const sh_insn *d)
 void dbt_fallback_c(dbt_gctx *ctx, sf_u32 opcode)
 {
     dbt_stat.fallback_calls++;
+    g_tail_from = 3;
     int n = (opcode >> 8) & 0xF, m = (opcode >> 4) & 0xF;
     sf_u64 acc;
     if (opcode == 0x0038) { tlb_hook(); return; }           /* ldtlb */

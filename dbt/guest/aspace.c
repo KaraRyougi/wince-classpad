@@ -100,7 +100,7 @@ void guest_main(void)
     tlb_map(V_CODE, P_A, 1, 0);
     r = call_counted((fn_t)V_CODE, &n);                   /* also translates call_counted itself */
     check("ASID 1: V_CODE -> page A", r == 1);
-    if (hc_getstat(23)) {
+    if (hc_getstat(30)) {
         unsigned before;
         put_ret(P_A + 0x20, 5);
         hc_flush(V_CODE + 0x20, 8);

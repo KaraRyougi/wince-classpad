@@ -19,3 +19,7 @@ notes/ce/*
 *.zip
 
 bsp/tests/test_touch_bus
+
+bsp/tests/test_timer
+
+/dbt/bench-integrated-normal/

@@ -165,7 +165,13 @@ should show the window at 320x528 and exercise touch with this recipe.
   `KernelStart`), `OEMNMI`.
 - `init.c`: `OEMInit` (runs with exceptions blocked and in register bank 1:
   no hypercalls allowed here).
-- `timer.c`: TMU0 fixed 1 ms tick, `OEMIdle`, `OALStall`.
+- `timer.c`: TMU0 system tick with a variable period (the kernel's
+  `pfnUpdateReschedTime` hook: the timer fires at the next reschedule time,
+  at most `TICK_MAX_MSEC` = 1000 ms apart, `bsp_cfg.h`), `OEMIdle`,
+  `OALStall`. Every interrupt is an exception round trip through the
+  translator, so the fixed 1 ms tick cost about a third of the modelled boot
+  (docs/04, the 10 ms experiment). `TICK_MAX_MSEC 1` restores the fixed
+  tick for comparison runs.
 - `intr.c`: IRQ numbering (INTEVT - 0x200) / 0x20, IPR/IMR programming,
   hooks `OALTimerIntrHandler` on IRQ 16, the KEYSC ISR on vector 95
   (logical IRQ 48 for the SYSINTR map, which has 64 entries) and the touch
@@ -184,6 +190,41 @@ should show the window at 320x528 and exercise touch with this recipe.
   the KEYSC and touch sensor register maps.
 - `FILES\config.bib`: NK at 0x8C101000 (autosized), RAM up to 0x8CC7F000, the
   last page of the window reserved for the debug ring.
+
+## Measuring on the device: `classpad_dbtstat.exe`
+
+`SRC\APPS\DBTSTAT` is the profiler for the real machine, where nothing
+else gets out. It reads the translator's counters through the `HC_GETSTAT`
+hypercall every 2 s (`SRC\INC\classpad_hc.h` lists the indices; a `trapa`
+works from user mode, the translator takes it before the kernel) and shows,
+in a topmost strip at the top of the screen:
+
+- page 0: translations, flushes, invalidations, ASID switches, inline-cache
+  misses, lookups, exceptions by vector and INTEVT code, all per second;
+  the tick samples' split between translated code, exit stubs, stub
+  windows, translations, helpers, idle (`sleep`) and user-mode code; with
+  a `PROFILE=1` translator the real-time share of each C bucket
+  (translate, asid, tlb, invalidate, lcd, flush, exception delivery, rte,
+  lookup: they overlap, never sum them); CCR/MMUCR/FRQCR; and the TMU0
+  tick measured against the RTC (`tick/rtc` 1.000 = the clock constant in
+  `bsp_cfg.h` is right for this machine);
+- page 1: the twelve hottest 16 KiB buckets of guest code since the window
+  started, as P1 addresses and offsets into the ROM image;
+- page 2: the same for the last interval.
+
+A tap turns the page, a tap on the `x` in the top-right corner closes it.
+Start it from the shell (`\Windows\classpad_dbtstat.exe`), or for a boot
+profile add `"Launch70"="classpad_dbtstat.exe"` with `"Depend70"=hex:1e,00`
+to `HKLM\init` in platform.reg. Resolve the hot buckets on the Mac with
+`tools/cesym.py NK.bin RELDIR <address>`. The translator for such a run is
+`make -C dbt DEVICE=1 PROFILE=1 BUILD=build-dev-prof hhk`; a non-profiling
+translator still gives everything but the C-time line.
+
+What to read first: `irq/s` far above the tick rate or an INTEVT code the
+OAL does not use means a storming source; `tlb/s` in the thousands means
+the UTLB working set; a block share near 100 % with a flat histogram means
+the translated code itself; `xlat/s` in the hundreds with `flush/s` > 0
+means the code cache recycling.
 
 ## Rules for code in this BSP
 

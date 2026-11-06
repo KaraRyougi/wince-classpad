@@ -5,7 +5,11 @@
  * PROFILE=1 reserves TMU1; do not use with guests that reprogram that timer. */
 #ifndef DBT_PROFILE_H
 #define DBT_PROFILE_H
-enum { PROF_TRANSLATE, PROF_ASID, PROF_TLB, PROF_INVALIDATE, PROF_LCD, PROF_FLUSH, PROF_COUNT };
+/* EXC: the whole C side of an exception/interrupt delivery (includes the
+ * translation of a cold handler: subtract TRANSLATE). RTE: the C side of a
+ * guest rte (ASID check, lookup of the return pc). LOOKUP: dbt_resolve, the
+ * lookup stubs' C entry (includes TRANSLATE and full flushes). */
+enum { PROF_TRANSLATE, PROF_ASID, PROF_TLB, PROF_INVALIDATE, PROF_LCD, PROF_FLUSH, PROF_EXC, PROF_RTE, PROF_LOOKUP, PROF_COUNT };
 #ifdef DBT_PROFILE
 static struct { sf_u32 calls, ticks, max; } g_profile[PROF_COUNT];
 #define PROFILE_CLOCK (*(volatile sf_u32 *)0xA4490018u)
@@ -36,7 +40,7 @@ static sf_u32 profile_stat(sf_u32 index)
 }
 static void profile_print(void)
 {
-    static const char *names[] = { "translate", "asid", "tlb", "invalidate", "lcd", "flush" };
+    static const char *names[] = { "translate", "asid", "tlb", "invalidate", "lcd", "flush", "exc", "rte", "lookup" };
     unsigned i;
     dbt_puts("[profile] elapsed_ticks="); dbt_puthex(profile_stat(12)); dbt_puts("\n");
     for (i = 0; i < PROF_COUNT; ++i) {

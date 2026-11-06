@@ -1,0 +1,16 @@
+!INCLUDE $(_TARGETPLATROOT)\sources.cmn
+!if 0
+classpad_dbtstat.exe - the translator's counters on the screen (HC_GETSTAT):
+the profiler for runs on the real machine. Started from the shell or as a
+Launch entry in platform.reg.
+!endif
+TARGETNAME=classpad_dbtstat
+TARGETTYPE=PROGRAM
+RELEASETYPE=PLATFORM
+WINCEOEM=1
+EXEENTRY=WinMainCRTStartup
+INCLUDES=$(INCLUDES);$(_TARGETPLATROOT)\src\inc;$(_WINCEROOT)\public\common\sdk\inc;$(_WINCEROOT)\public\common\oak\inc
+TARGETLIBS= \
+    $(_PROJECTROOT)\cesysgen\sdk\lib\$(_CPUINDPATH)\coredll.lib
+SOURCES= \
+    dbtstat.c
