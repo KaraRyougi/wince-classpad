@@ -101,7 +101,8 @@ static UINT32 RStandbyOnce(UINT32 keySysIntr)
     MMIO_W16(KEYSC_KOUTPINSET, CP_CLEAR_ROW);
     MMIO_W16(KEYSC_KINPINSET, CP_CLEAR_COL);
     MMIO_W16(KEYSC_KIUMODEREG, KEYSC_MODE_VALUE);
-    MMIO_W16(KEYSC_KIUINTREG, KEYSC_INT_ENABLE | KEYSC_INT_CLEAR);
+    MMIO_W16(KEYSC_KIUINTREG, KEYSC_INT_CLEAR);     // the OS's order: flags, then enables
+    MMIO_W16(KEYSC_KIUINTREG, KEYSC_INT_ENABLE);
     MMIO_W16(KEYSC_KIUCNTREG, KEYSC_CNT_SCAN_START);
 
     // The wake-up is a level: a Clear still held from before the suspend
@@ -109,7 +110,8 @@ static UINT32 RStandbyOnce(UINT32 keySysIntr)
     // the KEYSC event flags (the scan start above sets one) so that after
     // the wake-up they mean "a key event happened while the core was off".
     for (i = 0; i < 2000 && ClearDown(); i++) OALStall(1000);
-    MMIO_W16(KEYSC_KIUINTREG, KEYSC_INT_ENABLE | KEYSC_INT_CLEAR);
+    MMIO_W16(KEYSC_KIUINTREG, KEYSC_INT_CLEAR);     // two writes: the flag byte must read 0 afterwards
+    MMIO_W16(KEYSC_KIUINTREG, KEYSC_INT_ENABLE);    // whether the flags are write-1-to-clear or plain bits (casio-emu)
 
     if (!ClasspadHcStandby(0)) return STANDBY_NOT_ENTERED;
 
