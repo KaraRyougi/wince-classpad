@@ -46,7 +46,9 @@ void guest_irq(unsigned intevt)
 {
     last_intevt = intevt;
     irqs++;
-    if (intevt == INTEVT_RTC_ALARM) mmio_w8(RCR1, mmio_r8(RCR1) & 0xFEu);    /* clear AF */
+    /* AF clear and AIE off: like the OAL's one-shot ISR. casio-emu re-raises
+     * AF while the second still matches, so clearing AF alone repeats it. */
+    if (intevt == INTEVT_RTC_ALARM) mmio_w8(RCR1, 0);
 }
 
 static unsigned get_sr(void) { unsigned v; __asm__ volatile ("stc sr, %0" : "=r"(v)); return v; }
@@ -94,6 +96,7 @@ void guest_main(void)
     __asm__ volatile ("nop; nop; nop; nop" ::: "memory");
     set_sr(sr);
     check("the alarm interrupt reached the guest after the wake-up", irqs == 1 && last_intevt == INTEVT_RTC_ALARM);
+    if (!(irqs == 1 && last_intevt == INTEVT_RTC_ALARM)) { hc_puts("  irqs="); hc_puthex(irqs); hc_puts(" last intevt="); hc_puthex(last_intevt); hc_puts(" rcr1="); hc_puthex(mmio_r8(RCR1)); hc_puts(" imr10="); hc_puthex(mmio_r8(IMR10)); hc_putc('\n'); }
     mmio_w8(RCR1, 0);
 
     hc_puts("standby: Clear key wake-up (KEYSC autonomous scan)\n");

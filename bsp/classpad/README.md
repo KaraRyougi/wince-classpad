@@ -310,6 +310,16 @@ returns 0, the CPU-sleep implementation below is used. The translator half
 passes its emulator test (`make -C dbt run GUEST=standby`); this OAL half has
 not been compiled yet (VM) and nothing has run on the board.
 
+The VM's `PLATFORM\CLASSPAD` is the Codex branch (atomic timer updates, TMU
+recovery scan in the CPU-sleep fallback, rotation, capture window), so the
+R-standby changes were merged onto that tree rather than copied over it:
+`C:\WINCE600\claude-standby\` holds the nine merged files (`files\`, already
+installed into `PLATFORM\CLASSPAD`), the versions they replaced (`orig\`),
+`build.bat` (OALLIB, OALEXE, DBTSTAT, makeimg -> `NK-standby.bin`), the
+matching `wince.hh3` and a README with the board test steps. The window's
+stats ABI check (HC_GETSTAT 60 = "DBTS", 61 = 1) is served by this
+translator too.
+
 ## Suspend/resume validation (the CPU-sleep fallback)
 
 The power update saves interrupt, timer and keypad state, suspends the touch

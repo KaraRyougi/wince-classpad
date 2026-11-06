@@ -1738,6 +1738,11 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
         case 27: v = dbt_stat.lookups_c; break;
         case 28: v = dbt_stat.tlb_hooks; break;
         case 29: v = g_bank_evictions; break;
+        /* statistics ABI marker: the DBTSTAT window of the Codex branch refuses
+         * to show numbers unless 60 reads "DBTS" and 61 reads version 1 */
+        case 60: v = 0x44425453u; break;
+        case 61: v = 1; break;
+        case 62: v = 1u | (profile_stat(11) ? 2u : 0u); break;  /* bit 0 tick sampling, bit 1 PROFILE build */
         default: v = ctx->r[4] >= 64 ? sample_stat(ctx->r[4]) : profile_stat(ctx->r[4]); break;
         }
         ctx->r[0] = v;

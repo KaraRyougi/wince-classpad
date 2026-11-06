@@ -57,6 +57,7 @@ static __inline DWORD ClasspadHcStandby(DWORD flags) { return __asm1("trapa #255
 //   32+3b, 33+3b, 34+3b: calls, TMU1 counts, max counts of PROFILE bucket b
 //   (0 translate, 1 asid, 2 tlb, 3 invalidate, 4 lcd, 5 flush, 6 exception
 //   delivery, 7 rte, 8 lookup); zero in non-profiling builds
+//   60 "DBTS" 0x44425453  61 stats ABI version (1)  62 features: bit 0 tick sampling, bit 1 PROFILE
 //   64 tick samples  65 in translated code  66 exit stub  67 stub window
 //   68 translating  69 helper  70 idle (sleep)  71 user-mode pcs  72 of those
 //   not in the ROM image  73 kernel pcs outside the histogram
