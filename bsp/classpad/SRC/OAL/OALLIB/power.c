@@ -105,14 +105,20 @@ static UINT32 RStandbyOnce(UINT32 keySysIntr)
     MMIO_W16(KEYSC_KIUCNTREG, KEYSC_CNT_SCAN_START);
 
     // The wake-up is a level: a Clear still held from before the suspend
-    // would end it at once, so wait (bounded) for its release.
+    // would end it at once, so wait (bounded) for its release. Then clear
+    // the KEYSC event flags (the scan start above sets one) so that after
+    // the wake-up they mean "a key event happened while the core was off".
     for (i = 0; i < 2000 && ClearDown(); i++) OALStall(1000);
+    MMIO_W16(KEYSC_KIUINTREG, KEYSC_INT_ENABLE | KEYSC_INT_CLEAR);
 
     if (!ClasspadHcStandby(0)) return STANDBY_NOT_ENTERED;
 
-    // Back with the core reset. Why?
-    if (ClearDown()) return keySysIntr;
+    // Back with the core reset. Why? The OS checks the Clear level right
+    // after its restart; here the translator re-translates the resumed
+    // code first, so a short press can be over by now: the KEYSC event
+    // flags (key down/up since the clear above) count as the press too.
     if (ClasspadRtcAlarmFired()) return SYSINTR_RTC_ALARM;
+    if (ClearDown() || (MMIO_R16(KEYSC_KIUINTREG) & 0x00FF) != 0) return keySysIntr;
     return 0;
 }
 
