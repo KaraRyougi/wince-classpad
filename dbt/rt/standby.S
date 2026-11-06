@@ -62,6 +62,8 @@
 #define B_PLLCR     0x20
 #define B_PULCR     0x24                /* PULCRBSC, a byte */
 #define B_PHCR      0x28                /* PHCR, a word */
+#define B_SPC       0x2C                /* SPC and SSR: core registers, lost in R-standby */
+#define B_SSR       0x30
 #define B_SIZE      0x80
 
         .text
@@ -132,6 +134,12 @@ _dbt_standby_sleep:
         mov.w   @r1, r0
         extu.w  r0, r0
         mov.l   r0, @(B_PHCR, r5)
+        /* SPC and SSR: the caller (the exception path's RESUME exit in
+         * stubs.S) returns to the guest with rte on the live registers */
+        stc     spc, r0
+        mov.l   r0, @(B_SPC, r5)
+        stc     ssr, r0
+        mov.l   r0, @(B_SSR, r5)
         mov.l   .Lmagic, r0
         mov.l   r0, @(B_MAGIC, r4)
         mov     r4, r8                  /* the block, in a register that survives the bank switch */
@@ -549,6 +557,17 @@ _dbt_standby_resume_entry:
         add     #B_HI, r5
         mov     #1, r0
         mov.l   r0, @(B_STATUS, r5)
+        /* SPC and SSR back (SH7724 18.4.6: "save SPC and SSR before
+         * executing the SLEEP instruction"). The exception path that issued
+         * HC_STANDBY ends with rte on them; after the core reset they are
+         * garbage, the rte went nowhere and the next exception, with SR.BL
+         * set, reset the chip into the Casio OS (board test, 2026-11-06:
+         * every stage up to the translator's C code passed). casio-emu keeps
+         * the core registers across its R-standby. */
+        mov.l   @(B_SPC, r5), r0
+        ldc     r0, spc
+        mov.l   @(B_SSR, r5), r0
+        ldc     r0, ssr
         mov.l   @(B_R15, r4), r15
         mov.l   @(B_PR, r4), r0
         lds     r0, pr
