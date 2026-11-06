@@ -236,8 +236,16 @@ copies the used entries), the 64 KiB hash and ~60 KiB of code: 1.3 MiB in
 all, so the translator needs about 3.5 MiB with the cache. Guest RAM is told
 to end below it (`MainMemoryEndAddress`). On 16 MiB units (fx-CP400,
 fx-CG100) that leaves about 12 MiB for CE; 8 MiB units run headless only.
-The emulator layout (docs/05, defined in `dbt/Makefile`) gives the
-translator 2.5 MiB plus the 1 MiB cache and the guest 11.5 MiB (2026-11-03: the cache was 2 MiB and never filled past 0.6 MiB before the 2048-block cap; the room went to 4096 blocks).
+The layout (docs/05, defined in `dbt/Makefile`: `GUEST_RAM_HI`,
+`IMAGE_BASE`, `CACHE_*`, `BLOCKS`, `ARENA_KB`) gives the translator 5 MiB
+(8192 block headers, a 2.5 MiB arena) plus a 2 MiB cache and the guest
+8 MiB since 2026-11-05: the Standard Shell boot hit the 4096-block cap 28
+times before POSTINIT (115k translations) with the cache only 0.9 MiB
+full, so the block cap, not the cache bytes, was the limit. Until then the
+translator had 2.5 MiB plus a 1 MiB cache and the guest 11.5 MiB
+(2026-11-03: the cache was 2 MiB and never filled past 0.6 MiB before the
+2048-block cap; the room went to 4096 blocks). A layout change rebuilds
+guests and image (a stamp file) and needs config.bib's RAM line to follow.
 
 ## Test plan
 
@@ -376,7 +384,9 @@ via hypercall 0xF1):
   switched to an ASID (`hc_asid`), FB read a statistic (0 translations,
   1 blocks, 2 invalidations, 3 ASID switches, 4 inline-cache misses,
   5 debug-ring bytes, 6 device accesses), FC translate a range device-aware
-  from now on (tests).
+  from now on (tests), FD push pixels to the LCD data port natively
+  (`hc_lcd_blit`: r4 = pixels as the guest stores them at a P1/P2 address,
+  r5 = count, r6 = port; the display driver's row push, 2026-11-05).
 - Address spaces: blocks are keyed by virtual pc. A block of TLB-mapped
   code (pc < 0x80000000) also records the ASID it was translated under and
   the physical address of its first instruction, found by scanning the UTLB

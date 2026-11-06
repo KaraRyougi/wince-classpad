@@ -60,11 +60,11 @@ bytes before handing it to `HLE_OSROM`.
 
 | range | use | size |
 |---|---|---|
-| 0x8C000000-0x8C0FFFFF | left to the launcher / Casio OS workspace in the emulator | 1 MiB |
+| 0x8C000000-0x8C0FFFFF | left to the launcher / Casio OS workspace in the emulator (Casio's VRAM on the device) | 1 MiB |
 | 0x81000000-0x813DFFFF | NOR: the CE image, executed in place (XIP); on the device this is the erased hole inside Casio's OS image (docs/03), `ROMSIZE` in config.bib | 3.875 MiB |
-| 0x8C100000-0x8CC7FFFF | guest: CE RAM (the whole window; a RAMIMAGE build puts its image here too) | 11.5 MiB |
-| 0x8CC80000-0x8CEFFFFF | translator text/data/bss (~2.3 MiB: 4096 block headers, 1.25 MiB metadata arena, hash 64 KiB) + C stack | 2.5 MiB |
-| 0x8CF00000-0x8CFFFFFF | code cache | 1 MiB |
+| 0x8C100000-0x8C8FFFFF | guest: CE RAM (the whole window; a RAMIMAGE build puts its image here too); 11.5 MiB to 0x8CC7FFFF until 2026-11-05 | 8 MiB |
+| 0x8C900000-0x8CDFFFFF | translator text/data/bss (~4.4 MiB: 8192 block headers, 2.5 MiB metadata arena, hash 64 KiB) + C stack | 5 MiB |
+| 0x8CE00000-0x8CFFFFFF | code cache | 2 MiB |
 
 The layout is defined once in `dbt/Makefile` (`GUEST_RAM_*`, `IMAGE_BASE`,
 `CACHE_*`) and reaches the C code, the launcher and the linker script from

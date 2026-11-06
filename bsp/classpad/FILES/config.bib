@@ -5,8 +5,9 @@
 ; emulator, dbt/hhk nkflash.hhk on the device). On the fx-CP400 the window is
 ; the erased hole inside Casio's 21 MiB OS image, offsets 0x1000000-0x13E0000
 ; (docs/03), so ROMSIZE is 3.875 MiB (was 8 MiB until 2026-11-05), and the
-; whole guest RAM window 0x8C100000-0x8CC7FFFF is RAM (dbt/Makefile owns these
-; numbers). The last 4 KiB page (0x8CC7F000) is the debug ring shared with the
+; whole guest RAM window 0x8C100000-0x8C8FFFFF is RAM (dbt/Makefile owns these
+; numbers; 11.5 MiB to 0x8CC7FFFF until 2026-11-05, when the translator's tables
+; doubled for the Standard Shell). The last 4 KiB page (0x8C8FF000) is the debug ring shared with the
 ; translator, kept out of RAM. Before 2026-11-03 NK was a RAMIMAGE inside the
 ; window and the loader copied it there, costing 2.5 MiB of RAM.
 ;-------------------------------------------------------------------------------
@@ -16,8 +17,8 @@ MEMORY
     BOOTARGS    8C100000  00001000  RESERVED    ; OAL argument page (unused for now)
     NK          81000000  003E0000  RAMIMAGE    ; 3.875 MiB of NOR, run in place (RAMIMAGE is the only image type; XIP follows from the address)
 ;   NK          83860000  007A0000  RAMIMAGE    ; alternative: the eActivity area (make NK_WINDOW=eact; docs/03: needs an OS patch first)
-    RAM         8C101000  00B7E000  RAM         ; up to 0x8CC7F000
-    DBGRING     8CC7F000  00001000  RESERVED    ; translator debug ring (image_cfg.h CLASSPAD_DBG_RING_PA)
+    RAM         8C101000  007FE000  RAM         ; up to 0x8C8FF000 (dbt/Makefile GUEST_RAM_HI - 4 KiB)
+    DBGRING     8C8FF000  00001000  RESERVED    ; translator debug ring (image_cfg.h CLASSPAD_DBG_RING_PA)
 
 CONFIG
     KERNELFIXUPS=ON
@@ -29,7 +30,7 @@ CONFIG
     PROFILE=OFF
 ; No compression: the writable sections are stored as is, so the kernel
 ; does not run its decompressor at boot (slow under the translator) and
-; the image is a few hundred KB larger (the window has 11.5 MiB).
+; the image is a few hundred KB larger (the window has 8 MiB).
     COMPRESSION=OFF
     ROMFLAGS=00
 ; RAM file system (object store) share of RAM: 32 of 256 (12.5%) in every

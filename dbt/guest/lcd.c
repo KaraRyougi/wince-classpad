@@ -34,9 +34,12 @@ static void lcd_push(void)
     lcd_set(0x200, 0);                         /* HADDR */
     lcd_set(0x201, 0);                         /* VADDR */
     lcd_select(0x202);                         /* data */
-    for (y = 0; y < LCD_H; y++)
+    for (y = 0; y < LCD_H / 2; y++)
         for (x = 0; x < LCD_W; x++)
             mmio_w16(DISPLAY, vram[y][x]);
+    /* the lower half the way the display driver pushes: one hypercall, the
+     * translator writes the pixels natively (same picture, docs/04 FD) */
+    hc_lcd_blit(&vram[LCD_H / 2][0], (LCD_H - LCD_H / 2) * LCD_W, DISPLAY);
 }
 
 /* 5x7 glyphs for the banner, one byte per row, MSB = left */

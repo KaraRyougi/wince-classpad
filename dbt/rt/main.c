@@ -88,7 +88,7 @@ void dbt_main(void)
         nkbin_print(&info);
         if (info.cpu_type != 0x01A6) dbt_puts("[nk] WARNING: ROMHDR CPU type is not SH4 (0x01A6)\n");
         if (info.ram_end > GUEST_RAM_HI || info.ram_start < GUEST_LOAD)
-            dbt_puts("[nk] WARNING: ROMHDR RAM range leaves the guest window; the kernel would overwrite the translator\n");
+            dbt_halt("ROMHDR RAM range leaves the guest window: the kernel would overwrite the translator (rebuild with the current config.bib)");
         if (info.physlast > NK_FLASH + NK_FLASH_MAX)
             dbt_puts("[nk] WARNING: the ROM image runs past the readable flash span\n");
         entry = info.entry;

@@ -19,6 +19,7 @@
 #define HC_TLB_INVAL    0xF9        // r4 = address, r5 = length: user mappings changed (len 0 = all)
 #define HC_ASID         0xFA        // r4 = new ASID (the translator also notices PTEH itself)
 #define HC_GETSTAT      0xFB        // r4 = index -> r0
+#define HC_LCD_BLIT     0xFD        // r4 = pixels (P1/P2 address, as the guest stores them), r5 = count, r6 = LCD data port: pushed natively
 
 // shcl: __asm(string, args...) places the arguments in r4, r5, ...; __asm1 returns r0
 extern DWORD __asm1(const char *, ...);
@@ -34,5 +35,6 @@ static __inline void ClasspadHcPutc(BYTE ch)      { __asm("trapa #243", (DWORD)c
 static __inline void ClasspadHcExit(DWORD code)   { __asm("trapa #240", code); }
 static __inline void ClasspadHcFlush(DWORD addr, DWORD len)     { __asm("trapa #242", addr, len); }
 static __inline void ClasspadHcTlbInval(DWORD addr, DWORD len)  { __asm("trapa #249", addr, len); }
+static __inline void ClasspadHcLcdBlit(DWORD src, DWORD pixels, DWORD port) { __asm("trapa #253", src, pixels, port); }
 
 #endif

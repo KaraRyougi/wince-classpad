@@ -1,5 +1,5 @@
 /* flush.c - code-cache pressure: more blocks than the translator keeps
- * (MAX_BLOCKS 2048, 2 MiB), so full flushes happen in the middle of
+ * (MAX_BLOCKS, dbt/Makefile BLOCKS), so full flushes happen in the middle of
  * resolving direct links and inline caches. The result of every pass must
  * be the same: a link literal or an IC refill written after the flush
  * would land in the freshly reused cache. */
@@ -18,8 +18,13 @@ static void tmu1_start(void)
     mmio_w32(TCNT1, 0xFFFFFFFFu);
     mmio_w8(TSTR, mmio_r8(TSTR) | 2u);
 }
-#define NFN   3000                 /* rts; nop each */
-#define NCHAIN 3000                /* bra +4; nop each, then rts */
+/* a pass makes NFN + NCHAIN blocks, 1.5x the translator's block cap
+ * (MAX_BLOCKS from dbt/Makefile BLOCKS), so every pass flushes */
+#ifndef MAX_BLOCKS
+#define MAX_BLOCKS 4096
+#endif
+#define NFN   (MAX_BLOCKS * 3 / 4)   /* rts; nop each */
+#define NCHAIN (MAX_BLOCKS * 3 / 4)  /* bra +4; nop each, then rts */
 
 static unsigned short fns[NFN * 3];          /* mov r4,r0 ; rts ; add #1,r0 */
 static unsigned short chain[NCHAIN * 2 + 3];  /* mov r4,r0 ; (bra +4 ; add #1,r0)* ; rts ; nop */
@@ -53,7 +58,7 @@ void guest_main(void)
         t1 = mmio_r32(TCNT1);
         if (pass == 0) want = sum;
         fl = hc_getstat(7) - f0;
-        /* 6000 translations per pass: the ticks are mostly translation time */
+        /* NFN + NCHAIN translations per pass: the ticks are mostly translation time */
         hc_puts("pass "); hc_puthex(pass); hc_puts(" sum "); hc_puthex(sum); hc_puts(" flushes "); hc_puthex(fl);
         hc_puts(" ticks "); hc_puthex(t0 - t1); hc_putc('\n');
         check("pass result", sum == want && sum == NFN + NCHAIN);

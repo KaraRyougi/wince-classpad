@@ -21,6 +21,7 @@
 #include <winddi.h>
 #include <gpe.h>
 #include "classpad_lcd.h"
+#include "classpad_hc.h"
 
 #define DISP_PUSH_MS        50
 #define DISP_REG_KEY        TEXT("Drivers\\Display\\ClassPad")
@@ -63,6 +64,9 @@ class ClasspadGPE : public GPE
     DWORD               m_pushes;
     int                 m_panel;            // LCD_PANEL_DCS / LCD_PANEL_R61524
     volatile BOOL       m_displayOn;        // DCS: DISPON sent (after the first push)
+    BYTE               *m_pFrame;           // the primary surface, physically contiguous (AllocPhysMem)
+    ULONG               m_framePa;          // its physical address
+    BOOL                m_blit;             // push rows through the translator (HC_LCD_BLIT), registry "Blit"
 
 public:
     ClasspadGPE();
@@ -130,7 +134,14 @@ ClasspadGPE::ClasspadGPE()
     m_nScreenWidthSave  = width;
     m_nScreenHeightSave = height;
 
-    m_pPrimarySurface = new GPESurf(width, height, gpe16Bpp);
+    // The frame lives in physically contiguous memory so the push can hand
+    // its rows to the translator by physical address (PushRows). "Blit"=0
+    // in the registry keeps the translated store loop instead.
+    m_blit    = RegDword(TEXT("Blit"), 1) != 0;
+    m_framePa = 0;
+    m_pFrame  = (BYTE *)AllocPhysMem(width * 2 * height, PAGE_READWRITE, 0, 0, &m_framePa);
+    if (m_pFrame) m_pPrimarySurface = new GPESurf(width, height, m_pFrame, width * 2, gpe16Bpp);
+    else          m_pPrimarySurface = new GPESurf(width, height, gpe16Bpp);
     if (m_pPrimarySurface && m_pPrimarySurface->Buffer())
         memset(m_pPrimarySurface->Buffer(), 0, m_pPrimarySurface->Stride() * height);
 
@@ -144,10 +155,11 @@ ClasspadGPE::ClasspadGPE()
     m_hThread = CreateThread(NULL, 0, PushThread, this, 0, NULL);
     if (m_hThread) CeSetThreadPriority(m_hThread, 250);  // below normal application threads
 
-    RETAILMSG(1, (TEXT("CLASSPAD DDI: %dx%d 16bpp, %s panel, frame buffer %08x, stride %d\r\n"),
+    RETAILMSG(1, (TEXT("CLASSPAD DDI: %dx%d 16bpp, %s panel, frame buffer %08x (phys %08x), stride %d, push %s\r\n"),
                   width, height, m_panel == LCD_PANEL_DCS ? TEXT("DCS fx-CP400") : TEXT("R61524 fx-CG100"),
-                  m_pPrimarySurface ? m_pPrimarySurface->Buffer() : NULL,
-                  m_pPrimarySurface ? m_pPrimarySurface->Stride() : 0));
+                  m_pPrimarySurface ? m_pPrimarySurface->Buffer() : NULL, m_framePa,
+                  m_pPrimarySurface ? m_pPrimarySurface->Stride() : 0,
+                  (m_pFrame && m_blit) ? TEXT("by hypercall") : TEXT("by translated stores")));
 }
 
 ClasspadGPE::~ClasspadGPE()
@@ -158,6 +170,7 @@ ClasspadGPE::~ClasspadGPE()
     if (m_hEvent) CloseHandle(m_hEvent);
     DeleteCriticalSection(&m_cs);
     delete m_pPrimarySurface;
+    if (m_pFrame) FreePhysMem(m_pFrame);
 }
 
 SCODE ClasspadGPE::GetModeInfo(GPEMode *pMode, int modeNo)
@@ -281,9 +294,20 @@ void ClasspadGPE::PushRows(int top)
         LcdWriteReg(LCD_REG_VADDR,  0);
         LcdSelect(LCD_REG_DATA);
     }
-    for (y = top; y < height; y++) {
-        const USHORT *row = (const USHORT *)(fb + y * stride);
-        for (x = 0; x < width; x++) LcdWriteData(row[x]);
+    if (m_pFrame && m_blit && ClasspadCanTrap()) {
+        // Native push by the translator (HC_LCD_BLIT, docs/04): write the
+        // rows back from the cache, then hand it the P2 alias of their
+        // physical address. One hypercall replaces width*rows translated
+        // stores, each of which cost a swap sequence.
+        const BYTE *src = fb + top * stride;
+        DWORD len = (DWORD)(height - top) * stride;
+        CacheRangeFlush((LPVOID)src, len, CACHE_SYNC_WRITEBACK);
+        ClasspadHcLcdBlit(0xA0000000 | ((m_framePa + top * stride) & 0x1FFFFFFF), (DWORD)(height - top) * width, LCD_DATA_PORT);
+    } else {
+        for (y = top; y < height; y++) {
+            const USHORT *row = (const USHORT *)(fb + y * stride);
+            for (x = 0; x < width; x++) LcdWriteData(row[x]);
+        }
     }
     if (m_panel == LCD_PANEL_DCS && !m_displayOn) {
         LcdCommand(LCD_DCS_DISPON);

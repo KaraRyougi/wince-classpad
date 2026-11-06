@@ -12,24 +12,34 @@ BUILD    ?= build
 
 # RAM layout (16 MiB at 0x8C000000), the single place these addresses live:
 #   0x8C000000-0x8C0FFFFF  launcher workspace (casio-emu starts us with sp=0x8C080000)
-#   0x8C100000-0x8CC7FFFF  guest window: 11.5 MiB (test guests linked at 0x8C100000)
-#   0x8CC80000-0x8CEFFFFF  translator image (text+data ~60 KiB, bss ~2.2 MiB: 4096 block headers,
-#                          1.25 MiB metadata arena) and its C stack below the top
-#   0x8CF00000-0x8CFFFFFF  code cache, 1 MiB (4096 blocks of ~140 bytes fill 0.6 MiB)
+#   0x8C100000-0x8C8FFFFF  guest window: 8 MiB (test guests linked at 0x8C100000; config.bib RAM)
+#   0x8C900000-0x8CDFFFFF  translator image (text ~64 KiB, bss ~4.4 MiB: 8192 block headers,
+#                          2.5 MiB metadata arena) and its C stack below the top
+#   0x8CE00000-0x8CFFFFFF  code cache, 2 MiB
+# Until 2026-11-05 the window was 11.5 MiB with 4096 blocks and a 1 MiB cache;
+# the Standard Shell boot hit the 4096-block cap 28 times before POSTINIT
+# (115k translations), so the tables doubled at the expense of 3.5 MiB of CE RAM.
+# The translator's tables scale with BLOCKS (block headers, ~180 B each) and
+# ARENA_KB (per-block metadata, ~320 B per block); the image region must hold
+# text + bss + a 128 KiB stack (rt/image.ld asserts it). Override on the
+# command line to try other sizes; config.bib's RAM line must agree with
+# GUEST_RAM_HI (the window ends 4 KiB earlier at the debug ring).
 GUEST_RAM_LO := 0x8C100000
-GUEST_RAM_HI := 0x8CC80000
-IMAGE_BASE   := 0x8CC80000
-IMAGE_STACK  := 0x8CF00000
-CACHE_BASE   := 0x8CF00000
-CACHE_SIZE   := 0x00100000
+GUEST_RAM_HI ?= 0x8C900000
+IMAGE_BASE   ?= 0x8C900000
+IMAGE_STACK  ?= 0x8CE00000
+CACHE_BASE   ?= 0x8CE00000
+CACHE_SIZE   ?= 0x00200000
+BLOCKS       ?= 8192
+ARENA_KB     ?= 2560
 LAYOUT_DEFS  := -DGUEST_RAM_LO=$(GUEST_RAM_LO)u -DGUEST_RAM_HI=$(GUEST_RAM_HI)u -DIMAGE_BASE=$(IMAGE_BASE) \
-                -DCACHE_BASE=$(CACHE_BASE)u -DCACHE_SIZE=$(CACHE_SIZE)u
+                -DCACHE_BASE=$(CACHE_BASE)u -DCACHE_SIZE=$(CACHE_SIZE)u -DMAX_BLOCKS=$(BLOCKS) -DMETA_ARENA_BYTES=$(ARENA_KB)*1024u
 LAYOUT_LD    := -Wl,--defsym,IMAGE_BASE=$(IMAGE_BASE) -Wl,--defsym,_image_stack_top=$(IMAGE_STACK)
 
 HOST_CFLAGS  := -mb -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables \
                 -Wall -Wextra -Wno-unused-parameter -I rt -I src -I ../fpuemu/src $(LAYOUT_DEFS) $(EXTRA_CFLAGS)
 GUEST_CFLAGS := -ml -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables -Wall \
-                -DGUEST_RAM_LO=$(GUEST_RAM_LO)u -DGUEST_RAM_HI=$(GUEST_RAM_HI)u
+                -DGUEST_RAM_LO=$(GUEST_RAM_LO)u -DGUEST_RAM_HI=$(GUEST_RAM_HI)u -DMAX_BLOCKS=$(BLOCKS)
 
 RT_SRC := rt/crt0.S rt/stubs.S rt/main.c rt/rt.c rt/nkbin.c rt/bench.c bench/loops.S src/sh4dec.c src/sh4emit.c src/translate.c \
           ../fpuemu/src/fpuemu.c ../fpuemu/src/softfloat.c
@@ -111,13 +121,18 @@ GUEST_START     := $(or $(GUEST_START_$(GUEST)),guest/start.S)
 GUEST_LD_nkxip  := $(BUILD)/guest_xip.ld
 GUEST_LD        := $(or $(GUEST_LD_$(GUEST)),guest/guest.ld)
 
-# guests are rebuilt when DEVALL changes (the flag lives in a stamp file name)
+# guests are rebuilt when DEVALL changes (the flag lives in a stamp file name);
+# guests and the image when the RAM layout or the table sizes change
 DEVALL_STAMP := $(BUILD)/.devall-$(if $(filter 1,$(DEVALL)),1,0)
 $(DEVALL_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.devall-*
 	touch $@
+LAYOUT_STAMP := $(BUILD)/.layout-$(GUEST_RAM_HI)-$(IMAGE_BASE)-$(CACHE_BASE)-$(CACHE_SIZE)-$(BLOCKS)-$(ARENA_KB)-$(NK_FLASH)-$(NK_FLASH_MAX)
+$(LAYOUT_STAMP): | $(BUILD)
+	rm -f $(BUILD)/.layout-*
+	touch $@
 
-$(BUILD)/$(GUEST).elf: $(GUEST_START) guest/$(GUEST).c $(GUEST_EXTRA) guest/hyper.h guest/mmio.h $(GUEST_LD) $(DEVALL_STAMP) | $(BUILD)
+$(BUILD)/$(GUEST).elf: $(GUEST_START) guest/$(GUEST).c $(GUEST_EXTRA) guest/hyper.h guest/mmio.h $(GUEST_LD) $(DEVALL_STAMP) $(LAYOUT_STAMP) | $(BUILD)
 	$(CC) $(GUEST_CFLAGS) -T $(GUEST_LD) -o $@ $(GUEST_START) guest/$(GUEST).c $(GUEST_EXTRA)
 
 # the guest wrapped as a CE .bin (records + ROMHDR pointer) for the loader test;
@@ -135,7 +150,7 @@ $(BUILD)/$(GUEST).bin: $(BUILD)/$(GUEST).elf
 
 # --- translator image (big-endian) ---
 # image files are named after the guest so that switching GUEST= relinks
-$(IMG).elf: $(RT_SRC) rt/guest_blob.S rt/image.ld rt/rt.h rt/nkbin.h rt/ctx_offsets.h $(BUILD)/$(GUEST).bin
+$(IMG).elf: $(RT_SRC) rt/guest_blob.S rt/image.ld rt/rt.h rt/nkbin.h rt/ctx_offsets.h $(BUILD)/$(GUEST).bin $(LAYOUT_STAMP)
 	$(CC) $(HOST_CFLAGS) $(LAYOUT_LD) -DGUEST='"$(BUILD)/$(GUEST).bin"' -T rt/image.ld -o $@ $(RT_SRC) rt/guest_blob.S -lgcc
 
 $(IMG).bin: $(IMG).elf

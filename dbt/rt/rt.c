@@ -667,6 +667,7 @@ static void invalidate_all_but_rom(void)
 #define HC_ASID   0xFA                  /* kernel: address space switched to ASID r4 */
 #define HC_GETSTAT 0xFB                 /* r4 = index -> r0 (0 translations, 1 blocks, 2 invalidations, 3 asid switches, 4 ic misses, 5 debug-ring bytes, 6 device accesses, 7 full flushes, 8 FPU-disable exceptions, 9/10 device-aware range lo/hi) */
 #define HC_DEVRANGE 0xFC                /* tests: translate [r4, r5) device-aware from now on (drops all translations at the next lookup) */
+#define HC_LCD_BLIT 0xFD                /* r4 = pixels as the guest stores them (P1/P2 address), r5 = pixel count, r6 = 16-bit LCD data port: written natively */
 
 #define REG_EXPEVT (*(volatile sf_u32 *)0xFF000024u)
 #define REG_TEA    (*(volatile sf_u32 *)0xFF00000Cu)
@@ -718,6 +719,7 @@ static void print_stats(void)
     dbt_puts(" asid_switches="); dbt_puthex(dbt_stat.asid_switches);
     dbt_puts(" tlb_hooks="); dbt_puthex(dbt_stat.tlb_hooks);
     dbt_puts(" arena="); dbt_puthex(dbt_stat.arena_bytes);
+    dbt_puts(" lcd_pixels="); dbt_puthex(dbt_stat.lcd_pixels);
     dbt_puts(" resumes="); dbt_puthex(dbt_stat.resumes);
     dbt_puts("/"); dbt_puthex(dbt_stat.resumes_committed);
     dbt_puts("\n");
@@ -755,6 +757,29 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
     case HC_DEVRANGE:
         g_devrange_lo = ctx->r[4]; g_devrange_hi = ctx->r[5]; g_devrange_pending = 1;
         return RT_ACT_RESUME;
+    case HC_LCD_BLIT: {
+        /* The display driver's push: each pixel is a little-endian 16-bit
+         * value in guest memory, the panel wants it as one 16-bit bus write.
+         * Translated code pays a swap sequence per store (and the memory load
+         * before it); here it is a byte-pair per pixel. The source must be a
+         * P1/P2 address (the driver passes the P2 alias of its physical frame
+         * after writing the rows back), never a TLB-mapped one. */
+        const sf_u8 *s = (const sf_u8 *)ctx->r[4];
+        sf_u32 n = ctx->r[5];
+        volatile sf_u16 *port = (volatile sf_u16 *)ctx->r[6];
+        dbt_stat.lcd_pixels += n;
+        if (((sf_u32)s & 3) == 0) {
+            const sf_u32 *w = (const sf_u32 *)s;
+            for (; n >= 2; n -= 2) {
+                sf_u32 v = *w++;
+                *port = (sf_u16)((v >> 24) | ((v >> 8) & 0xFF00u));
+                *port = (sf_u16)(((v >> 8) & 0xFFu) | ((v & 0xFFu) << 8));
+            }
+            s = (const sf_u8 *)w;
+        }
+        for (; n; n--, s += 2) *port = (sf_u16)(s[0] | ((sf_u16)s[1] << 8));
+        return RT_ACT_RESUME;
+    }
     case HC_GETSTAT: {
         sf_u32 v = 0;
         switch (ctx->r[4]) {

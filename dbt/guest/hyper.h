@@ -49,3 +49,10 @@ static inline unsigned hc_bench(unsigned which, unsigned n)
     return r0;
 }
 #endif
+/* FD: the display push done natively by the translator: pixels as stored by
+ * the guest (little-endian 16-bit) from a P1/P2 address to the LCD data port */
+static inline void hc_lcd_blit(const void *src, unsigned pixels, unsigned port)
+{
+    register const void *r4 __asm__("r4") = src; register unsigned r5 __asm__("r5") = pixels; register unsigned r6 __asm__("r6") = port;
+    __asm__ volatile ("trapa #0xFD" :: "r"(r4), "r"(r5), "r"(r6) : "memory");
+}

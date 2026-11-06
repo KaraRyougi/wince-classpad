@@ -28,6 +28,25 @@ extern void hhk_takeover(const void *src, void *dst, unsigned len, unsigned entr
 #ifndef NK_FLASH
 #define NK_FLASH 0x81000000u
 #endif
+#ifndef NK_FLASH_MAX
+#define NK_FLASH_MAX 0x003E0000u
+#endif
+#ifndef GUEST_RAM_HI
+#error GUEST_RAM_HI must come from the Makefile
+#endif
+
+/* ROMHDR of an XIP image: pointer at image+0x44 (after "ECEC"), little-endian
+ * fields dllfirst, dlllast, physfirst, physlast, nummods, ulRAMStart,
+ * ulRAMFree, ulRAMEnd ... (tools/nkbin.py). 0 when there is no XIP image. */
+static u32 ce_ram_end(void)
+{
+    const u8 *p = (const u8 *)NK_FLASH;
+    u32 hdr;
+    if (memcmp(p + 0x40, "ECEC", 4)) return 0;
+    hdr = le32(p + 0x44);
+    if (hdr < NK_FLASH || hdr > NK_FLASH + NK_FLASH_MAX - 0x60) return 0;
+    return le32((const u8 *)hdr + 7 * 4);
+}
 
 static const char *ce_image_kind(void)
 {
@@ -80,6 +99,12 @@ int hhk_main(int argc, char **argv, char **envp)
             nk_say("no \\fls0\\NK.bin: booting what is there");
         }
         nk_say("CE image: %s", ce_image_kind());
+        if (ce_ram_end() > GUEST_RAM_HI) {
+            nk_say("its RAM ends at %08x, the translator", ce_ram_end());
+            nk_say("starts at %08x (config.bib RAM line)", (u32)GUEST_RAM_HI);
+            nkflash_close();
+            return stop("Rebuild the image with the current config.bib.");
+        }
         if (file == NKF_NOFILE && !memcmp((const char *)NK_FLASH, "\xff\xff\xff\xff", 4) && memcmp((const char *)NK_FLASH + 0x40, "ECEC", 4))
             nk_say("(the embedded test guest would run)");
         nk_say("EXE: %s and boot CE   Clear: cancel", (file == NKF_READY && !same) ? "flash NK.bin" : "go");
