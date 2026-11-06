@@ -3,6 +3,7 @@
  * addresses, no OS). Everything here runs with interrupts masked or BL=1.
  */
 #include "rt.h"
+#include "lcdcon.h"
 
 typedef __SIZE_TYPE__ dbt_size_t;
 void *memcpy(void *d, const void *s, dbt_size_t n);
@@ -119,6 +120,9 @@ void dbt_putc(int c)
 #else
     (void)c;
 #endif
+#ifdef DBT_LCD_CONSOLE
+    lcdcon_putc(c);                 /* the panel console of DEVICE=1 builds (rt/lcdcon.c) */
+#endif
 #ifdef DBT_TRACE_EXEC
     watch_char(c);
 #endif
@@ -132,8 +136,17 @@ void dbt_puthex(sf_u32 v)
 }
 void dbt_halt(const char *why)
 {
+    sf_u32 sr;
+#ifdef DBT_LCD_CONSOLE
+    lcdcon_halt(why);                    /* take the panel back, show the last lines and the exception context */
+#endif
     dbt_dbgring_drain();                 /* whatever the guest logged before dying */
     dbt_puts("\n[dbt] HALT: "); dbt_puts(why); dbt_puts("\n");
+    /* stay dead: with interrupts deliverable a timer tick would re-enter the
+     * exception path and run the (dead) kernel's handler as if nothing happened */
+    __asm__ volatile ("stc sr, %0" : "=r"(sr));
+    sr |= 0x100000F0u;                   /* BL=1, IMASK=15 */
+    __asm__ volatile ("ldc %0, sr" :: "r"(sr) : "memory");
     for (;;) __asm__ volatile ("sleep");
 }
 

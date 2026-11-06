@@ -85,7 +85,13 @@ it, so `NK_FLASH` stays 0x81000000 and the usable window ends at 0x13E0000:
     with the TLB flushed, syncs the caches over the image and jumps to it.
     From there the path is the emulator's: `crt0.S`, `dbt_main` finds the
     XIP image at `NK_FLASH`, the kernel starts. Without OS routines (below)
-    the stub boots at once, silently.
+    the stub boots at once, silently. A `DEVICE=1` translator also writes
+    its log on the panel (`rt/lcdcon.c`: the top 96 rows, 40 columns of a
+    4x8 font drawn 2x, scrolling; the DCS commands the display driver uses)
+    from the takeover until the driver's "CLASSPAD DDI:" sign-on, and
+    `dbt_halt` takes the panel back to show the last lines, the halt reason
+    and the last exception context, then masks interrupts (BL=1) before
+    sleeping so a dead kernel is not "rebooted" by the next tick.
   - `nkflash.hhk`: the same flasher as a tool of its own (flash without
     booting). It writes `\fls0\NK.bin` (Platform Builder's output, copied
     to the calculator's USB storage) into the window: an XIP build has each
