@@ -27,6 +27,18 @@
         .word   0x00AB
         .endm
 
+/* make STANDBY_DIAG=1: the resume path paints a stripe per stage on the
+ * panel (docs/06 section 8). STAGE n, colour-literal: rows 66*(n-1).. in
+ * that colour, then about 0.5 s. Keeps r1-r5; clobbers r0, r6-r15, macl. */
+        .macro STAGE n, col
+#ifdef DBT_STANDBY_DIAG
+        mov     #\n, r7
+        mov.l   \col, r6
+        bsr     .Ls_stripe
+        nop
+#endif
+        .endm
+
 #define BLK_MAGIC   0x52535442          /* "RSTB" */
 #define B_MAGIC     0x00
 #define B_R8        0x04                /* r8..r14 at 0x04..0x1C */
@@ -280,8 +292,9 @@ _dbt_standby_stub:
         mov.l   .Ls_reset, r0
         mov.l   r0, @r1
         mov.l   .Ls_rwtcsr, r1
-        mov.w   .Ls_a507, r0
+        mov.l   .Ls_a507, r0            /* a long: the pool is too far for mov.w */
         mov.w   r0, @r1
+        STAGE   1, .Ls_red              /* the core restarted at BAR */
         /* the save block (RS memory, no SDRAM needed): without it, cold restart */
         mov.l   .Ls_block, r4
         mov.l   @(B_MAGIC, r4), r0
@@ -291,7 +304,8 @@ _dbt_standby_stub:
         mov.l   .Ls_reset, r0
         jmp     @r0
         nop
-3:      mov     r4, r5
+3:      STAGE   2, .Ls_yellow           /* the save block is intact */
+        mov     r4, r5
         add     #B_HI, r5
         /* OS 0x800209c4: PLLCR bits 1-2 back (here: to their saved state),
          * SDCR = 0, the pins back, then the settling wait */
@@ -341,6 +355,7 @@ _dbt_standby_stub:
         mov.l   .Ls_rtcsr, r1
         mov.l   .Ls_a55a0088, r0
         mov.l   r0, @r1
+        STAGE   3, .Ls_green            /* SDRAM controller running again */
         /* caches: invalidate, then the guest's CCR */
         mov.l   .Ls_ccr, r1
         mov.l   .Ls_cc_invalidate, r0
@@ -366,9 +381,134 @@ _dbt_standby_stub:
         /* the translator's vectors, then its code in SDRAM */
         mov.l   @(B_VBR, r4), r0
         ldc     r0, vbr
+        STAGE   4, .Ls_cyan             /* about to jump into the translator in SDRAM */
         mov.l   @(B_RESUME, r5), r0
         jmp     @r0
         nop
+
+#ifdef DBT_STANDBY_DIAG
+/* r7 = stage, r6 = RGB565 colour. Stage 1 wakes the panel first (it is in
+ * SLPIN with the brightness at 0: SLPOUT, ~140 ms, DISPON, 0x51 = 0xFF).
+ * r8 PRDR, r9 LCD port, r10 PR, r11 colour, r12 stage then first row,
+ * r13-r15 scratch. Native writes: no byte swap (rt/lcd_io.h). */
+.Ls_stripe:
+        sts     pr, r10
+        mov     r7, r12
+        mov     r6, r11
+        mov.l   .Ls_prdr, r8
+        mov.l   .Ls_lcdport, r9
+        mov     #1, r0
+        cmp/eq  r0, r12
+        bf      4f
+        mov     #0x11, r0
+        bsr     .Ls_cmd
+        nop
+        mov     #9, r0
+        bsr     .Ls_wait
+        nop
+        mov     #0x29, r0
+        bsr     .Ls_cmd
+        nop
+        mov     #0x51, r0
+        bsr     .Ls_cmd
+        nop
+        mov     #-1, r0
+        extu.b  r0, r0
+        mov.w   r0, @r9
+        SYNCO
+4:      mov     r12, r0
+        add     #-1, r0
+        mov     #66, r13
+        mulu.w  r0, r13
+        sts     macl, r12               /* first row */
+        mov     #0x2A, r0               /* columns 0..319 */
+        bsr     .Ls_cmd
+        nop
+        mov     #0, r0
+        mov.w   r0, @r9
+        SYNCO
+        mov.w   r0, @r9
+        SYNCO
+        mov     #1, r0
+        mov.w   r0, @r9
+        SYNCO
+        mov     #0x3F, r0
+        mov.w   r0, @r9
+        SYNCO
+        mov     #0x2B, r0               /* rows first..first+65 */
+        bsr     .Ls_cmd
+        nop
+        mov     r12, r0
+        shlr8   r0
+        mov.w   r0, @r9
+        SYNCO
+        mov     r12, r0
+        extu.b  r0, r0
+        mov.w   r0, @r9
+        SYNCO
+        mov     r12, r0
+        add     #65, r0
+        mov     r0, r14
+        shlr8   r0
+        mov.w   r0, @r9
+        SYNCO
+        mov     r14, r0
+        extu.b  r0, r0
+        mov.w   r0, @r9
+        SYNCO
+        mov     #0x2C, r0
+        bsr     .Ls_cmd
+        nop
+        mov.l   .Ls_npix, r13
+5:      mov.w   r11, @r9
+        dt      r13
+        bf      5b
+        SYNCO
+        mov     #32, r0                 /* ~0.5 s */
+        bsr     .Ls_wait
+        nop
+        lds     r10, pr
+        rts
+        nop
+/* r0 = DCS command: RS low, the command, RS high. Clobbers r0, r13. */
+.Ls_cmd:
+        mov     r0, r13
+        SYNCO
+        mov.b   @r8, r0
+        and     #0xEF, r0
+        mov.b   r0, @r8
+        SYNCO
+        mov.w   r13, @r9
+        SYNCO
+        mov.b   @r8, r0
+        or      #0x10, r0
+        mov.b   r0, @r8
+        SYNCO
+        rts
+        nop
+/* r0 = ticks of the RTC's 64 Hz counter (< 64). Clobbers r0, r13-r15. */
+.Ls_wait:
+        mov     r0, r15
+        mov.l   .Ls_r64cnt, r13
+        mov.b   @r13, r14
+        extu.b  r14, r14
+1:      mov.b   @r13, r0
+        extu.b  r0, r0
+        sub     r14, r0
+        and     #63, r0
+        cmp/ge  r15, r0
+        bf      1b
+        rts
+        nop
+        .align  2
+.Ls_prdr:       .long 0xA405013C
+.Ls_lcdport:    .long 0xB4000000
+.Ls_npix:       .long 320 * 66
+.Ls_red:        .long 0xF800
+.Ls_yellow:     .long 0xFFE0
+.Ls_green:      .long 0x07E0
+.Ls_cyan:       .long 0x07FF
+#endif
         .align  2
 .Ls_sr:         .long 0x500000F0        /* MD | BL | IMASK=15 */
 .Ls_stbcr:      .long 0xA4150020
@@ -395,8 +535,7 @@ _dbt_standby_stub:
 .Ls_pllcr:      .long 0xA4150024
 .Ls_pulcrbsc:   .long 0xA40501C3
 .Ls_phcr:       .long 0xA405010E
-.Ls_a507:       .word 0xA507
-        .align  2
+.Ls_a507:       .long 0x0000A507
 .Ls_block:      .long 0                 /* patched: the save block address */
 _dbt_standby_stub_end:
 

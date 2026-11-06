@@ -97,6 +97,10 @@ DEVICE ?= 0
 # is not known (the emulator shows no difference). The IRQ-pin guard
 # (rt/irqpins.c) is in every DEVICE=1 build: it only masks a storming pin.
 CONSOLE ?= 0
+# make STANDBY_DIAG=1: the R-standby resume path paints one coloured stripe per
+# stage on the panel (rt/standby.S, rt.c; docs/06 section 8). Diagnostic only.
+STANDBY_DIAG ?= 0
+HOST_CFLAGS  += $(if $(filter 1,$(STANDBY_DIAG)),-DDBT_STANDBY_DIAG,)
 HOST_CFLAGS  += $(if $(filter 1,$(DEVICE)),-DDBT_NO_DEBUG_PORT -DDBT_IRQPIN_GUARD $(if $(filter 1,$(CONSOLE)),-DDBT_LCD_CONSOLE,),)
 NK_PADDED = $(BUILD)/nk-flash.bin
 NK_OFF_FILE = $(BUILD)/nk-flash.off
