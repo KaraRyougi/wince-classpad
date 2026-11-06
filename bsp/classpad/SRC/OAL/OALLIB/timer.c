@@ -46,7 +46,7 @@ static void SetPeriod(UINT32 msec, UINT32 counterBase)
     // Masking CPU interrupts alone does not stop the hardware: an underflow
     // between the last UNF read and TCNT write would be charged as the NEW
     // period (up to 1000 ms) although the OLD short period just elapsed.
-    // Preserve other TMU channels, especially the translator's profiler.
+    // Preserve the other TMU channels (the translator's benchmarks use TMU1).
     start = MMIO_R8(TMU_TSTR);
     MMIO_W8(TMU_TSTR, start & ~TMU_TSTR_STR0);
     (void)MMIO_R8(TMU_TSTR); // complete the stop before the status snapshot

@@ -90,8 +90,6 @@ EXTBIN       ?=
 # make DEVICE=1 hhk: a translator without the emulator's debug port (byte
 # stores to 0xFFFFF000, undefined on the real SoC); its prints then go only to
 # the debug ring. Use a private BUILD dir so emulator builds keep their port.
-PROFILE ?= 0
-HOST_CFLAGS += $(if $(filter 1,$(PROFILE)),-DDBT_PROFILE,)
 DEVICE ?= 0
 # CONSOLE=1 adds the panel console (rt/lcdcon.c) to a DEVICE=1 build. Off by
 # default: on the real fx-CP400 a console build ends in a black screen while
@@ -153,7 +151,7 @@ DEVALL_STAMP := $(BUILD)/.devall-$(if $(filter 1,$(DEVALL)),1,0)
 $(DEVALL_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.devall-*
 	touch $@
-LAYOUT_STAMP := $(BUILD)/.layout-$(GUEST_RAM_HI)-$(IMAGE_BASE)-$(CACHE_BASE)-$(CACHE_SIZE)-$(BLOCKS)-$(ARENA_KB)-$(NK_FLASH)-$(NK_FLASH_MAX)-$(DEVICE)-$(CONSOLE)-$(IRQPINS)-$(PROFILE)
+LAYOUT_STAMP := $(BUILD)/.layout-$(GUEST_RAM_HI)-$(IMAGE_BASE)-$(CACHE_BASE)-$(CACHE_SIZE)-$(BLOCKS)-$(ARENA_KB)-$(NK_FLASH)-$(NK_FLASH_MAX)-$(DEVICE)-$(CONSOLE)-$(IRQPINS)
 $(LAYOUT_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.layout-*
 	touch $@
@@ -188,7 +186,7 @@ $(BUILD)/extrom-test.bin: guest/extrom.txt guest/extrom-data.txt ../tools/mkextr
 
 # --- translator image (big-endian) ---
 # image files are named after the guest so that switching GUEST= relinks
-$(IMG).elf: $(RT_SRC) $(wildcard src/*.h) rt/guest_blob.S rt/image.ld rt/rt.h rt/profile.h rt/hw_diag.h rt/nkbin.h rt/ctx_offsets.h rt/lcdcon.h rt/lcdfont.h $(BUILD)/$(GUEST).bin $(LAYOUT_STAMP)
+$(IMG).elf: $(RT_SRC) $(wildcard src/*.h) rt/guest_blob.S rt/image.ld rt/rt.h rt/nkbin.h rt/ctx_offsets.h rt/lcdcon.h rt/lcdfont.h $(BUILD)/$(GUEST).bin $(LAYOUT_STAMP)
 	$(CC) $(HOST_CFLAGS) $(LAYOUT_LD) -DGUEST='"$(BUILD)/$(GUEST).bin"' -T rt/image.ld -o $@ $(RT_SRC) rt/guest_blob.S -lgcc
 
 $(IMG).bin: $(IMG).elf

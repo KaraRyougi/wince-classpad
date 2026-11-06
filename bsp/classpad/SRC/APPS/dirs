@@ -1,6 +1,5 @@
 DIRS=\
     hello \
-    dbtstat \
     ROTATE \
     ROTATEKEY \
     doclist

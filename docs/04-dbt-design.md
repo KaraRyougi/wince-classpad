@@ -645,7 +645,10 @@ Everything above was measured in casio-emu, whose cost model is one tick per
 instruction: no caches, no SDRAM latency, no branch penalties. The real
 fx-CP400 is slower than that model predicts and nothing had been measured
 there, so the runtime now carries a profiler that needs no output channel
-but a window on the CE desktop:
+but a window on the CE desktop. (That window, `classpad_dbtstat.exe`, and
+the opt-in `PROFILE=1` TMU1 buckets were removed later the same day; the
+always-on tick sampling and counters below are still read through
+`HC_GETSTAT`, and the measurements in this section are kept as the record.)
 
 - **Tick sampling** (`sample_tick`, always on): every TMU0 interrupt
   (vector 0x600, INTEVT 0x400) classifies the interrupted host pc the way
@@ -664,16 +667,10 @@ but a window on the CE desktop:
   fallback helper, the cheap entry windows, the asm hash hit, and the
   trampolines. The guest pc of such a sample is the one that entered the
   stub (the "where=3 caveat" above), so those samples still sit in the
-  histogram at the code that caused them. The PROFILE=1 buckets measure the
-  same time in TMU1 counts; the two should agree.
+  histogram at the code that caused them.
 - **Exception counters**: every delivery by vector (general, TLB miss,
   interrupt) and the first 16 INTEVT codes seen with their counts, so a
   storming source or an unexpected TLB-miss rate shows at once.
-- **PROFILE=1 buckets** gained `exc` (the C side of a delivery, handler
-  translation included), `rte` and `lookup` (`dbt_resolve`, translation and
-  full flushes included). On the device TMU1 counts real time: 7,372,800
-  per second at the stock clock, so the buckets are seconds, not model
-  ticks. The build reserves TMU1, which the OAL never touches.
 - **Machine state**: CCR, MMUCR, FRQCR and the RTC's seconds of day. The CE
   kernel programs CCR itself in `SHInit` (`CACHE_ENABLE | 0x80000105`:
   both caches on, P1 copy-back, no write-through), which `mdsh3.c` in the
@@ -684,10 +681,8 @@ but a window on the CE desktop:
 All of it is read with `HC_GETSTAT` (indices 64 up; the list is in
 `bsp/classpad/SRC/INC/classpad_hc.h`), which works from user mode: a
 `trapa` is a general exception the translator takes before the kernel sees
-it. `bsp/classpad/SRC/APPS/DBTSTAT` (`classpad_dbtstat.exe`) polls it every
-2 s and shows rates, sample shares, C-time percentages and the hottest code
-buckets on the panel; `print_stats` prints the same `[sample]` lines in the
-emulator (every 4096 rte in PROFILE builds, and at HC_STATS/exit).
+it. `print_stats` prints the same `[sample]` lines in the emulator (at
+HC_STATS/exit).
 
 First emulator numbers (power image, ClassPad profile, PROFILE=1, 360 s
 wall / 270 s of guest ticks to idle): 88 % of the ticks idle once the
@@ -846,7 +841,8 @@ The guest blob carries file contents only, so guests zero their own `.bss`
 
 ### Touch/performance investigation (2026-11-05)
 
-`make -C dbt PROFILE=1 ...` reserves TMU1 (Pphi/4, interrupts off) and
+(Removed 2026-11-06 with the rest of the opt-in profiling.)
+`make -C dbt PROFILE=1 ...` reserved TMU1 (Pphi/4, interrupts off) and
 records calls, cumulative ticks and maximum ticks for completed translations,
 ASID changes, TLB hooks, block invalidation, LCD pixel streaming and full
 cache flushes. Statistics are printed by HC_STATS and every 4096 guest RTES
@@ -977,7 +973,7 @@ interrupt recovery passes with this encoding. The compact block header is
 36 rather than 56 bytes on the 32-bit target; offset/count bounds are checked
 at compile time.
 
-`DBT_PROFILE_BANK` logs occupied block count, code bytes and metadata bytes
+`DBT_PROFILE_BANK` (since removed) logged occupied block count, code bytes and metadata bytes
 at bank rotation. This disproved a simple block-cap-only explanation:
 different banks exhaust different resources. Larger block tables alone
 consume metadata space and are not a substantial improvement.
@@ -2381,9 +2377,7 @@ bitmap checks restore SR and opcode before SAVE_CTX_RT. Success executes
 LDTLB, increments native/hook/skip counters, restores SR, and uses explicitly
 registered exception-recovery windows for the three GPR restores and jump.
 Stats offsets are compile-time checked. Capability 419 / native count 420.
-Native PROFILE/HW_DIAG combinations are rejected for this experiment, since
-it does not implement their elapsed-time/PTEL diagnostic accounting. Host-only
-sampling remains possible. Default builds retain the original helper path.
+Default builds retain the original helper path.
 
 MMU/TMU/aspace/interior regressions pass. Corrected MMU fixture PTEL flags
 from 0x16e (1 KiB despite its comment) to 0x17e (4 KiB), then verified actual

@@ -6,8 +6,6 @@
 #include "lcdcon.h"
 #include "lcd_io.h"
 #include "irqpins.h"
-#include "profile.h"
-#include "hw_diag.h"
 
 typedef __SIZE_TYPE__ dbt_size_t;
 void *memcpy(void *d, const void *s, dbt_size_t n);
@@ -267,7 +265,6 @@ static int g_window_kind, g_tail_from;      /* sampling profiler: see sample_tic
 #if defined(DBT_CONST_DEVICE_ADDRESS) || defined(DBT_UNIFORM_STORE)
 static sf_u32 g_const_device_blocks;
 #endif
-static sf_u32 g_xlat_max_pc;                /* guest pc of the slowest translation (PROFILE=1) */
 static void print_stats(void);
 
 /* ------------------------------------------- address spaces and the TLB */
@@ -315,9 +312,6 @@ static int    g_nuser, g_nic; /* g_nic counts ICs filled with user targets this 
  * Never clear individual bits (collisions/dead blocks only cause extra scans).
  * Two pages cover even a block straddling a 1 KiB boundary. */
 #ifdef DBT_FAST_LDTLB
-#if defined(DBT_PROFILE) || defined(DBT_HW_DIAG)
-#error DBT_FAST_LDTLB timing experiment requires native profiling disabled
-#endif
 sf_u32 dbt_user_pages[256], dbt_fast_ldtlb_calls;
 #define g_user_pages dbt_user_pages
 typedef char check_tlb_hooks_offset[(__builtin_offsetof(dbt_stats, tlb_hooks) == 96) ? 1 : -1];
@@ -713,7 +707,6 @@ static void verify_sources(unsigned banks)
  * lead into it. Its cache memory stays dead until the next full flush. */
 static void invalidate_block(dbt_block *b)
 {
-    PROFILE_BEGIN;
     int i, k;
     sf_u32 lo = b->host_base, hi = b->host_base + (sf_u32)b->host_len;
     unsigned bank_mask = 1u << bank_of_code(lo);
@@ -762,7 +755,6 @@ static void invalidate_block(dbt_block *b)
         }
     }
     dbt_stat.invalidations++;
-    PROFILE_END(PROF_INVALIDATE);
 }
 
 /* Complete a batch before returning to guest execution. Multiple blocks
@@ -770,7 +762,6 @@ static void invalidate_block(dbt_block *b)
 static void finish_invalidations(void)
 {
 #ifdef DBT_BATCH_INVALIDATE
-    PROFILE_BEGIN;
     int i, k;
 #ifdef DBT_INCOMING_BITMAP
     source_scan scan = {0, 0, g_dead_banks, 0};
@@ -806,7 +797,6 @@ static void finish_invalidations(void)
                 unchain(b, k);
     }
     g_dead_banks = 0;
-    PROFILE_END(PROF_INVALIDATE);
 #endif
 }
 
@@ -835,7 +825,6 @@ static void invalidate_range(sf_u32 lo, sf_u32 hi, int user_only)
 static void switch_asid(sf_u32 asid)
 {
     int j;
-    PROFILE_BEGIN;
     if (asid == g_asid) { dbt_stat.asid_unchanged++; return; }
     g_asid = asid;
     dbt_stat.asid_switches++;
@@ -856,7 +845,6 @@ static void switch_asid(sf_u32 asid)
         g_ic_active_seen[index] = 0;
     }
     g_nic = 0;
-    PROFILE_END(PROF_ASID);
 }
 
 static void note_asid(void)
@@ -881,19 +869,16 @@ static void tlb_check_block(unsigned i, sf_u32 vpn, sf_u32 mask,
 
 static void tlb_hook(void)
 {
-    PROFILE_BEGIN;
     static const sf_u8 shift_of_sz[4] = { 10, 12, 16, 20 };
     sf_u32 pteh = REG_PTEH, ptel = REG_PTEL;
     sf_u32 sz = ((ptel >> 4) & 1) | ((ptel >> 6) & 2), mask = ~((1u << shift_of_sz[sz]) - 1);
     sf_u32 vpn = pteh & 0xFFFFFC00u & mask, asid = pteh & 0xFF, shared = (ptel >> 1) & 1;
     int i, j;
-    hw_diag_ptel(vpn, ptel);
     dbt_stat.tlb_hooks++;
     note_asid();
     if (!may_have_user_code(vpn, shift_of_sz[sz])) {
         dbt_stat.tlb_scan_skips++;
         __asm__ volatile ("ldtlb" ::: "memory");
-        PROFILE_END(PROF_TLB);
         return;
     }
     if (shift_of_sz[sz] <= 12) {
@@ -911,7 +896,6 @@ static void tlb_hook(void)
     }
     finish_invalidations();
     __asm__ volatile ("ldtlb" ::: "memory");
-    PROFILE_END(PROF_TLB);
 }
 
 /* A live block for gpc usable in the current address space. */
@@ -1021,7 +1005,6 @@ static sf_u32 find_interior_entry(sf_u32 gpc)
 
 static void cache_flush_all(void)
 {
-    PROFILE_BEGIN;
 #ifdef DBT_TRACE_FLUSH
     sf_u32 cache_was = g_cache_used, arena_was = g_arena_used;
 #endif
@@ -1070,7 +1053,6 @@ static void cache_flush_all(void)
     g_arena_used = 0;
     for (i = 0; i < HSIZE; i++) { g_hash[i].gpc = 1; g_hash[i].host = 0; g_chain_head[i] = CHAIN_NONE; }
     dbt_stat.flushes++;
-    PROFILE_END(PROF_FLUSH);
     __asm__ volatile ("ldc %0, sr" :: "r"(sr) : "memory");
 #ifdef DBT_TRACE_FLUSH
     if (dbt_stat.flushes > 1) {
@@ -1132,7 +1114,6 @@ static sf_u32 bank_code_bytes(void) { return (g_cfg.cache_size / CACHE_BANKS) & 
 static sf_u32 bank_arena_bytes(void) { return (META_ARENA_BYTES / CACHE_BANKS) & ~7u; }
 static void cache_next_bank(void)
 {
-    PROFILE_BEGIN;
     sf_u32 sr, i, lo, hi;
 #ifdef DBT_KERNEL_BANKS
     unsigned stream = g_bank >= DBT_KERNEL_BANKS;
@@ -1268,7 +1249,6 @@ static void cache_next_bank(void)
         g_allocated -= count;
         g_bank_evictions++;
         dbt_stat.flushes++; /* generation guard: callers must not patch a recycled site */
-        PROFILE_END(PROF_FLUSH);
     }
 #ifdef DBT_BATCH_INVALIDATE
     if (((lo - g_cfg.cache_base) & 255u) == 0 && ((hi - lo) & 255u) == 0)
@@ -1371,7 +1351,6 @@ void dbt_rt_init(const dbt_rt_config *cfg)
     g_cfg = *cfg;
     memset(&dbt_stat, 0, sizeof dbt_stat);
     dbgring_init();
-    profile_init();
     sample_init(cfg);
     cache_flush_all();
     fpuemu_reset(&g_fpu);
@@ -1405,10 +1384,6 @@ void dbt_rt_init(const dbt_rt_config *cfg)
 
 static dbt_block *translate_at(sf_u32 gpc)
 {
-    PROFILE_BEGIN;
-#ifdef DBT_PROFILE
-    sf_u32 xlat_max_before = g_profile[PROF_TRANSLATE].max;
-#endif
     dbt_block *b;
     sf_u32 host;
     sf_u32 fault = 0, publish_sr;
@@ -1437,11 +1412,6 @@ static dbt_block *translate_at(sf_u32 gpc)
     if (g_bank_count[g_bank] >= BANK_BLOCKS ||
         g_cache_used + DBT_BLOCK_WORDS * 2 > (g_bank + 1) * bank_code_bytes() ||
         g_arena_used + SCRATCH_ARENA_NEED > (g_bank + 1) * bank_arena_bytes()) {
-#ifdef DBT_PROFILE_BANK
-        dbt_puts("[bank] blocks="); dbt_puthex(g_bank_count[g_bank]);
-        dbt_puts(" code="); dbt_puthex(g_cache_used - g_bank * bank_code_bytes());
-        dbt_puts(" meta="); dbt_puthex(g_arena_used - g_bank * bank_arena_bytes()); dbt_puts("\n");
-#endif
         cache_next_bank();
     }
     host = g_cfg.cache_base + g_cache_used;
@@ -1555,10 +1525,6 @@ static dbt_block *translate_at(sf_u32 gpc)
 #endif
     dbt_stat.translations++;
     dbt_stat.blocks = g_allocated;
-    PROFILE_END(PROF_TRANSLATE);
-#ifdef DBT_PROFILE
-    if (g_profile[PROF_TRANSLATE].max != xlat_max_before) g_xlat_max_pc = gpc;
-#endif
     return b;
 }
 
@@ -1704,7 +1670,6 @@ static int g_devrange_pending;
 sf_u32 dbt_resolve(sf_u32 gpc, sf_u32 link_lit)
 {
     sf_u32 host, gen;
-    PROFILE_BEGIN;
     dbt_dbgring_drain();
     if (g_devrange_pending) {
         /* HC_DEVRANGE: retranslate everything with the new range; the link
@@ -1720,7 +1685,6 @@ sf_u32 dbt_resolve(sf_u32 gpc, sf_u32 link_lit)
     /* a full flush inside the lookup freed the block holding the link
      * literal (and maybe reused its memory for the new one): leave it alone */
     if (link_lit && dbt_stat.flushes == gen) link_direct(link_lit, host);
-    PROFILE_END(PROF_LOOKUP);
     g_tail_from = 1;
     return host;
 }
@@ -1772,7 +1736,7 @@ static void invalidate_all_but_rom(void)
 #define HC_TLB_INVAL 0xF9               /* kernel: user mappings in [r4, r4+r5) changed (r5 = 0: all) */
 #define HC_ASID   0xFA                  /* kernel: address space switched to ASID r4 */
 #define HC_GETSTAT 0xFB                 /* r4 = index -> r0 (0 translations, 1 blocks, 2 invalidations, 3 asid switches, 4 ic misses, 5 debug-ring bytes, 6 device accesses, 7 full flushes, 8 FPU-disable exceptions, 9/10 device-aware range lo/hi,
-                                         * 11-14 profile.h, 23-29 more counters, 32+3b profile bucket b, 64-116 tick samples / exceptions / machine registers, 128-383 the code histogram:
+                                         * 13-14 and 23-29 more counters, 64-116 tick samples / exceptions / machine registers, 128-383 the code histogram:
                                          * the complete list is kept in bsp/classpad/SRC/INC/classpad_hc.h) */
 #define HC_DEVRANGE 0xFC                /* tests: translate [r4, r5) device-aware from now on (drops all translations at the next lookup) */
 #define HC_LCD_BLIT 0xFD                /* r4 = pixels as the guest stores them (P1/P2 address), r5 = pixel count, r6 = 16-bit LCD data port: written natively */
@@ -1810,17 +1774,16 @@ static void print_trace(void);
 /* ------------------------------------------------------------ sampling profiler
  * Every system tick (vector 0x600, INTEVT 0x400 = TMU0) classifies the host
  * pc it interrupted and the guest pc it resumes at, so a run on the real
- * machine can be profiled with nothing but HC_GETSTAT (indices 64 up, read by
- * bsp/classpad/SRC/APPS/DBTSTAT): the share of ticks in translated guest
+ * machine can be profiled with nothing but HC_GETSTAT (indices 64 up): the
+ * share of ticks in translated guest
  * code, in the lookup/helper stub windows, inside a translation or a helper,
  * in the kernel's idle `sleep`; and a 256-bucket histogram of guest code by
  * physical address over the ROM image (kernel and XIP DLLs alike: a user pc
  * is translated through the UTLB), to symbolise with tools/cesym.py. A tick
  * that lands in masked translator C (lookups, hypercalls, the exception path)
  * is delivered at the re-enabling instruction and so counts as guest code at
- * the pc that entered the stub; the PROFILE=1 TMU1 buckets measure that
- * time. Every exception is also counted by vector and INTEVT code, so a
- * storming source shows up. Counters wrap modulo 2^32: take deltas. */
+ * the pc that entered the stub. Every exception is also counted by vector
+ * and INTEVT code, so a storming source shows up. Counters wrap modulo 2^32: take deltas. */
 #define SAMPLE_HIST     256
 #define SAMPLE_INTEVTS  16
 #define SAMPLE_KOTHER   5
@@ -1967,7 +1930,6 @@ static sf_u32 sample_stat(sf_u32 index)
     case 122: return g_sample.win_tramp;
     case 384: return REG_PLLCR;         /* with FRQCR: the clock tree, to settle Pphi (see bsp_cfg.h) */
     case 385: return REG_FLLFRQ;
-    case 386: return g_xlat_max_pc;
     default:
         if (index >= 85 && index < 85 + 2 * SAMPLE_INTEVTS) {
             unsigned k = (index - 85) / 2;
@@ -2007,7 +1969,6 @@ static void print_samples(void)
     }
     dbt_puts("\n[sample] ccr="); dbt_puthex(REG_CCR); dbt_puts(" mmucr="); dbt_puthex(REG_MMUCR);
     dbt_puts(" pllcr="); dbt_puthex(REG_PLLCR); dbt_puts(" fllfrq="); dbt_puthex(REG_FLLFRQ);
-    dbt_puts(" xlat_max_pc="); dbt_puthex(g_xlat_max_pc);
     dbt_puts(" frqcr="); dbt_puthex(REG_FRQCR);
     /* the eight hottest buckets, physical and as the P1 address */
     for (i = 0; i < SAMPLE_HIST; i++) {
@@ -2067,8 +2028,6 @@ static void print_stats(void)
     dbt_puts("\n");
     print_samples();
     print_trace();
-    profile_print();
-    hw_diag_print();
 #ifdef DBT_CE_TIME_PROBE
     /* Diagnostic only: pointer location and dwCurMSec offset verified from
      * the frozen benchmark NK's OALTimerIntrHandler, not a platform ABI. */
@@ -2078,9 +2037,6 @@ static void print_stats(void)
         if (pa >= 0x0c100000u && pa < 0x0c8fff00u) {
             dbt_puts("[ce-time] nkglobal="); dbt_puthex(nk);
             dbt_puts(" msec="); dbt_puthex(bswap32(*(volatile sf_u32 *)(0x80000000u + pa + 0xc8)));
-#ifdef DBT_PROFILE
-            dbt_puts(" clock="); dbt_puthex(0xffffffffu - PROFILE_CLOCK);
-#endif
             dbt_puts("\n");
         }
     }
@@ -2090,7 +2046,6 @@ static void print_stats(void)
 /* HC_LCD_BLIT / HC_LCD_PUSH: n little-endian 16-bit pixels from guest memory to the panel's data port */
 static void lcd_pixels(const sf_u8 *s, sf_u32 n, volatile sf_u16 *port)
 {
-    PROFILE_BEGIN;
     dbt_stat.lcd_pixels += n;
     if (((sf_u32)s & 3) == 0) {
         const sf_u32 *w = (const sf_u32 *)s;
@@ -2103,7 +2058,6 @@ static void lcd_pixels(const sf_u8 *s, sf_u32 n, volatile sf_u16 *port)
     }
     for (; n; n--, s += 2) *port = (sf_u16)(s[0] | ((sf_u16)s[1] << 8));
     dbt_lcd_sync();
-    PROFILE_END(PROF_LCD);
 }
 
 /* R-standby (docs/06-deep-suspend.md, rt/standby.S). The save block and the
@@ -2132,9 +2086,6 @@ static sf_u32 dbt_standby(void)
     if (r) {
         g_standby_wakes++;
         invalidate_range(0, 0x80000000u, 1);    /* the UTLB is empty: user mappings are gone */
-#ifdef DBT_PROFILE
-        { extern void dbt_bench_timer_init(void); dbt_bench_timer_init(); }   /* TMU1 was powered off */
-#endif
     }
     dbt_puts(r ? "[dbt] R-standby wake\n" : "[dbt] R-standby not entered\n");
     return r;
@@ -2310,10 +2261,9 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
 #ifndef DBT_NO_TICK_SAMPLING
             v = 1u;
 #endif
-            v |= profile_stat(11) ? 2u : 0u;
             break;
 
-        default: v = ctx->r[4] >= 64 ? sample_stat(ctx->r[4]) : profile_stat(ctx->r[4]); break;
+        default: v = ctx->r[4] >= 64 ? sample_stat(ctx->r[4]) : 0u; break;
         }
         ctx->r[0] = v;
         return RT_ACT_RESUME;
@@ -2767,12 +2717,9 @@ static int exc_c_body(dbt_gctx *ctx);
 int dbt_exc_c(dbt_gctx *ctx)
 {
     int act;
-    PROFILE_BEGIN;
-    hw_diag_exception(ctx);
     bank_normalize(ctx);
     act = exc_c_body(ctx);
     bank_normalize(ctx);
-    PROFILE_END(PROF_EXC);
     return act;
 }
 
@@ -2896,18 +2843,6 @@ deliver:
 #ifdef DBT_IRQ_ENTRY_CACHE
     if (ctx->vec_off == 0x600) remember_irq_entry(b, guest_pc);
 #endif
-#ifdef DBT_PROFILE_PC
-    if (ctx->vec_off == 0x600 && ctx->intevt == 0x400) {
-        static unsigned sample;
-        if ((++sample & 63u) == 0) {
-            sf_u32 phys = utlb_translate(guest_pc, g_asid);
-            if (!IS_USER(guest_pc) && guest_pc < 0xC0000000u) phys = guest_pc & 0x1FFFFFFFu;
-            dbt_puts("[sample] gpc="); dbt_puthex(guest_pc);
-            dbt_puts(" phys="); dbt_puthex(phys);
-            dbt_puts(" host="); dbt_puthex(ctx->host_spc); dbt_puts("\n");
-        }
-    }
-#endif
 #ifdef DBT_IRQPIN_GUARD
     if (ctx->vec_off == 0x600) dbt_irqpin_guard(ctx->intevt);   /* device: IRQ pins the OAL does not know (rt/irqpins.c) */
 #endif
@@ -2948,11 +2883,7 @@ deliver:
 
 sf_u32 dbt_rte_c(sf_u32 guest_spc, sf_u32 *ssr)
 {
-    PROFILE_BEGIN;
     dbt_stat.rte_calls++;
-#ifdef DBT_PROFILE
-    if ((dbt_stat.rte_calls & 4095u) == 0) print_stats();
-#endif
     sf_u32 host;
     note_asid();                       /* a context switch returns to the new thread through rte */
     dbt_dbgring_drain();
@@ -2981,7 +2912,6 @@ sf_u32 dbt_rte_c(sf_u32 guest_spc, sf_u32 *ssr)
     }
     dbt_shadow_md = *ssr & SR_MD;
     *ssr = (*ssr | SR_MD | SR_DSP);
-    PROFILE_END(PROF_RTE);
     return host;
 }
 
