@@ -153,7 +153,8 @@ static sf_u32 helper_guest_pc(sf_u32 ret, int *in_insn_range);
 static int guest_pc_fetchable(sf_u32 gpc);
 static void deliver_synthetic(sf_u32 gpc, sf_u32 expevt);
 static void sample_init(const dbt_rt_config *cfg);
-static int g_window_kind, g_tail_from;      /* sampling profiler: see sample_tick */
+static int g_window_kind, g_tail_from;
+static sf_u32 g_xlat_max_pc;                /* guest pc of the slowest translation (PROFILE=1) */      /* sampling profiler: see sample_tick */
 static void print_stats(void);
 
 /* ------------------------------------------- address spaces and the TLB */
@@ -996,6 +997,9 @@ void dbt_rt_init(const dbt_rt_config *cfg)
 static dbt_block *translate_at(sf_u32 gpc)
 {
     PROFILE_BEGIN;
+#ifdef DBT_PROFILE
+    sf_u32 xlat_max_before = g_profile[PROF_TRANSLATE].max;
+#endif
     dbt_block *b;
     sf_u32 host;
     sf_u32 fault = 0, publish_sr;
@@ -1102,6 +1106,9 @@ static dbt_block *translate_at(sf_u32 gpc)
     dbt_stat.translations++;
     dbt_stat.blocks = g_allocated;
     PROFILE_END(PROF_TRANSLATE);
+#ifdef DBT_PROFILE
+    if (g_profile[PROF_TRANSLATE].max != xlat_max_before) g_xlat_max_pc = gpc;
+#endif
     return b;
 }
 
@@ -1417,6 +1424,8 @@ static void sample_tick(sf_u32 gpc, int where)
 /* Machine state worth a look on the device (HC_GETSTAT 80-83) */
 #define REG_CCR    (*(volatile sf_u32 *)0xFF00001Cu)
 #define REG_FRQCR  (*(volatile sf_u32 *)0xA4150000u)
+#define REG_PLLCR  (*(volatile sf_u32 *)0xA4150024u)
+#define REG_FLLFRQ (*(volatile sf_u32 *)0xA4150050u)
 static sf_u32 rtc_seconds_of_day(void)
 {
     /* SH7305 RTC, BCD counters (bsp rtc.c reads the same registers) */
@@ -1456,6 +1465,9 @@ static sf_u32 sample_stat(sf_u32 index)
     case 120: return g_sample.win_tail_helper;
     case 121: return g_sample.win_hit;
     case 122: return g_sample.win_tramp;
+    case 384: return REG_PLLCR;         /* with FRQCR: the clock tree, to settle Pphi (see bsp_cfg.h) */
+    case 385: return REG_FLLFRQ;
+    case 386: return g_xlat_max_pc;
     default:
         if (index >= 85 && index < 85 + 2 * SAMPLE_INTEVTS) {
             unsigned k = (index - 85) / 2;
@@ -1494,6 +1506,8 @@ static void print_samples(void)
         dbt_puts(" "); dbt_puthex(g_sample.intevt[i].code); dbt_puts(":"); dbt_puthex(g_sample.intevt[i].count);
     }
     dbt_puts("\n[sample] ccr="); dbt_puthex(REG_CCR); dbt_puts(" mmucr="); dbt_puthex(REG_MMUCR);
+    dbt_puts(" pllcr="); dbt_puthex(REG_PLLCR); dbt_puts(" fllfrq="); dbt_puthex(REG_FLLFRQ);
+    dbt_puts(" xlat_max_pc="); dbt_puthex(g_xlat_max_pc);
     dbt_puts(" frqcr="); dbt_puthex(REG_FRQCR);
     /* the eight hottest buckets, physical and as the P1 address */
     for (i = 0; i < SAMPLE_HIST; i++) {

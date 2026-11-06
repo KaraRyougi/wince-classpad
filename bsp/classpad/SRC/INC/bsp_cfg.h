@@ -8,6 +8,10 @@
 
 // Peripheral clock Pphi as measured in casio-emu and on the fx-CG50 family:
 // 29.4912 MHz (the TMU counts Pphi/4 at the smallest prescaler).
+// NOT the fx-CP400's: on the board the TMU counts about 1.67x faster than
+// this (classpad_dbtstat.exe tick/rtc 1.69 over 38 s on 2026-11-06, FRQCR
+// 0x18001102), so CE time runs that much too fast until this is corrected
+// from a longer tick/rtc run or from FRQCR/PLLCR/FLLFRQ (HC_GETSTAT 82/384/385).
 #define PERIPHERAL_CLOCK_FREQ       29491200
 #define TIMER_INPUT_DIVISOR         4
 #define TIMER_INPUT_DIVISOR_CODE    0x0000          // TCR.TPSC = Pphi/4

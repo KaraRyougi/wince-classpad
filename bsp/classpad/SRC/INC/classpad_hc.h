@@ -68,10 +68,14 @@ static __inline void ClasspadHcLcdPush(DWORD src, DWORD top, DWORD rows, DWORD w
 //   disabled), 120 after the fpu/fallback helpers, 121 asm hash hit, 122
 //   rte/bank trampolines;  123..127 the last five kernel pcs outside the histogram
 //   128..383 the histogram: tick samples per bucket of guest code by physical address
+//   384 PLLCR  385 FLLFRQ (with 82 FRQCR: the clock tree; the fx-CP400 does
+//   not run the fx-CG50 clocks bsp_cfg.h assumes, see tick/rtc in the window)
+//   386 guest pc of the slowest translation so far (PROFILE=1 builds)
 #define HC_STAT_SAMPLES     64
 #define HC_STAT_HIST_BASE   74
 #define HC_STAT_HIST        128
 #define HC_STAT_HIST_N      256
+#define HC_STAT_N           387
 static __inline DWORD ClasspadHcGetStat(DWORD index) { return __asm1("trapa #251", index); }
 
 #endif

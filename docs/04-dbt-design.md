@@ -705,6 +705,29 @@ that is not idle. Until those numbers exist, the hardware-only costs the
 emulator cannot show (I-cache misses from the 3-5x code expansion, literal
 loads through the operand cache, `jmp @rT` penalties) are guesses.
 
+#### First numbers from the hardware (2026-11-06, fx-CG500 = fx-CP400 board)
+
+Shell image, variable-tick OAL, `DEVICE=1 PROFILE=1` translator, read 38 s
+after the desktop appeared with the device idle:
+
+| line | value | reading |
+|---|---|---|
+| `tick/rtc` | 1.692 (really 1.62..1.77, the RTC is read in whole seconds) | TMU0 and TMU1 count about 1.67x faster than `bsp_cfg.h` assumes: the CP400 does not run the fx-CG50 clocks. CE time, `Sleep`, every "second" in the window and in TMU1 profiles run that much too fast. `TMU1 2.00 s per 2000 ms` only says both timers share a clock. |
+| FRQCR | 0x18001102 | casio-emu's ClassPad profile uses the CG50 value 0x0F011112: PLL x16 instead of x25 by the emulator's own decoding, which alone gives 1.5625, outside the measured range, so FLLFRQ differs too. Indices 384/385 now read PLLCR/FLLFRQ. |
+| CCR / MMUCR | 0x105 / 0x7800F001 | as in the emulator: caches on, copy-back. |
+| `irq/s` | 110, all INTEVT 0x400 | the tick really is on demand, but something sleeps every ~10 tick-ms (a polling driver thread: touch or keyboard); nothing else interrupts. |
+| `tlb/s` 82, `rte/s` 373, `ldcsr/s` 2559 | per wakeup: 0.75 TLB miss, 3.4 rte, 23 ldc-sr helper calls | the kernel's wakeup path, each a C round trip. |
+| `exc` 3 % | about 1150 deliveries per interval (irq + TLB + the window's own 384 hypercalls per poll) | roughly 50 tick-us (30 real us) per exception delivery in C. Cheap while idle, the dominant term in a boot with hundreds of thousands of deliveries. |
+| `lcd` 2 %, `tlb` 1 % | the window's own repaint; about 120 tick-us per TLB hook | |
+| `xlat max 79921 us` | one translation held interrupts for 48 real ms | index 386 now records the guest pc of the slowest translation. |
+| samples | 221 per 2 s, code 99 %, idle 83 %, user 2 %, kernel-other 6 % at 0xC0425E50, hot ROM bucket 0x83E60000 | with the variable tick the samples are the wakeups, not a uniform clock: shares are indicative, the TMU1 buckets are the time measurement. |
+
+What this changes: fix `PERIPHERAL_CLOCK_FREQ` (and the emulator's ClassPad
+CPG preset) from a longer `tick/rtc` run, a few minutes narrows it to a few
+tenths of a percent, or from PLLCR/FLLFRQ once read; then measure during
+boot and app launches (page 1, "hot since start", and a capture), not at
+idle, where there is nothing left to speed up.
+
 ### Profiling a CE boot (2026-11-03)
 
 The 1 ms TMU tick is a sampling profiler: `-DDBT_TRACE_EXC` prints every

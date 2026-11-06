@@ -212,6 +212,11 @@ in a topmost strip at the top of the screen:
   started, as P1 addresses and offsets into the ROM image;
 - page 2: the same for the last interval.
 
+On the fx-CP400 board `tick/rtc` read 1.69 on 2026-11-06: TMU0/TMU1 run
+about 1.67x faster than `bsp_cfg.h` assumes (FRQCR 0x18001102, not the
+CG50 value). The second line also shows PLLCR and FLLFRQ (indices 384/385)
+and the guest pc of the slowest translation so far (386, `PROFILE=1`).
+
 A tap turns the page, a tap on the `x` in the top-right corner closes it.
 Start it from the shell (`\Windows\classpad_dbtstat.exe`), or for a boot
 profile add `"Launch70"="classpad_dbtstat.exe"` with `"Depend70"=hex:1e,00`
