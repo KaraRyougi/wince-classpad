@@ -52,6 +52,8 @@ static __inline void ClasspadHcLcdPush(DWORD src, DWORD top, DWORD rows, DWORD w
 //   13 same-ASID notifications  14 TLB scans skipped  23 exceptions
 //   24 hypercalls  25 rte C entries  26 ldc-sr helper calls  27 lookup C
 //   entries  28 TLB hooks  29 bank evictions  30 user IC hash-hit feature
+//   31 same-mode SR fast returns; 26 includes both fast and C paths
+//   63 bit 0: DBT_FAST_LDC_SR enabled
 //   32+3b, 33+3b, 34+3b: calls, TMU1 counts, max counts of PROFILE bucket b
 //   (0 translate, 1 asid, 2 tlb, 3 invalidate, 4 lcd, 5 flush, 6 exception
 //   delivery, 7 rte, 8 lookup); zero in non-profiling builds

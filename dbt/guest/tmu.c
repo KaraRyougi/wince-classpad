@@ -193,6 +193,8 @@ void guest_main(void)
     got = loop_ldcsr(200000, scratch);
     if (got != expect) { hc_puts("  expect "); hc_puthex(expect); hc_puts(" got "); hc_puthex(got); hc_putc('\n'); }
     check("ldc sr helper under interrupts", got == expect && ticks > before + 50);
+    if (hc_getstat(63) & 1)
+        check("same-bank SR fast path actually exercised", hc_getstat(31) >= 400000);
 
     /* a jsr whose delay-slot store uses the target register as its swap
      * scratch: an interrupt on the scratch's restore must resume at the

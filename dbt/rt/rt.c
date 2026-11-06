@@ -242,7 +242,14 @@ static int may_have_user_code(sf_u32 vpn, unsigned shift)
     }
     return 0;
 }
-static sf_u32 g_asid;
+sf_u32 dbt_current_asid;
+#define g_asid dbt_current_asid
+#ifdef DBT_FAST_LDC_SR
+volatile sf_u32 dbt_fast_ldc_sr_calls;
+#define FAST_LDC_SR_CALLS dbt_fast_ldc_sr_calls
+#else
+#define FAST_LDC_SR_CALLS 0u
+#endif
 static dbt_env   g_env;
 
 /* ---------------------------------------------------------- console */
@@ -1558,7 +1565,7 @@ static void print_stats(void)
     dbt_puts(" fpu="); dbt_puthex(dbt_stat.fpu_ops);
     dbt_puts(" fpudis="); dbt_puthex(dbt_stat.fpu_disabled);
     dbt_puts(" hcflush="); dbt_puthex(dbt_stat.hc_flush); dbt_puts("/"); dbt_puthex(dbt_stat.hc_flush_all); dbt_puts(" romkept="); dbt_puthex(dbt_stat.rom_kept);
-    dbt_puts(" ldcsr="); dbt_puthex(dbt_stat.ldc_sr_calls); dbt_puts(" fallback="); dbt_puthex(dbt_stat.fallback_calls); dbt_puts(" rte="); dbt_puthex(dbt_stat.rte_calls);
+    dbt_puts(" ldcsr="); dbt_puthex(dbt_stat.ldc_sr_calls + FAST_LDC_SR_CALLS); dbt_puts(" fallback="); dbt_puthex(dbt_stat.fallback_calls); dbt_puts(" rte="); dbt_puthex(dbt_stat.rte_calls);
     dbt_puts(" chained="); dbt_puthex(dbt_stat.chained);
     dbt_puts(" evicted="); dbt_puthex(dbt_stat.hash_evicted);
     dbt_puts(" ic_miss_c="); dbt_puthex(dbt_stat.ic_misses_c);
@@ -1713,7 +1720,11 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
         case 23: v = dbt_stat.exceptions; break;
         case 24: v = dbt_stat.hypercalls; break;
         case 25: v = dbt_stat.rte_calls; break;
-        case 26: v = dbt_stat.ldc_sr_calls; break;
+        case 26: v = dbt_stat.ldc_sr_calls + FAST_LDC_SR_CALLS; break;
+        case 31: v = FAST_LDC_SR_CALLS; break;
+#ifdef DBT_FAST_LDC_SR
+        case 63: v = 1; break;
+#endif
         case 27: v = dbt_stat.lookups_c; break;
         case 28: v = dbt_stat.tlb_hooks; break;
         case 29: v = g_bank_evictions; break;
@@ -1990,6 +2001,18 @@ static int stub_window(dbt_gctx *ctx, sf_u32 *guest_pc)
         *guest_pc = guest_pc_of_host(target, ctx);
         return 1;
     }
+#ifdef DBT_FAST_LDC_SR
+    /* Same-bank SR helper fast return: the new SR is already live. */
+    if (IN(spc, dbt_srfast_a, dbt_srfast_end)) {
+        sf_u32 target = ctx->r[1];
+        g_window_kind = 2;
+        if (!AFTER(spc, dbt_srfast_a)) UNDO(ctx, 0, SLOT_Y0);
+        if (!AFTER(spc, dbt_srfast_b)) UNDO(ctx, 2, SLOT_A0);
+        UNDO(ctx, 1, SLOT_Y1);
+        *guest_pc = guest_pc_of_host(target, ctx);
+        return 1;
+    }
+#endif
     /* full tail (miss path and helper exits): r1 = host target, r3 in X1 */
     if (IN(spc, dbt_full_m1, dbt_full_end)) {
         sf_u32 target = ctx->r[1];

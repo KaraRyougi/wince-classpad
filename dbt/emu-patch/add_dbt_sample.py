@@ -16,6 +16,10 @@ static unsigned dbtSampleC[65536];
  * emulated MMIO/cache/TLB operations or change guest timing. */
 extern void *pageTable[0x100000];
 static unsigned dbtSampleBlocks, dbtSampleCounts, dbtSamplePerBank, dbtSampleUnmapped;
+/* Optional raw host-RAM counters, snapshotted only at interval boundaries.
+ * The exact ELF address/layout must accompany the report. */
+static unsigned dbtCounterBase, dbtCounterWords, dbtCounterStarted;
+static unsigned dbtCounterFirst[512];
 static struct { unsigned pc, hits; } dbtSampleGuest[32768];
 static unsigned dbtSampleWord(unsigned address) {
   if(address<0x8c900000u || address>=0x8cd00000u || (address&3))return 0;
@@ -47,6 +51,10 @@ static void dbtSampleGuestPc(unsigned pc) {
 }
 static void dbtSampleDump(void) {
   if (!dbtSampleStart) return;
+  if(dbtCounterStarted)for(unsigned i=0;i<dbtCounterWords;i++){
+    unsigned last=dbtSampleWord(dbtCounterBase+i*4);
+    printf("[DBTCOUNTER] %08x first=%u last=%u delta=%u\n",dbtCounterBase+i*4,dbtCounterFirst[i],last,last-dbtCounterFirst[i]);
+  }
   printf("[DBTSAMPLE] total=%u sleep=%u code=%u other=%u\n", dbtSampleTotal, dbtSampleSleep, dbtSampleCode, dbtSampleOther);
   for (unsigned i=0;i<65536;i++) if (dbtSampleC[i])
     printf("[DBTSAMPLE pc] %08x %u\n", 0x8c900000u+i*64u, dbtSampleC[i]);
@@ -64,9 +72,18 @@ static void dbtSampleTick(unsigned tick) {
     s=getenv("HLE_DBT_SAMPLE_BLOCKS");if(s)dbtSampleBlocks=(unsigned)strtoul(s,0,0);
     s=getenv("HLE_DBT_SAMPLE_COUNTS");if(s)dbtSampleCounts=(unsigned)strtoul(s,0,0);
     s=getenv("HLE_DBT_SAMPLE_PER_BANK");if(s)dbtSamplePerBank=(unsigned)strtoul(s,0,0);
+    s=getenv("HLE_DBT_COUNTER_BASE");if(s)dbtCounterBase=(unsigned)strtoul(s,0,0);
+    s=getenv("HLE_DBT_COUNTER_WORDS");if(s)dbtCounterWords=(unsigned)strtoul(s,0,0);
+    if(dbtCounterWords>512 || !dbtCounterBase || (dbtCounterBase&3) ||
+       dbtCounterBase<0x8c900000u || dbtCounterBase>=0x8cd00000u ||
+       dbtCounterWords>(0x8cd00000u-dbtCounterBase)/4)dbtCounterWords=0;
     initialized=1;
   }
   if (!dbtSampleStart || tick<dbtSampleStart) return;
+  if(dbtCounterWords && !dbtCounterStarted){
+    for(unsigned i=0;i<dbtCounterWords;i++)dbtCounterFirst[i]=dbtSampleWord(dbtCounterBase+i*4);
+    dbtCounterStarted=1;
+  }
   unsigned pc=cpu.reg.PC;
   dbtSampleTotal++;
   if (cpu.isSleeping) dbtSampleSleep++;

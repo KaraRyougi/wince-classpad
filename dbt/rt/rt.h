@@ -95,6 +95,9 @@ extern char dbt_rte_tramp[], dbt_rt_s1[], dbt_rt_s2[], dbt_rt_s3[], dbt_rt_maske
 extern char dbt_hfpu_s1[], dbt_hfpu_s2[], dbt_hfpu_s3[], dbt_hfpu_masked[];
 extern char dbt_hfb_s1[], dbt_hfb_s2[], dbt_hfb_s3[], dbt_hfb_masked[];
 extern char dbt_hsr_s1[], dbt_hsr_s2[], dbt_hsr_s3[], dbt_hsr_masked[];
+#ifdef DBT_FAST_LDC_SR
+extern char dbt_srfast_a[], dbt_srfast_b[], dbt_srfast_c[], dbt_srfast_end[];
+#endif
 extern char dbt_stubs_start[], dbt_stubs_end[];
 extern dbt_gctx dbt_ctx_rt;      /* used by lookup-miss and helper stubs */
 extern dbt_gctx dbt_ctx_exc;     /* used by the exception handlers */

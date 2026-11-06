@@ -113,6 +113,20 @@ void guest_main(void)
         check("bank 1 intact after the bank switches", bank1_intact());
     }
 
+    /* Guest MD is shadowed even though the host stays privileged. Both
+     * transitions must leave the same-mode SR fast path and update shadow MD. */
+    if (hc_getstat(63) & 1) {
+        unsigned old, user, restored, fast = hc_getstat(31);
+        __asm__ volatile (
+            "stc sr, r0\n\tmov.l 1f, r1\n\txor r0, r1\n\t"
+            "ldc r1, sr\n\tstc sr, %1\n\tldc r0, sr\n\t"
+            "stc sr, %2\n\tmov r0, %0\n\tbra 2f\n\tnop\n\t"
+            ".align 2\n1:\t.long 0x40000000\n2:\n"
+            : "=r"(old), "=r"(user), "=r"(restored) :: "r0", "r1", "memory");
+        check("SR privilege transitions update shadow MD", user == (old ^ 0x40000000u) && restored == old);
+        check("SR privilege transitions take the full helper", hc_getstat(31) == fast);
+    }
+
     /* many exceptions: nothing drifts */
     {
         int i;

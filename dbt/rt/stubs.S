@@ -389,6 +389,52 @@ _dbt_\name:
         or      r1, r2
         ldc     r2, sr
 \masked:
+#ifdef DBT_FAST_LDC_SR
+        .if \rb
+        /* Common case: same register bank, ASID and guest privilege mode.
+         * Only r0-r2 have been borrowed; keep the original SR in r1 until
+         * all guards pass, so the normal helper remains an exact fallback. */
+        STSX    SLOT_X0, 0
+        mov     r1, r2
+        xor     r0, r2
+        mov.l   .Lfast_rbB, r0
+        tst     r0, r2
+        bf      9f
+        mov.l   .Lfast_asidB, r0
+        mov.l   @r0, r0
+        mov.l   .Lfast_ptehB, r2
+        mov.l   @r2, r2
+        extu.b  r2, r2
+        cmp/eq  r0, r2
+        bf      9f
+        mov.l   .Lfast_mdB, r2
+        mov.l   @r2, r2
+        STSX    SLOT_X0, 0
+        xor     r0, r2
+        mov.l   .Lfast_mdmaskB, r0
+        tst     r0, r2
+        bf      9f
+        mov.l   .Lfast_countB, r2
+        mov.l   @r2, r0
+        add     #1, r0
+        mov.l   r0, @r2
+        STSX    SLOT_X0, 0
+        mov.l   .Lfast_forceB, r2
+        or      r2, r0
+        STSX    SLOT_X1, 1
+        ldc     r0, sr
+        .global _dbt_srfast_a, _dbt_srfast_b, _dbt_srfast_c, _dbt_srfast_end
+_dbt_srfast_a:
+        STSX    SLOT_Y0, 0
+_dbt_srfast_b:
+        STSX    SLOT_A0, 2
+_dbt_srfast_c:
+        jmp     @r1
+        STSX    SLOT_Y1, 1
+_dbt_srfast_end:
+9:
+        .endif
+#endif
         SAVE_CTX_RT B
         mov     r2, r4                 /* arg0 = ctx */
         STSX    SLOT_X0, 5             /* arg1 = opcode / value */
@@ -416,6 +462,16 @@ _dbt_\name:
         .global _dbt_hfpu_s1, _dbt_hfpu_s2, _dbt_hfpu_s3, _dbt_hfpu_masked
         .global _dbt_hfb_s1, _dbt_hfb_s2, _dbt_hfb_s3, _dbt_hfb_masked
         .global _dbt_hsr_s1, _dbt_hsr_s2, _dbt_hsr_s3, _dbt_hsr_masked
+#ifdef DBT_FAST_LDC_SR
+        .align 2
+.Lfast_rbB:      .long 0x20000000
+.Lfast_asidB:    .long _dbt_current_asid
+.Lfast_ptehB:    .long 0xFF000000
+.Lfast_mdB:      .long _dbt_shadow_md
+.Lfast_mdmaskB:  .long 0x40000000
+.Lfast_forceB:   .long 0x40001000
+.Lfast_countB:   .long _dbt_fast_ldc_sr_calls
+#endif
         POOL    B
 
 /* ------------------------------------------------------------------ */

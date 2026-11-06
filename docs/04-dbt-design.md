@@ -1429,3 +1429,53 @@ ASID/remaps, and cache-bank recycling. On the existing fixed normal NK,
 cachefast-normal matched My Device at tick 8055684 (543684 load ticks,
 16.591919 modeled seconds). The emulator's operand-cache backing is coherent;
 this does not prove physical dirty-line writeback or hardware speedup.
+
+
+### Guarded same-mode SR helper experiment (2026-11-06)
+
+`DBT_FAST_LDC_SR` is opt-in. After the normal helper prologue has saved
+r0-r2 and masked interrupts, it checks unchanged RB, hardware PTEH ASID
+against the translator's current ASID, and unchanged guest shadow MD.
+Only then does it load the new SR (forcing host MD/DSP) and restore the
+three borrowed registers. It does not call C or save untouched registers.
+Any failed guard uses the existing full helper with the original entry SR.
+The unmasked return tail has explicit exception-recovery ranges, equivalent
+to the hash-hit tail; it preserves both T states and guest bank contents.
+HC_GETSTAT 31 counts fast returns, 63 bit 0 identifies the build, and 26
+continues counting all guest SR helper calls.
+
+TMU regression passes under interrupts and verifies at least 400000 fast
+returns. ASID/remapping and bank-switch/SPC/SSR regressions pass. The bank
+test also flips guest MD twice, checks its shadow readback and verifies
+both transitions bypass the fast path. On the new skin/SIP NK, the exact content-region benchmark improves from
+591186 ticks / 18.041565 s to 581358 / 17.741638 s. This is about 1.7%,
+not a route to the 5-second objective by itself. The flag remains opt-in
+and is not in the previously delivered integration loader.
+
+The new Windows image also changes catalog features (softkb/msim and
+console added, imaging/zlib removed). Its timing cannot isolate variable
+tick against the preceding normal NK. Use the same new NK for subsequent
+loader comparisons. The changed shell has a different toolbar, but the
+existing benchmark content region (rows 50..199) remains identical. Its
+first completed load is 591186 ticks / 18.041565 modeled seconds; the
+complete new frame is retained for subsequent comparisons. The embedded
+NK OEMInit was checked against its matching OAL MAP timestamp 0x6aed12c1:
+0x83866682 loads 1000 into r4 and calls the new timer at 0x83865c34.
+Thus the new timer configuration is actually present in the image.
+
+A current fixed-10-ms-image comparison rejected combined
+`DBT_ALIAS_LOCAL_REMOVE` + `DBT_BATCH_INVALIDATE`: 372240 ticks / 11.359863 s,
+versus 355860 / 10.859985 s for the integration loader, both exact frame
+matches. Host sampling attributes about 1.012 s to the batch finisher,
+versus 0.641 s in the baseline invalidator (64-byte symbol bins are
+approximate). ASID, alias invalidation and 12-bank recycling tests pass,
+but the combination stays disabled because measured latency regresses.
+
+
+Host sampler now accepts `HLE_DBT_COUNTER_BASE` and
+`HLE_DBT_COUNTER_WORDS` (at most 512 words inside translator RAM). It reads
+backing memory only at the sampling interval's start and normal exit,
+reporting first/last/modulo deltas. Start after runtime initialization and
+record the exact ELF symbol/layout; these are raw words, not a stable ABI.
+This permits exception and INTEVT rates over exactly the directory-load
+window without polling HC_GETSTAT or changing emulated execution.
