@@ -303,8 +303,10 @@ What the kernel sources settled (2026-11-02, notes/ce/kernel-sh-notes.md):
    Shell image (same day: Standard Shell, AYGShell, imaging codecs,
    Solitaire, QVGA portrait resources; hello no longer launched at boot)
    boots to the CE 6.0 desktop with taskbar in about 10 minutes of wall
-   time on the ClassPad profile (`notes/ce/desktop-cp400.png`); it is
-   6.95 MB and does not fit the real device's 3.875 MiB NOR window.
+   time on the ClassPad profile (`notes/ce/desktop-cp400.png`); with the
+   runtime speedups of the same evening (docs/04), the 8192-block layout and
+   the LCD push hypercall it is about 5 minutes. It is 6.95 MB and does not
+   fit the real device's 3.875 MiB NOR window.
 7. Keyboard and touch (written 2026-11-03, not yet compiled):
    `SRC\DRIVERS\KEYBD` is the Layout Manager MDD with a PDD that programs
    the SH7305 KEYSC like the fx-CG100 OS does, requests a SYSINTR for its

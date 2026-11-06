@@ -267,3 +267,18 @@ Open (2026-11-04 evening): with the three fixes above the blit-logging image sti
   later, notes/ce/startmenu-cp400.png). A tap at 3.0M is too early (before the display). The startup logo stays on
   the desktop throughout (it did not go away on the tap either); cosmetic, not investigated.
 
+2026-11-05 evening, three speedups measured on the shell image in casio-emu (iterations = casio-emu HLE_HB iter= at the
+  frame; one emulator alone ~1300M iterations per wall minute):
+  - runtime hot spots (commit 0e16683: word memset/memcpy, user/IC block indexes for ASID switches and TLB hooks): the
+    hello image reaches its window in 1400M instead of 2700M iterations, idles at 107M instead of 270M per guest second;
+  - new layout (230641d: 8192 blocks, 2 MiB code cache, CE RAM 8 MiB) + the LCD push hypercall, image rebuilt with the
+    new config.bib (NK-shell5.bin, linked for the eActivity window: run with NK_WINDOW=eact);
+  - all three together: first frame (wait cursor) at 4450M iterations, desktop icons at 5350M, taskbar at 6600M
+    (about 5 minutes of wall time), against 8450M / 12100M / ~15800M (10.5 minutes) for the unmodified runtime with
+    the old layout (shell6 run above). The remaining time is still mostly first-time translation of the shell's code.
+  Pitfalls: an image linked at 0x83860000 needs NK_WINDOW=eact or the runtime falls into the hello guest at 8c100000
+  ("entering guest at 8c100000", "Invalid instruction ... guest=810000d0"); an emulator run of a 7 MB image in the hole
+  window needs NK_FLASH_MAX=0x00800000; an old-config.bib image on the new layout needs the old layout variables
+  (GUEST_RAM_HI/IMAGE_BASE/IMAGE_STACK/CACHE_BASE/CACHE_SIZE/BLOCKS/ARENA_KB) or halts with "RAM range leaves the guest
+  window".
+
