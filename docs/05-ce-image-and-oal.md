@@ -155,7 +155,7 @@ byte-swapped by the guest, bytes are not), since the translator swaps every
 | RTC (`OEMGetRealTime`) | SH7750 RTC at `0xFFC80000` | SH7305 RTC at `0xA413FEC0` (gint `rtc.h`), BCD registers; emulator models it |
 | Cache (`OEMCacheRangeFlush`) | SH4 `ocbwb`/`ocbp`/`icbi` | same instructions pass through, **plus** hypercall `trapa #0xF2` (flush range) so the translator drops translated blocks for code the kernel just loaded or modified. Without this, a DLL loaded over the address of an earlier one runs stale translations. |
 | Debug serial | SCIF | hypercall console (above); SCIF later, USB CDC much later |
-| Power (`OEMPowerOff`) | board specific | stub |
+| Power (`OEMPowerOff`) | board specific | retained-RAM CPU `sleep` with Clear/ON as the wake key (`power.c`, `classpad_power.h`), emulator-validated only. The real "off" is the SH7305 R-standby the stock OS uses; its register sequence and the design for CE are in docs/06-deep-suspend.md. |
 | `OEMIoControl` | board info, device ID, UUID | minimal: `IOCTL_HAL_GET_DEVICE_INFO` with a fixed name, `IOCTL_HAL_INIT_RTC` |
 | Memory map | `OEMAddressTable` (ARM/MIPS style) not used on SH4; RAM from config.bib | `MainMemoryEndAddress` from config.bib; no extension DRAM |
 | Display | none headless | later: the display driver pushes a 16-bit frame buffer to the R61524 (`lcd` guest shows the protocol); ClassPad's 320x528 panel to be investigated |
