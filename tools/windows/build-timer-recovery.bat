@@ -60,27 +60,12 @@ C:\WINCE600\public\common\oak\bin\i386\makeimg.exe >>"%REVIEW%\makeimg-test.log"
 if errorlevel 1 goto restorefailed
 copy /y NK.bin "%REVIEW%\NK-timer-test.bin"
 if errorlevel 1 goto restorefailed
-rem Separate device diagnostic: launch stats without touch or Explorer.
-copy /y "%REVIEW%\platform.reg.saved" platform.reg
-if errorlevel 1 goto restorefailed
-if not exist "%_FLATRELEASEDIR%\classpad_dbtstat.exe" goto restorefailed
-echo.>>platform.reg
-echo [HKEY_LOCAL_MACHINE\init]>>platform.reg
-echo "Launch95"="classpad_dbtstat.exe">>platform.reg
-echo "Depend95"=hex:14,00,1e,00,32,00>>platform.reg
-echo [HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Power\Timeouts]>>platform.reg
-for %%T in (ACUserIdle ACSystemIdle ACSuspend BattUserIdle BattSystemIdle BattSuspend) do echo "%%T"=dword:0>>platform.reg
-echo Making automatic device stats image...
-C:\WINCE600\public\common\oak\bin\i386\makeimg.exe >>"%REVIEW%\makeimg-stats.log" 2>&1
-if errorlevel 1 goto restorefailed
-copy /y NK.bin "%REVIEW%\NK-timer-stats.bin"
-if errorlevel 1 goto restorefailed
 copy /y "%REVIEW%\platform.reg.saved" platform.reg
 if errorlevel 1 goto failed
 copy /y "%REVIEW%\NK-timer.bin" NK.bin
 if errorlevel 1 goto failed
 echo BUILD_OK>"%REVIEW%\result.txt"
-echo BUILD_OK: NK-timer.bin, emulator NK-timer-test.bin, automatic diagnostic NK-timer-stats.bin
+echo BUILD_OK: NK-timer.bin, emulator NK-timer-test.bin
 exit /b 0
 :restorefailed
 copy /y "%REVIEW%\platform.reg.saved" platform.reg

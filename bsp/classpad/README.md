@@ -222,46 +222,6 @@ Platform Builder or run.
 - `FILES\config.bib`: NK at 0x8C101000 (autosized), RAM up to 0x8CC7F000, the
   last page of the window reserved for the debug ring.
 
-## Measuring on the device: `classpad_dbtstat.exe`
-
-`SRC\APPS\DBTSTAT` is the profiler for the real machine, where nothing
-else gets out. It reads the translator's counters through the `HC_GETSTAT`
-hypercall every 2 s (`SRC\INC\classpad_hc.h` lists the indices; a `trapa`
-works from user mode, the translator takes it before the kernel) and shows,
-in a topmost strip at the top of the screen:
-
-- page 0: translations, flushes, invalidations, ASID switches, inline-cache
-  misses, lookups, exceptions by vector and INTEVT code, all per second;
-  the tick samples' split between translated code, exit stubs, stub
-  windows, translations, helpers, idle (`sleep`) and user-mode code; with
-  a `PROFILE=1` translator the real-time share of each C bucket
-  (translate, asid, tlb, invalidate, lcd, flush, exception delivery, rte,
-  lookup: they overlap, never sum them); CCR/MMUCR/FRQCR; and the TMU0
-  tick measured against the RTC (`tick/rtc` 1.000 = the clock constant in
-  `bsp_cfg.h` is right for this machine);
-- page 1: the twelve hottest 16 KiB buckets of guest code since the window
-  started, as P1 addresses and offsets into the ROM image;
-- page 2: the same for the last interval.
-
-On the fx-CP400 board `tick/rtc` read 1.69 on 2026-11-06: TMU0/TMU1 run
-about 1.67x faster than `bsp_cfg.h` assumes (FRQCR 0x18001102, not the
-CG50 value). The second line also shows PLLCR and FLLFRQ (indices 384/385)
-and the guest pc of the slowest translation so far (386, `PROFILE=1`).
-
-A tap turns the page, a tap on the `x` in the top-right corner closes it.
-Start it from the shell (`\Windows\classpad_dbtstat.exe`), or for a boot
-profile add `"Launch70"="classpad_dbtstat.exe"` with `"Depend70"=hex:1e,00`
-to `HKLM\init` in platform.reg. Resolve the hot buckets on the Mac with
-`tools/cesym.py NK.bin RELDIR <address>`. The translator for such a run is
-`make -C dbt DEVICE=1 PROFILE=1 BUILD=build-dev-prof hhk`; a non-profiling
-translator still gives everything but the C-time line.
-
-What to read first: `irq/s` far above the tick rate or an INTEVT code the
-OAL does not use means a storming source; `tlb/s` in the thousands means
-the UTLB working set; a block share near 100 % with a flat histogram means
-the translated code itself; `xlat/s` in the hundreds with `flush/s` > 0
-means the code cache recycling.
-
 ## Rules for code in this BSP
 
 - C89, no `float`/`double`: the SH4 compiler would emit FPU instructions and
@@ -299,7 +259,7 @@ Validation commands (fxSDK compiler must be on PATH):
 make test
 HLE_CB_TOUCH=160,264 HLE_CB_TOUCH_AT=6000 HLE_CB_TOUCH_HOLD=10000000 \
   make -C dbt GUEST=touch BUILD=build-touch-fix RUN_SECS=10 run
-make -C dbt GUEST=aspace PROFILE=1 BUILD=build-aspace-review run
+make -C dbt GUEST=aspace BUILD=build-aspace-review run
 ```
 
 The host bus test covers full packets, last-byte NACK, arbitration loss,
@@ -346,7 +306,7 @@ recovery scan in the CPU-sleep fallback, rotation, capture window), so the
 R-standby changes were merged onto that tree rather than copied over it:
 `C:\WINCE600\claude-standby\` holds the nine merged files (`files\`, already
 installed into `PLATFORM\CLASSPAD`), the versions they replaced (`orig\`),
-`build.bat` (OALLIB, OALEXE, DBTSTAT, makeimg -> `NK-standby.bin`), the
+`build.bat` (OALLIB, OALEXE, makeimg -> `NK-standby.bin`), the
 matching `wince.hh3` and a README with the board test steps. The window's
 stats ABI check (HC_GETSTAT 60 = "DBTS", 61 = 1) is served by this
 translator too.
@@ -433,13 +393,12 @@ channel start bits are preserved. The short stopped interval is uncounted;
 hardware drift still needs measurement. This is a demonstrated code defect,
 not yet a confirmed explanation of the reported hardware clock/touch failure.
 
-`tools/windows/build-timer-recovery.bat` builds OAL and makes a normal image,
-a rotation regression image, and `NK-timer-stats.bin`, which starts DBTSTAT
-without requiring touch or Explorer and disables idle timeouts for diagnosis.
+`tools/windows/build-timer-recovery.bat` builds OAL and makes a normal image
+and a rotation regression image (idle timeouts disabled).
 The script restores the normal registry/image after packaging. For emulator
 clock measurements use `dbt/emu-patch/enable_rtc_reference.py`, rebuild the
 emulator, and set HLE_RTC_RUNNING=1: direct HLE boot otherwise leaves the RTC
-stopped, making DBTSTAT's 0.000 ratio invalid. Four-direction touch/geometry
+stopped, making a tick/rtc ratio of 0.000 invalid. Four-direction touch/geometry
 regression passes with the rebuilt timer; at 120 s app uptime the independent
 emulator RTC comparison reads tick/rtc 0.995. Physical-device confirmation is
 still required.

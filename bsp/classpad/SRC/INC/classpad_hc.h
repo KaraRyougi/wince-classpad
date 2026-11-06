@@ -43,23 +43,18 @@ static __inline DWORD ClasspadHcStandby(DWORD flags) { return __asm1("trapa #255
 
 // HC_GETSTAT: one 32-bit counter of the translator (all wrap modulo 2^32:
 // take deltas). Works from user mode too (a trapa is a general exception the
-// translator takes before the kernel sees it), which is how the DBTSTAT
-// window (SRC\APPS\DBTSTAT) profiles a run on the real machine. User-mode
+// translator takes before the kernel sees it). User-mode
 // callers must not use ClasspadCanTrap (stc sr is privileged); they never
 // run with BL=1 anyway.
 //   0 translations  1 blocks  2 invalidations  3 ASID switches  4 inline-cache
 //   misses (C)  5 debug-ring bytes  6 device accesses  7 full flushes (and bank
-//   recycles)  8 FPU-disable exceptions  9/10 device-aware range  11 profiling
-//   build (1/0)  12 TMU1 counts elapsed (PROFILE=1 builds; 7372800/s)
+//   recycles)  8 FPU-disable exceptions  9/10 device-aware range
 //   13 same-ASID notifications  14 TLB scans skipped  23 exceptions
 //   24 hypercalls  25 rte C entries  26 ldc-sr helper calls  27 lookup C
 //   entries  28 TLB hooks  29 bank evictions  30 user IC hash-hit feature
 //   31 same-mode SR fast returns; 26 includes both fast and C paths
 //   63 bit 0: DBT_FAST_LDC_SR enabled
-//   32+3b, 33+3b, 34+3b: calls, TMU1 counts, max counts of PROFILE bucket b
-//   (0 translate, 1 asid, 2 tlb, 3 invalidate, 4 lcd, 5 flush, 6 exception
-//   delivery, 7 rte, 8 lookup); zero in non-profiling builds
-//   60 "DBTS" 0x44425453  61 stats ABI version (1)  62 features: bit 0 tick sampling, bit 1 PROFILE
+//   60 "DBTS" 0x44425453  61 stats ABI version (1)  62 features: bit 0 tick sampling
 //   64 tick samples  65 in translated code  66 exit stub  67 stub window
 //   68 translating  69 helper  70 idle (sleep)  71 user-mode pcs  72 of those
 //   not in the ROM image  73 kernel pcs outside the histogram
@@ -74,13 +69,12 @@ static __inline DWORD ClasspadHcStandby(DWORD flags) { return __asm1("trapa #255
 //   rte/bank trampolines;  123..127 the last five kernel pcs outside the histogram
 //   128..383 the histogram: tick samples per bucket of guest code by physical address
 //   384 PLLCR  385 FLLFRQ (with 82 FRQCR: the clock tree; the fx-CP400 does
-//   not run the fx-CG50 clocks bsp_cfg.h assumes, see tick/rtc in the window)
-//   386 guest pc of the slowest translation so far (PROFILE=1 builds)
+//   not run the fx-CG50 clocks bsp_cfg.h assumes)
 #define HC_STAT_SAMPLES     64
 #define HC_STAT_HIST_BASE   74
 #define HC_STAT_HIST        128
 #define HC_STAT_HIST_N      256
-#define HC_STAT_N           387
+#define HC_STAT_N           386
 static __inline DWORD ClasspadHcGetStat(DWORD index) { return __asm1("trapa #251", index); }
 
 #endif
