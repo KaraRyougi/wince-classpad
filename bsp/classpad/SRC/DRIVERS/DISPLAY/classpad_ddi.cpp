@@ -105,6 +105,9 @@ static DWORD RegDword(LPCTSTR name, DWORD dflt)
 
 ClasspadGPE::ClasspadGPE()
 {
+    // The translator's panel console (dbt/rt/lcdcon.c) stops drawing at the
+    // first "CLASSPAD DDI:" in the log; say it before touching the panel.
+    RETAILMSG(1, (TEXT("CLASSPAD DDI: starting\r\n")));
     int panel  = (int)RegDword(TEXT("Panel"),  0xFFFFFFFF);
     int width  = (int)RegDword(TEXT("Width"),  0);
     int height = (int)RegDword(TEXT("Height"), 0);
