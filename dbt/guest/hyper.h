@@ -56,3 +56,10 @@ static inline void hc_lcd_blit(const void *src, unsigned pixels, unsigned port)
     register const void *r4 __asm__("r4") = src; register unsigned r5 __asm__("r5") = pixels; register unsigned r6 __asm__("r6") = port;
     __asm__ volatile ("trapa #0xFD" :: "r"(r4), "r"(r5), "r"(r6) : "memory");
 }
+/* FE: DCS panel push with the window set by the translator (atomic with the pixels) */
+static inline void hc_lcd_push(const void *src, unsigned top, unsigned rows, unsigned width)
+{
+    register const void *r4 __asm__("r4") = src; register unsigned r5 __asm__("r5") = top;
+    register unsigned r6 __asm__("r6") = rows; register unsigned r7 __asm__("r7") = width;
+    __asm__ volatile ("trapa #0xFE" :: "r"(r4), "r"(r5), "r"(r6), "r"(r7) : "memory");
+}

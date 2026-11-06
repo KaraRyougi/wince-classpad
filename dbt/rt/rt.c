@@ -729,6 +729,7 @@ static void invalidate_all_but_rom(void)
 #define HC_GETSTAT 0xFB                 /* r4 = index -> r0 (0 translations, 1 blocks, 2 invalidations, 3 asid switches, 4 ic misses, 5 debug-ring bytes, 6 device accesses, 7 full flushes, 8 FPU-disable exceptions, 9/10 device-aware range lo/hi) */
 #define HC_DEVRANGE 0xFC                /* tests: translate [r4, r5) device-aware from now on (drops all translations at the next lookup) */
 #define HC_LCD_BLIT 0xFD                /* r4 = pixels as the guest stores them (P1/P2 address), r5 = pixel count, r6 = 16-bit LCD data port: written natively */
+#define HC_LCD_PUSH 0xFE                /* DCS panel: r4 = pixels (P1/P2), r5 = first row, r6 = rows, r7 = width: CASET/PASET/RAMWR and the pixels in one go */
 
 #define REG_EXPEVT (*(volatile sf_u32 *)0xFF000024u)
 #define REG_TEA    (*(volatile sf_u32 *)0xFF00000Cu)
@@ -787,6 +788,22 @@ static void print_stats(void)
     print_trace();
 }
 
+/* HC_LCD_BLIT / HC_LCD_PUSH: n little-endian 16-bit pixels from guest memory to the panel's data port */
+static void lcd_pixels(const sf_u8 *s, sf_u32 n, volatile sf_u16 *port)
+{
+    dbt_stat.lcd_pixels += n;
+    if (((sf_u32)s & 3) == 0) {
+        const sf_u32 *w = (const sf_u32 *)s;
+        for (; n >= 2; n -= 2) {
+            sf_u32 v = *w++;
+            *port = (sf_u16)((v >> 24) | ((v >> 8) & 0xFF00u));
+            *port = (sf_u16)(((v >> 8) & 0xFFu) | ((v & 0xFFu) << 8));
+        }
+        s = (const sf_u8 *)w;
+    }
+    for (; n; n--, s += 2) *port = (sf_u16)(s[0] | ((sf_u16)s[1] << 8));
+}
+
 static int hypercall(dbt_gctx *ctx, sf_u32 nr)
 {
     dbt_stat.hypercalls++;
@@ -818,27 +835,29 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
     case HC_DEVRANGE:
         g_devrange_lo = ctx->r[4]; g_devrange_hi = ctx->r[5]; g_devrange_pending = 1;
         return RT_ACT_RESUME;
-    case HC_LCD_BLIT: {
+    case HC_LCD_BLIT:
         /* The display driver's push: each pixel is a little-endian 16-bit
          * value in guest memory, the panel wants it as one 16-bit bus write.
          * Translated code pays a swap sequence per store (and the memory load
          * before it); here it is a byte-pair per pixel. The source must be a
          * P1/P2 address (the driver passes the P2 alias of its physical frame
          * after writing the rows back), never a TLB-mapped one. */
-        const sf_u8 *s = (const sf_u8 *)ctx->r[4];
-        sf_u32 n = ctx->r[5];
-        volatile sf_u16 *port = (volatile sf_u16 *)ctx->r[6];
-        dbt_stat.lcd_pixels += n;
-        if (((sf_u32)s & 3) == 0) {
-            const sf_u32 *w = (const sf_u32 *)s;
-            for (; n >= 2; n -= 2) {
-                sf_u32 v = *w++;
-                *port = (sf_u16)((v >> 24) | ((v >> 8) & 0xFF00u));
-                *port = (sf_u16)(((v >> 8) & 0xFFu) | ((v & 0xFFu) << 8));
-            }
-            s = (const sf_u8 *)w;
-        }
-        for (; n; n--, s += 2) *port = (sf_u16)(s[0] | ((sf_u16)s[1] << 8));
+        lcd_pixels((const sf_u8 *)ctx->r[4], ctx->r[5], (volatile sf_u16 *)ctx->r[6]);
+        return RT_ACT_RESUME;
+    case HC_LCD_PUSH: {
+        /* The same with the DCS window set here, so nothing of ours (the
+         * panel console) can land between the driver's window commands and
+         * its pixels: r5 = first row, r6 = rows, r7 = width, the data port
+         * and RS pin as in bsp/classpad/SRC/INC/classpad_lcd.h. */
+        volatile sf_u16 *port = (volatile sf_u16 *)0xB4000000u;
+        volatile sf_u8 *prdr = (volatile sf_u8 *)0xA405013Cu;
+        sf_u32 top = ctx->r[5], rows = ctx->r[6], width = ctx->r[7], x1 = width - 1, y1 = top + rows - 1;
+#define DCS_CMD(c) do { *prdr = (sf_u8)(*prdr & ~0x10u); *port = (sf_u16)(c); *prdr = (sf_u8)(*prdr | 0x10u); } while (0)
+        DCS_CMD(0x2A); *port = 0; *port = 0; *port = (sf_u16)(x1 >> 8); *port = (sf_u16)(x1 & 0xFF);
+        DCS_CMD(0x2B); *port = (sf_u16)(top >> 8); *port = (sf_u16)(top & 0xFF); *port = (sf_u16)(y1 >> 8); *port = (sf_u16)(y1 & 0xFF);
+        DCS_CMD(0x2C);
+#undef DCS_CMD
+        lcd_pixels((const sf_u8 *)ctx->r[4], rows * width, port);
         return RT_ACT_RESUME;
     }
     case HC_GETSTAT: {

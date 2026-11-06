@@ -92,6 +92,10 @@ it, so `NK_FLASH` stays 0x81000000 and the usable window ends at 0x13E0000:
     `dbt_halt` takes the panel back to show the last lines, the halt reason
     and the last exception context, then masks interrupts (BL=1) before
     sleeping so a dead kernel is not "rebooted" by the next tick.
+    With `"Console"=dword:1` under the display driver's registry key the
+    driver signs on with "console kept", never pushes the top 96 rows and
+    pushes atomically (`HC_LCD_PUSH`), so the log stays visible beside the
+    running desktop: the way to read driver messages on the device.
   - `nkflash.hhk`: the same flasher as a tool of its own (flash without
     booting). It writes `\fls0\NK.bin` (Platform Builder's output, copied
     to the calculator's USB storage) into the window: an XIP build has each

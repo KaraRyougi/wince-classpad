@@ -386,7 +386,11 @@ via hypercall 0xF1):
   5 debug-ring bytes, 6 device accesses), FC translate a range device-aware
   from now on (tests), FD push pixels to the LCD data port natively
   (`hc_lcd_blit`: r4 = pixels as the guest stores them at a P1/P2 address,
-  r5 = count, r6 = port; the display driver's row push, 2026-11-05).
+  r5 = count, r6 = port; the display driver's row push, 2026-11-05), FE the
+  same for the DCS panel with CASET/PASET/RAMWR issued inside the hypercall
+  (`hc_lcd_push`: r4 = pixels, r5 = first row, r6 = rows, r7 = width; the
+  `dcs` guest checks it), so the panel console cannot write between the
+  driver's window commands and its pixels.
 - Address spaces: blocks are keyed by virtual pc. A block of TLB-mapped
   code (pc < 0x80000000) also records the ASID it was translated under and
   the physical address of its first instruction, found by scanning the UTLB

@@ -24,6 +24,7 @@
 #include "classpad_hc.h"
 
 #define DISP_PUSH_MS        50
+#define DISP_CONSOLE_ROWS   96              // rows the translator's console keeps (rt/lcdcon.c LINES * CELL_H)
 #define DISP_REG_KEY        TEXT("Drivers\\Display\\ClassPad")
 
 static ULONG g_bitMasks[] = { 0xF800, 0x07E0, 0x001F };
@@ -66,7 +67,8 @@ class ClasspadGPE : public GPE
     volatile BOOL       m_displayOn;        // DCS: DISPON sent (after the first push)
     BYTE               *m_pFrame;           // the primary surface, physically contiguous (AllocPhysMem)
     ULONG               m_framePa;          // its physical address
-    BOOL                m_blit;             // push rows through the translator (HC_LCD_BLIT), registry "Blit"
+    int                 m_blit;             // registry "Blit": 1 = HC_LCD_PUSH (default), 2 = HC_LCD_BLIT with our window commands, 0 = translated stores
+    int                 m_consoleRows;      // top rows left to the translator's console (registry "Console"), else 0
 
 public:
     ClasspadGPE();
@@ -106,8 +108,12 @@ static DWORD RegDword(LPCTSTR name, DWORD dflt)
 ClasspadGPE::ClasspadGPE()
 {
     // The translator's panel console (dbt/rt/lcdcon.c) stops drawing at the
-    // first "CLASSPAD DDI:" in the log; say it before touching the panel.
-    RETAILMSG(1, (TEXT("CLASSPAD DDI: starting\r\n")));
+    // first "CLASSPAD DDI: " in the log unless the next word is "console":
+    // registry "Console"=1 keeps its log in the top rows, which are then
+    // never pushed, and pushes atomically through HC_LCD_PUSH. Said before
+    // the panel is touched.
+    m_consoleRows = RegDword(TEXT("Console"), 0) ? DISP_CONSOLE_ROWS : 0;
+    RETAILMSG(1, (m_consoleRows ? TEXT("CLASSPAD DDI: console kept\r\n") : TEXT("CLASSPAD DDI: starting\r\n")));
     int panel  = (int)RegDword(TEXT("Panel"),  0xFFFFFFFF);
     int width  = (int)RegDword(TEXT("Width"),  0);
     int height = (int)RegDword(TEXT("Height"), 0);
@@ -139,8 +145,9 @@ ClasspadGPE::ClasspadGPE()
 
     // The frame lives in physically contiguous memory so the push can hand
     // its rows to the translator by physical address (PushRows). "Blit"=0
-    // in the registry keeps the translated store loop instead.
-    m_blit    = RegDword(TEXT("Blit"), 1) != 0;
+    // in the registry keeps the translated store loop instead, 2 the
+    // pixels-only hypercall with the window commands from here.
+    m_blit    = (int)RegDword(TEXT("Blit"), 1);
     m_framePa = 0;
     m_pFrame  = (BYTE *)AllocPhysMem(width * 2 * height, PAGE_READWRITE, 0, 0, &m_framePa);
     if (m_pFrame) m_pPrimarySurface = new GPESurf(width, height, m_pFrame, width * 2, gpe16Bpp);
@@ -279,37 +286,49 @@ void ClasspadGPE::PushRows(int top)
     const BYTE *fb = (const BYTE *)m_pPrimarySurface->Buffer();
     int stride = m_pPrimarySurface->Stride(), width = m_nScreenWidth, height = m_nScreenHeight, x, y;
     if (!fb) return;
-    if (m_panel == LCD_PANEL_DCS) {
-        // window columns 0..width-1, rows top..height-1; RAMWR resets the cursor to its corner
-        LcdCommand(LCD_DCS_CASET);
-        LcdParam(0);                        LcdParam(0);
-        LcdParam((UCHAR)((width - 1) >> 8)); LcdParam((UCHAR)(width - 1));
-        LcdCommand(LCD_DCS_PASET);
-        LcdParam((UCHAR)(top >> 8));         LcdParam((UCHAR)top);
-        LcdParam((UCHAR)((height - 1) >> 8)); LcdParam((UCHAR)(height - 1));
-        LcdCommand(LCD_DCS_RAMWR);
-    } else {
-        LcdWriteReg(LCD_REG_HSTART, (USHORT)((LCD_CG100_GRAM_COLS - 1) - (LCD_CG100_COL0 + width - 1)));
-        LcdWriteReg(LCD_REG_HEND,   (USHORT)((LCD_CG100_GRAM_COLS - 1) - LCD_CG100_COL0));
-        LcdWriteReg(LCD_REG_VSTART, (USHORT)top);
-        LcdWriteReg(LCD_REG_VEND,   (USHORT)(height - 1));
-        LcdWriteReg(LCD_REG_HADDR,  0);
-        LcdWriteReg(LCD_REG_VADDR,  0);
-        LcdSelect(LCD_REG_DATA);
-    }
-    if (m_pFrame && m_blit && ClasspadCanTrap()) {
-        // Native push by the translator (HC_LCD_BLIT, docs/04): write the
-        // rows back from the cache, then hand it the P2 alias of their
-        // physical address. One hypercall replaces width*rows translated
-        // stores, each of which cost a swap sequence.
+    if (top < m_consoleRows) top = m_consoleRows;          // the console's rows are not ours
+    if (top >= height) return;
+    if (m_panel == LCD_PANEL_DCS && m_pFrame && m_blit == 1 && ClasspadCanTrap()) {
+        // Native push by the translator with the window set there too
+        // (HC_LCD_PUSH, docs/04): write the rows back from the cache, then
+        // hand it the P2 alias of their physical address. One hypercall
+        // replaces width*rows translated stores, each of which cost a swap
+        // sequence, and nothing the translator prints (its panel console)
+        // can land between the window commands and the pixels.
         const BYTE *src = fb + top * stride;
         DWORD len = (DWORD)(height - top) * stride;
         CacheRangeFlush((LPVOID)src, len, CACHE_SYNC_WRITEBACK);
-        ClasspadHcLcdBlit(0xA0000000 | ((m_framePa + top * stride) & 0x1FFFFFFF), (DWORD)(height - top) * width, LCD_DATA_PORT);
+        ClasspadHcLcdPush(0xA0000000 | ((m_framePa + top * stride) & 0x1FFFFFFF), (DWORD)top, (DWORD)(height - top), (DWORD)width);
     } else {
-        for (y = top; y < height; y++) {
-            const USHORT *row = (const USHORT *)(fb + y * stride);
-            for (x = 0; x < width; x++) LcdWriteData(row[x]);
+        if (m_panel == LCD_PANEL_DCS) {
+            // window columns 0..width-1, rows top..height-1; RAMWR resets the cursor to its corner
+            LcdCommand(LCD_DCS_CASET);
+            LcdParam(0);                        LcdParam(0);
+            LcdParam((UCHAR)((width - 1) >> 8)); LcdParam((UCHAR)(width - 1));
+            LcdCommand(LCD_DCS_PASET);
+            LcdParam((UCHAR)(top >> 8));         LcdParam((UCHAR)top);
+            LcdParam((UCHAR)((height - 1) >> 8)); LcdParam((UCHAR)(height - 1));
+            LcdCommand(LCD_DCS_RAMWR);
+        } else {
+            LcdWriteReg(LCD_REG_HSTART, (USHORT)((LCD_CG100_GRAM_COLS - 1) - (LCD_CG100_COL0 + width - 1)));
+            LcdWriteReg(LCD_REG_HEND,   (USHORT)((LCD_CG100_GRAM_COLS - 1) - LCD_CG100_COL0));
+            LcdWriteReg(LCD_REG_VSTART, (USHORT)top);
+            LcdWriteReg(LCD_REG_VEND,   (USHORT)(height - 1));
+            LcdWriteReg(LCD_REG_HADDR,  0);
+            LcdWriteReg(LCD_REG_VADDR,  0);
+            LcdSelect(LCD_REG_DATA);
+        }
+        if (m_pFrame && m_blit && ClasspadCanTrap()) {
+            // pixels by the translator (HC_LCD_BLIT), the window by us: "Blit"=2, or the R61524
+            const BYTE *src = fb + top * stride;
+            DWORD len = (DWORD)(height - top) * stride;
+            CacheRangeFlush((LPVOID)src, len, CACHE_SYNC_WRITEBACK);
+            ClasspadHcLcdBlit(0xA0000000 | ((m_framePa + top * stride) & 0x1FFFFFFF), (DWORD)(height - top) * width, LCD_DATA_PORT);
+        } else {
+            for (y = top; y < height; y++) {
+                const USHORT *row = (const USHORT *)(fb + y * stride);
+                for (x = 0; x < width; x++) LcdWriteData(row[x]);
+            }
         }
     }
     if (m_panel == LCD_PANEL_DCS && !m_displayOn) {

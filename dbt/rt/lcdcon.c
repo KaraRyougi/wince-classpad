@@ -10,11 +10,13 @@
  * Every byte also lands in a text ring, drawn or not, so a halt can show the
  * last lines printed after the hand-over.
  *
- * Hand-over: the display driver's sign-on "CLASSPAD DDI:" (classpad_ddi.cpp)
- * follows its PanelInit and precedes its first push, so from that string on
- * nothing is drawn (a window command of ours between two of the driver's
- * pixel writes would move its cursor). dbt_halt takes the panel back: the
- * kernel is dead then and the driver will never push again. */
+ * Hand-over: the display driver's first log line "CLASSPAD DDI: starting"
+ * (classpad_ddi.cpp, before it touches the panel) ends the drawing: a window
+ * command of ours between two of the driver's pixel writes would move its
+ * cursor. With registry Console=1 the driver says "CLASSPAD DDI: console
+ * kept" instead, never pushes the top rows and pushes atomically (HC_LCD_PUSH),
+ * and the log stays on screen. dbt_halt takes the panel back in any case:
+ * the kernel is dead then and the driver will never push again. */
 #ifdef DBT_LCD_CONSOLE
 #include "rt.h"
 #include "lcdcon.h"
@@ -34,7 +36,7 @@ static char   g_text[LINES][COLS];
 static int    g_col, g_line;
 static int    g_state;                 /* 0 untouched, 1 drawing, 2 handed over, 3 halted (drawing again) */
 static int    g_match;                 /* bytes of the hand-over string matched so far */
-static const char g_handover[] = "CLASSPAD DDI:";
+static const char g_handover[] = "CLASSPAD DDI: ";   /* then 'c' ("console kept"): the driver leaves the top rows to us */
 
 static void cmd(unsigned c)  { PRDR = (sf_u8)(PRDR & ~0x10u); PORT = (sf_u16)c; PRDR = (sf_u8)(PRDR | 0x10u); }
 static void dat(unsigned v)  { PORT = (sf_u16)v; }
@@ -113,8 +115,10 @@ void lcdcon_putc(int c)
     if (g_state == 0) first_use();
     /* the display driver's sign-on: hand the panel over */
     if (g_state == 1) {
-        if ((char)c == g_handover[g_match]) { if (!g_handover[++g_match]) g_state = 2; }
+        if (g_match < 0) { if (c != 'c') g_state = 2; g_match = 0; }   /* the byte after the prefix decides */
+        else if ((char)c == g_handover[g_match]) { if (!g_handover[++g_match]) g_match = -1; }
         else g_match = ((char)c == g_handover[0]) ? 1 : 0;
+        if (g_state == 2) return;
     }
     if (c == '\n') { newline(); return; }
     if (c == '\r') return;

@@ -14,6 +14,8 @@
     "Display"="classpad_ddi.dll"
 
 [HKEY_LOCAL_MACHINE\Drivers\Display\ClassPad]
+;   "Blit"=dword:1    ; the push: 1 = HC_LCD_PUSH by the translator (default), 2 = HC_LCD_BLIT with our window commands, 0 = translated stores
+;   "Console"=dword:1 ; debug: leave the top 96 rows to the translator's panel console (rt/lcdcon.c), never push them
     "Width"=dword:140
     "Height"=dword:210
 

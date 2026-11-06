@@ -35,6 +35,7 @@ extern void hhk_takeover(const void *src, void *dst, unsigned len, unsigned entr
 #error GUEST_RAM_HI must come from the Makefile
 #endif
 
+#ifndef HHK_EMU
 /* ROMHDR of an XIP image: pointer at image+0x44 (after "ECEC"), little-endian
  * fields dllfirst, dlllast, physfirst, physlast, nummods, ulRAMStart,
  * ulRAMFree, ulRAMEnd ... (tools/nkbin.py). 0 when there is no XIP image. */
@@ -47,6 +48,7 @@ static u32 ce_ram_end(void)
     if (hdr < NK_FLASH || hdr > NK_FLASH + NK_FLASH_MAX - 0x60) return 0;
     return le32((const u8 *)hdr + 7 * 4);
 }
+#endif
 
 static const char *ce_image_kind(void)
 {
