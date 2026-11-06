@@ -84,15 +84,22 @@ test image); never on the board, and never measured for current.
 | 9 | 0x80020e9e.. | PFC 0xA405012A |= 0x80; 0xA405010A = (&0x3FFF)|0x4000; 0xA4050162 |= 4; 0xA4050142 = (&0xFFCF)|0x10 | more pin setup (Clear column input) |
 | 10 | loop 0x80020ed2 | wake reason = 0; 0x80080df0(0); 0x80080dde; **SR = 0x70000000**; **STBCR = 0x21**; call 0x80085e74 | |
 
-### 3.2 SDRAM into self-refresh (0x8002095e)
+### 3.2 Memory standby (0x8002095e)
 
 ```
-FEC10048 = 0xA55A0000      ; keyed companion register
-FEC10044 = 0
-FEC10044 |= 2              ; SDRAM controller: self-refresh / standby request
-A40501C3 |= 0x12           ; PFC byte
-A405010E &= 0xCFFF         ; PFC word
+FEC10048 = 0xA55A0000      ; keyed companion register (refresh timer off)
+FEC10044 = 0               ; SDRAM controller
+A4150024 |= 2              ; PLLCR bit 1 (CKOFF on the SH7724: the CKO/SDRAM clock)
+A40501C3 |= 0x12           ; PULCRBSC: bus pin pull-ups
+A405010E &= 0xCFFF         ; PHCR: PH6 to function 0
 ```
+
+Corrected 2026-11-06 after the board failure (section 8). The first
+version of this table read the third line as `FEC10044 |= 2`: in the ROM,
+`r1` is reloaded with 0xA4150024 between the SDCR write and the `or #2`.
+The OS keeps using its SDRAM stack after this function until SLEEP (and
+again right after the wake-up, before 0x800209c4), so the SDRAM stays
+usable here; the self-refresh itself happens on the standby entry.
 
 0xFEC10044/48/4C/50 do not exist on the SH7724 (its BSC ends at CS6BWCR
 0xFEC10040 and uses the DBSC for DDR); they are the SH7305's SDR-SDRAM
@@ -208,9 +215,10 @@ Entry, with the guest interrupts already masked:
 2. `ocbwb`/CCR write-back of everything dirty (the kernel's flush covered the
    guest's writes; the translator wrote `ctx` and the block since), then
    CCR = ICI|OCI, CCR = 0. MMUCR = TI (flush), AT=0.
-3. STBCR = 0x21, SR = 0x70000000 (MD, RB, BL), SDRAM into self-refresh as in
-   3.2 (FEC10048 = 0xA55A0000, FEC10044 = 0, FEC10044 |= 2), KEYSC priority
-   0, INTEVT = 0, `sleep`. Keep the exact OS order; the SDRAM step last.
+3. STBCR = 0x21, SR = 0x70000000 (MD, RB, BL), memory standby as in
+   3.2 (FEC10048 = 0xA55A0000, FEC10044 = 0, PLLCR |= 2, PULCRBSC |= 0x12,
+   PHCR &= 0xCFFF), KEYSC priority 0, INTEVT = 0, `sleep`. Keep the exact
+   OS order; the SDRAM step last.
 
 Resume stub at BAR (native, in RS memory, SR = reset, SDRAM untouched yet):
 
@@ -294,3 +302,49 @@ casio-emu maps 16 KiB but the manual's part has 2 KiB).
 4. Board: first with the LCD left on (no DDI power handler) to see the resume
    path work at all, then with the drivers' handlers, then measure the current
    with the panel off.
+
+## 8. Board failure and fix (2026-11-06)
+
+First board test (NK-claude.bin with `wince-eact.hh3`, both of 2026-11-06):
+on suspend the panel turned white; Clear/ON then reset the calculator into
+the Casio OS instead of resuming CE.
+
+**Reset into the Casio OS: the memory-standby step was wrong.** Section 3.2
+had misread the OS: the third write of 0x8002095e is PLLCR (0xA4150024)
+bit 1, not SDCR bit 1. `rt/standby.S` therefore wrote SDCR = 2 (an unknown
+SDRAM controller setting), never set PLLCR bit 1 nor the two pin registers,
+and had switched the refresh timer off: the SDRAM was not put into
+self-refresh and lost its contents while the core was off. Clear/ON did
+wake the chip (KEYSC autonomous scan): the resume stub, which runs from RS
+memory, re-initialised the SDRAM controller and jumped back into the
+translator in SDRAM with SR.BL = 1; with the code gone, the first exception
+(an illegal instruction or address error) under BL = 1 is a reset, and the
+boot ROM started the Casio OS. casio-emu does not model the SDRAM refresh,
+which is why `GUEST=standby` and the CE run passed. Fix: the step is now
+0x8002095e verbatim; the resume stub undoes it in the order of 0x800209c4
+(PLLCR bits 1-2 back, SDCR = 0, pins back to their saved values, the
+R64CNT wait, the SDRAM controller re-init), checking the save block's magic
+first. Also from the OS: SR = 0x70000000 for SLEEP (IMASK 0; with IMASK 15
+an RTC alarm could not end the standby) and INTEVT = 0.
+
+**White panel: the backlight.** The same white screen was reported with the
+older CPU-sleep suspend (docs/04 "Physical suspend failure"). The panel is
+normally white and its backlight follows the DCS brightness register 0x51,
+not sleep mode: the OS powers the panel down with 0x51 = 0, DISPOFF, SLPIN
+(ROM 0x80038a9a; 0x80038550 is its brightness setter, 0x8006407a its panel
+ID read). The DDI's power handler sent only DISPOFF + SLPIN, so the
+backlight stayed on behind a blank panel. It now reads the level back
+(RDDISBV 0x52: a dummy read, then the byte; the emulator returns 0, then
+0xFF is used), writes 0x51 = 0 before DISPOFF, and writes the level back
+after SLPOUT on resume. Not copied from the OS: its deep standby
+(0xB9 FF 52 98, 0xBD 00, 0xB1 51), which needs the panel's full re-init on
+power-on, and the PH5 (0xA405012E bit 5) and timer 0xA44C0020 bit 2
+switches that follow it.
+
+On the board, look for: the panel going dark (not white) on suspend; after
+Clear/ON, CE's desktop back with its previous contents (not a Casio OS
+boot) and the backlight at its old level; a second suspend/resume cycle;
+and, if possible, an RTC alarm wake (a CE notification or alarm). If it
+still resets into the Casio OS, the next suspects are the SDRAM re-init
+order in the stub and the cache write-back before SLEEP.
+

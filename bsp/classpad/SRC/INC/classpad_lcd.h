@@ -70,6 +70,9 @@
 #define LCD_DCS_RAMWR       0x2C            // then one RGB565 pixel per 16-bit write
 #define LCD_DCS_COLMOD      0x3A            // pixel format, 0x55 = 16 bpp
 #define LCD_DCS_RDID        0xDA            // reads 0x16 on the modelled panel
+#define LCD_DCS_WRDISBV     0x51            // display brightness, one byte: the backlight level (stock OS 0x80038550)
+#define LCD_DCS_RDDISBV     0x52            // read it back: a dummy read, then the byte
+#define LCD_BRIGHTNESS_DEFAULT 0xFF         // when RDDISBV gives nothing usable (the emulator returns 0)
 #define LCD_DCS_COLMOD_16BPP 0x55
 
 static __inline USHORT LcdSwap16(USHORT v) { return (USHORT)((v >> 8) | (v << 8)); }
@@ -95,5 +98,11 @@ static __inline void LcdWriteReg(USHORT reg, USHORT v)
 // DCS: command, then parameter bytes (one per 16-bit write)
 static __inline void LcdCommand(UCHAR cmd) { LcdSelect(cmd); }
 static __inline void LcdParam(UCHAR v)     { LcdWriteData(v); }
+// DCS read: after the command one dummy read, then the parameter bytes
+// (the stock OS's panel ID read, 0x8006407a)
+static __inline UCHAR LcdReadParam(void)
+{
+    return (UCHAR)LcdSwap16(*(volatile USHORT *)LCD_DATA_PORT);
+}
 
 #endif
