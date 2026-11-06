@@ -363,11 +363,18 @@ rows per stage, top to bottom, and holds each for about 0.5 s:
 | 2 | yellow | resume stub | the save block's magic is intact |
 | 3 | green | resume stub | the SDRAM controller is re-initialised |
 | 4 | cyan | resume stub | caches, MMU registers and VBR restored; next: the jump into SDRAM |
-| 5 | blue | rt.c `dbt_standby` | the translator's C code runs again (SDRAM survived) |
-| 6 | white | rt.c `dbt_standby` | IL memory and XYRAM reloaded (`onchip_restore`, claude/ram-layout) |
-| 7 | magenta / grey | rt.c `hypercall` | CE made its first hypercall after the wake-up; grey: it was HC_STANDBY again (the OAL refused the wake reason and sleeps again, panel left lit) |
+| 5 | blue / yellow | rt.c `dbt_standby` | the translator's C code runs again (SDRAM survived); yellow: the RTC alarm flag is set (an alarm ended the standby) |
+| 6 | white / orange / purple / black | rt.c `dbt_standby` | IL memory and XYRAM reloaded (`onchip_restore`, claude/ram-layout) and read back: white both match, orange IL differs, purple XYRAM differs, black both |
+| 7 | steel blue | rt.c `dbt_standby` | about to return into the IL-memory stubs |
+| 8 | magenta / grey / brown | rt.c `dbt_exc_c` | the first exception after the wake-up reached C through the stubs: magenta a CE hypercall, grey HC_STANDBY again (the OAL refused the wake reason and sleeps again, panel left lit), brown any other exception or interrupt |
 
-After stripe 7 the display driver repaints the desktop if the resume
+Third board test (claude/ram-layout image, 7-stripe build): the stripes
+appeared right after Suspend, without Clear/ON, and the last one was
+stripe 6 (white) before the reset into the Casio OS. So the chip woke at
+once, the stub, the SDRAM and the C code were fine, and the failure is
+after the on-chip memories were reloaded. Stripes 6-8 above split that.
+
+After stripe 8 the display driver repaints the desktop if the resume
 completes. No stripe at all means the wake-up never reached BAR (or the
 LCD bus is not usable at that point). Verified in casio-emu
 (`make GUEST=standby STANDBY_DIAG=1 run` with `HLE_FBDUMP`: all

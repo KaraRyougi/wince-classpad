@@ -2103,7 +2103,7 @@ static void onchip_restore(void)
 extern const sf_u32 dbt_standby_stub[], dbt_standby_stub_end[];
 static sf_u32 g_standbys, g_standby_wakes;
 #ifdef DBT_STANDBY_DIAG
-/* make STANDBY_DIAG=1 (docs/06 section 8): stripes 5-7 of the resume
+/* make STANDBY_DIAG=1 (docs/06 section 8): stripes 5-8 of the resume
  * path; standby.S paints 1-4. Rows 66*(stage-1).. full width, ~0.5 s each. */
 static sf_u32 g_diag_woke;
 static void diag_stripe(sf_u32 stage, sf_u32 colour)
@@ -2134,11 +2134,22 @@ static sf_u32 dbt_standby(void)
     onchip_save();                              /* last: nothing below writes XYRAM before the sleep */
     r = dbt_standby_sleep(block);
 #ifdef DBT_STANDBY_DIAG
-    if (r) diag_stripe(5, 0x001F);              /* blue: the translator's C code in SDRAM runs again */
+    /* 5: the translator's C code in SDRAM runs again; blue, or yellow if the
+     * RTC alarm flag (RCR1.AF) is set, i.e. an alarm ended the standby */
+    if (r) diag_stripe(5, (*(volatile sf_u8 *)0xA413FEDCu & 1) ? 0xFFE0 : 0x001F);
 #endif
     if (r) onchip_restore();                    /* before anything returns into the IL-memory stubs */
 #ifdef DBT_STANDBY_DIAG
-    if (r) { diag_stripe(6, 0xFFFF); g_diag_woke = 1; }    /* white: IL memory and XYRAM reloaded */
+    /* 6: IL memory and XYRAM reloaded and read back: white = both match,
+     * orange = IL memory differs, purple = XYRAM differs, black = both */
+    if (r) {
+        sf_u32 il_bad = 0, xy_bad = 0, k, m;
+        m = (sf_u32)(eilram - rilram);
+        for (k = 0; k < m; k++) if (((volatile sf_u32 *)rilram)[k] != lilram[k]) il_bad = 1;
+        m = (sf_u32)(exyram - rxyram);
+        for (k = 0; k < m; k++) if (((volatile sf_u32 *)rxyram)[k] != g_xyram_save[k]) xy_bad = 1;
+        diag_stripe(6, il_bad ? (xy_bad ? 0x0000 : 0xFD20) : (xy_bad ? 0x780F : 0xFFFF));
+    }
 #endif
     /* back, with the core reset if r == 1: the stub restored caches, MMU
      * registers and VBR; the rest of the machine is the guest's business */
@@ -2149,17 +2160,15 @@ static sf_u32 dbt_standby(void)
         invalidate_range(0, 0x80000000u, 1);    /* the UTLB is empty: user mappings are gone */
     }
     dbt_puts(r ? "[dbt] R-standby wake\n" : "[dbt] R-standby not entered\n");
+#ifdef DBT_STANDBY_DIAG
+    if (r) { diag_stripe(7, 0x5D1C); g_diag_woke = 1; }    /* 7, steel blue: returning into the IL-memory stubs */
+#endif
     return r;
 }
 
 static int hypercall(dbt_gctx *ctx, sf_u32 nr)
 {
     dbt_stat.hypercalls++;
-#ifdef DBT_STANDBY_DIAG
-    /* the guest's first hypercall after a wake-up: magenta = CE runs again,
-     * grey = it is the OAL going straight back to sleep (wake reason refused) */
-    if (g_diag_woke) { g_diag_woke = 0; diag_stripe(7, nr == HC_STANDBY ? 0x8410 : 0xF81F); }
-#endif
     dbt_dbgring_drain();
     switch (nr) {
     case HC_EXIT:
@@ -2783,6 +2792,16 @@ static int exc_c_body(dbt_gctx *ctx);
 int dbt_exc_c(dbt_gctx *ctx)
 {
     int act;
+#ifdef DBT_STANDBY_DIAG
+    /* 8: the first exception after a wake-up reached C through the IL-memory
+     * stubs: magenta = a hypercall from CE, grey = HC_STANDBY again (the OAL
+     * refused the wake reason), brown = any other exception or interrupt */
+    if (g_diag_woke) {
+        sf_u32 hc = (ctx->vec_off == 0x100 && ctx->expevt == 0x160) ? ((ctx->tra >> 2) & 0xFF) : 0;
+        g_diag_woke = 0;
+        diag_stripe(8, hc == HC_STANDBY ? 0x8410 : hc >= 0xF0 ? 0xF81F : 0xA145);
+    }
+#endif
     bank_normalize(ctx);
     act = exc_c_body(ctx);
     bank_normalize(ctx);
