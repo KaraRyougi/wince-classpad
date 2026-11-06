@@ -267,6 +267,7 @@ static int g_window_kind, g_tail_from;      /* sampling profiler: see sample_tic
 #if defined(DBT_CONST_DEVICE_ADDRESS) || defined(DBT_UNIFORM_STORE)
 static sf_u32 g_const_device_blocks;
 #endif
+static sf_u32 g_xlat_max_pc;                /* guest pc of the slowest translation (PROFILE=1) */
 static void print_stats(void);
 
 /* ------------------------------------------- address spaces and the TLB */
@@ -1405,6 +1406,9 @@ void dbt_rt_init(const dbt_rt_config *cfg)
 static dbt_block *translate_at(sf_u32 gpc)
 {
     PROFILE_BEGIN;
+#ifdef DBT_PROFILE
+    sf_u32 xlat_max_before = g_profile[PROF_TRANSLATE].max;
+#endif
     dbt_block *b;
     sf_u32 host;
     sf_u32 fault = 0, publish_sr;
@@ -1552,6 +1556,9 @@ static dbt_block *translate_at(sf_u32 gpc)
     dbt_stat.translations++;
     dbt_stat.blocks = g_allocated;
     PROFILE_END(PROF_TRANSLATE);
+#ifdef DBT_PROFILE
+    if (g_profile[PROF_TRANSLATE].max != xlat_max_before) g_xlat_max_pc = gpc;
+#endif
     return b;
 }
 
@@ -1770,6 +1777,7 @@ static void invalidate_all_but_rom(void)
 #define HC_DEVRANGE 0xFC                /* tests: translate [r4, r5) device-aware from now on (drops all translations at the next lookup) */
 #define HC_LCD_BLIT 0xFD                /* r4 = pixels as the guest stores them (P1/P2 address), r5 = pixel count, r6 = 16-bit LCD data port: written natively */
 #define HC_LCD_PUSH 0xFE                /* DCS panel: r4 = pixels (P1/P2), r5 = first row, r6 = rows, r7 = width: CASET/PASET/RAMWR and the pixels in one go */
+#define HC_STANDBY 0xFF                 /* SH7305 R-standby (docs/06): r4 = flags (unused) -> r0 = 1 after a wake-up, 0 if the machine did not enter it */
 
 #define REG_EXPEVT (*(volatile sf_u32 *)0xFF000024u)
 #define REG_TEA    (*(volatile sf_u32 *)0xFF00000Cu)
@@ -1916,6 +1924,8 @@ static void sample_tick(sf_u32 gpc, int where)
 /* Machine state worth a look on the device (HC_GETSTAT 80-83) */
 #define REG_CCR    (*(volatile sf_u32 *)0xFF00001Cu)
 #define REG_FRQCR  (*(volatile sf_u32 *)0xA4150000u)
+#define REG_PLLCR  (*(volatile sf_u32 *)0xA4150024u)
+#define REG_FLLFRQ (*(volatile sf_u32 *)0xA4150050u)
 static sf_u32 rtc_seconds_of_day(void)
 {
     /* SH7305 RTC, BCD counters (bsp rtc.c reads the same registers) */
@@ -1955,6 +1965,9 @@ static sf_u32 sample_stat(sf_u32 index)
     case 120: return g_sample.win_tail_helper;
     case 121: return g_sample.win_hit;
     case 122: return g_sample.win_tramp;
+    case 384: return REG_PLLCR;         /* with FRQCR: the clock tree, to settle Pphi (see bsp_cfg.h) */
+    case 385: return REG_FLLFRQ;
+    case 386: return g_xlat_max_pc;
     default:
         if (index >= 85 && index < 85 + 2 * SAMPLE_INTEVTS) {
             unsigned k = (index - 85) / 2;
@@ -1993,6 +2006,8 @@ static void print_samples(void)
         dbt_puts(" "); dbt_puthex(g_sample.intevt[i].code); dbt_puts(":"); dbt_puthex(g_sample.intevt[i].count);
     }
     dbt_puts("\n[sample] ccr="); dbt_puthex(REG_CCR); dbt_puts(" mmucr="); dbt_puthex(REG_MMUCR);
+    dbt_puts(" pllcr="); dbt_puthex(REG_PLLCR); dbt_puts(" fllfrq="); dbt_puthex(REG_FLLFRQ);
+    dbt_puts(" xlat_max_pc="); dbt_puthex(g_xlat_max_pc);
     dbt_puts(" frqcr="); dbt_puthex(REG_FRQCR);
     /* the eight hottest buckets, physical and as the P1 address */
     for (i = 0; i < SAMPLE_HIST; i++) {
@@ -2091,6 +2106,40 @@ static void lcd_pixels(const sf_u8 *s, sf_u32 n, volatile sf_u16 *port)
     PROFILE_END(PROF_LCD);
 }
 
+/* R-standby (docs/06-deep-suspend.md, rt/standby.S). The save block and the
+ * resume stub live in the SH7305's RS memory, which keeps its contents while
+ * the core is powered off; the stock OS uses 0xFD800000..0xFD8003FF and a
+ * stack below 0xFD802000, so this block sits at 0xFD801000. */
+#define RS_BLOCK  0xFD801000u
+#define RS_STUB   0xFD801200u
+extern sf_u32 dbt_standby_sleep(sf_u32 *block);
+extern const sf_u32 dbt_standby_stub[], dbt_standby_stub_end[];
+static sf_u32 g_standbys, g_standby_wakes;
+static sf_u32 dbt_standby(void)
+{
+    sf_u32 *stub = (sf_u32 *)RS_STUB, *block = (sf_u32 *)RS_BLOCK;
+    sf_u32 n = (sf_u32)(dbt_standby_stub_end - dbt_standby_stub), i, r;
+    for (i = 0; i < n; i++) stub[i] = dbt_standby_stub[i];
+    stub[n - 1] = RS_BLOCK;                     /* the stub's last longword: where the block is */
+    g_standbys++;
+    dbt_puts("[dbt] R-standby\n");
+    dbt_dbgring_drain();
+    r = dbt_standby_sleep(block);
+    /* back, with the core reset if r == 1: the stub restored caches, MMU
+     * registers and VBR; the rest of the machine is the guest's business */
+    *(volatile sf_u32 *)0xA4150030u = block[(0x40 + 0x10) / 4];     /* MSTPCR0 */
+    *(volatile sf_u32 *)0xA4150020u = block[(0x40 + 0x14) / 4];     /* STBCR */
+    if (r) {
+        g_standby_wakes++;
+        invalidate_range(0, 0x80000000u, 1);    /* the UTLB is empty: user mappings are gone */
+#ifdef DBT_PROFILE
+        { extern void dbt_bench_timer_init(void); dbt_bench_timer_init(); }   /* TMU1 was powered off */
+#endif
+    }
+    dbt_puts(r ? "[dbt] R-standby wake\n" : "[dbt] R-standby not entered\n");
+    return r;
+}
+
 static int hypercall(dbt_gctx *ctx, sf_u32 nr)
 {
     dbt_stat.hypercalls++;
@@ -2113,6 +2162,7 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
         else dbt_invalidate(ctx->r[4], ctx->r[4] + ctx->r[5]);
         return RT_ACT_RESUME;
     case HC_STATS: print_stats(); return RT_ACT_RESUME;
+    case HC_STANDBY: ctx->r[0] = dbt_standby(); return RT_ACT_RESUME;
     case HC_BENCH: ctx->r[0] = dbt_bench_native(ctx->r[4], ctx->r[5]); return RT_ACT_RESUME;
     case HC_TLB_INVAL:
         if (ctx->r[5] == 0) invalidate_range(0, 0x80000000u, 1);

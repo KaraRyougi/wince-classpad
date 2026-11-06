@@ -23,7 +23,7 @@
 #include "classpad_hc.h"
 
 #define POLL_MS         2000
-#define NSTAT           (HC_STAT_HIST + HC_STAT_HIST_N)
+#define NSTAT           HC_STAT_N
 #define LINES           15
 #define LINE_H          13
 #define TMU1_HZ         7372800
@@ -116,6 +116,7 @@ static void Build(PAGE *p)
             ms, ratio / 1000, ratio % 1000, t / 1000);
     }
     Add(p, TEXT("CCR %08X  MMUCR %08X  FRQCR %08X"), g_now[80], g_now[81], g_now[82]);
+    Add(p, TEXT("PLLCR %08X  FLLFRQ %08X   slowest xlat at %08X"), g_now[384], g_now[385], g_now[386]);
     Add(p, TEXT("xlat/s %u  blocks %u  flush/s %u  inval/s %u"), Rate(0, ms), g_now[1], Rate(7, ms), Rate(2, ms));
     Add(p, TEXT("asid/s %u  icmiss/s %u  lookup/s %u  tlbhook/s %u"), Rate(3, ms), Rate(4, ms), Rate(27, ms), Rate(28, ms));
     Add(p, TEXT("exc/s gen %u  tlb %u  irq %u   rte/s %u  ldcsr/s %u"), Rate(77, ms), Rate(78, ms), Rate(79, ms), Rate(25, ms), Rate(26, ms));

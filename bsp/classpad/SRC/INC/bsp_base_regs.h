@@ -62,6 +62,7 @@
 #define INTC_IPRA                   INTC_IPR(0)     // TMU0 bits 15:12, TMU1 11:8, TMU2 7:4
 #define INTC_IPRB                   INTC_IPR(1)     // bits 7:4: touch contact (INTEVT 0x700)
 #define INTC_IPRF                   INTC_IPR(5)     // bits 15:12: KEYSC (INTEVT 0xBE0)
+#define INTC_IPRK                   INTC_IPR(10)    // bits 15:12: RTC (alarm INTEVT 0xA80, periodic 0xAA0, carry 0xAC0)
 #define INTC_IMR(n)                 (SH7305_REG_PA_INTC + 0x80 + 4 * (n))   // write 1 to mask
 #define INTC_IMCR(n)                (SH7305_REG_PA_INTC + 0xC0 + 4 * (n))   // write 1 to unmask
 #define INTC_IMR3_TOUCH             0x10            // ClassPad touch contact (casio-emu classpad.c)
@@ -69,6 +70,7 @@
 #define INTC_IMR4_TMU1              0x20
 #define INTC_IMR4_TMU2              0x40
 #define INTC_IMR5_KEYSC             0x80            // KEYSC (casio-emu keyboard.c)
+#define INTC_IMR10_RTC_ALARM        0x01            // RTC alarm (casio-emu rtc.c)
 
 // KEYSC key scan controller (register map in classpad_keysc.h)
 #define SH7305_REG_PA_KEYSC         0xA44B0000
@@ -81,7 +83,22 @@
 // bit 5 = touch contact line (0 while the panel is pressed; ClassPad only)
 #define SH7305_REG_PA_PRDR          0xA405013C
 
-// RTC (to be used by rtc.c later; BCD registers)
+// RTC (8-bit BCD counters and alarm registers, SH7724 section 27; Casio's
+// clock keeps running in it, rtc.c only reads the counters and uses the alarm)
 #define SH7305_REG_PA_RTC           0xA413FEC0
+#define RTC_R64CNT                  (SH7305_REG_PA_RTC + 0x00)
+#define RTC_RSECCNT                 (SH7305_REG_PA_RTC + 0x02)
+#define RTC_RSECAR                  (SH7305_REG_PA_RTC + 0x10)  // bit 7 of each alarm register: compare it
+#define RTC_RMINAR                  (SH7305_REG_PA_RTC + 0x12)
+#define RTC_RHRAR                   (SH7305_REG_PA_RTC + 0x14)
+#define RTC_RWKAR                   (SH7305_REG_PA_RTC + 0x16)
+#define RTC_RDAYAR                  (SH7305_REG_PA_RTC + 0x18)
+#define RTC_RMONAR                  (SH7305_REG_PA_RTC + 0x1A)
+#define RTC_RCR1                    (SH7305_REG_PA_RTC + 0x1C)  // bit 7 CF, bit 4 CIE, bit 3 AIE, bit 0 AF
+#define RTC_RCR2                    (SH7305_REG_PA_RTC + 0x1E)  // bit 0 START
+#define RTC_RYRAR                   (SH7305_REG_PA_RTC + 0x20)
+#define RTC_RCR3                    (SH7305_REG_PA_RTC + 0x24)  // bit 7: compare the year alarm
+#define RTC_RCR1_AF                 0x01
+#define RTC_RCR1_AIE                0x08
 
 #endif

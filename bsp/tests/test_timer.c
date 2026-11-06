@@ -29,7 +29,7 @@ static UINT32 CurMSec, dwReschedTime, idleconv, curridlehigh, curridlelow;
 static void OALTimerQueryPerformanceFrequency(void) {}
 static void OALTimerQueryPerformanceCounter(void) {}
 static void (*pQueryPerformanceFrequency)(void), (*pQueryPerformanceCounter)(void);
-typedef struct { void (*pfnUpdateReschedTime)(DWORD); } OEM_STATE;
+typedef struct { void (*pfnUpdateReschedTime)(DWORD); void (*pfnInitClock)(void); } OEM_STATE;
 static OEM_STATE oem, *g_pOemGlobal = &oem;
 static UINT32 tcnt, tcor, tcr, tstr, programming_delay;
 static int reload_on_read, reload_before_write;

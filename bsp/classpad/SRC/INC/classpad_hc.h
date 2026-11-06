@@ -21,6 +21,7 @@
 #define HC_GETSTAT      0xFB        // r4 = index -> r0 (indices below; dbt/rt/rt.c is the reference)
 #define HC_LCD_BLIT     0xFD        // r4 = pixels (P1/P2 address, as the guest stores them), r5 = count, r6 = LCD data port: pushed natively
 #define HC_LCD_PUSH     0xFE        // DCS panel: r4 = pixels (P1/P2), r5 = first row, r6 = rows, r7 = width; window commands + pixels in one go
+#define HC_STANDBY      0xFF        // SH7305 R-standby (docs/06): r4 = flags (0) -> r0 = 1 after the wake-up, 0 if not entered
 
 // shcl: __asm(string, args...) places the arguments in r4, r5, ...; __asm1 returns r0
 extern DWORD __asm1(const char *, ...);
@@ -38,6 +39,7 @@ static __inline void ClasspadHcFlush(DWORD addr, DWORD len)     { __asm("trapa #
 static __inline void ClasspadHcTlbInval(DWORD addr, DWORD len)  { __asm("trapa #249", addr, len); }
 static __inline void ClasspadHcLcdBlit(DWORD src, DWORD pixels, DWORD port) { __asm("trapa #253", src, pixels, port); }
 static __inline void ClasspadHcLcdPush(DWORD src, DWORD top, DWORD rows, DWORD width) { __asm("trapa #254", src, top, rows, width); }
+static __inline DWORD ClasspadHcStandby(DWORD flags) { return __asm1("trapa #255", flags); }
 
 // HC_GETSTAT: one 32-bit counter of the translator (all wrap modulo 2^32:
 // take deltas). Works from user mode too (a trapa is a general exception the
@@ -57,6 +59,7 @@ static __inline void ClasspadHcLcdPush(DWORD src, DWORD top, DWORD rows, DWORD w
 //   32+3b, 33+3b, 34+3b: calls, TMU1 counts, max counts of PROFILE bucket b
 //   (0 translate, 1 asid, 2 tlb, 3 invalidate, 4 lcd, 5 flush, 6 exception
 //   delivery, 7 rte, 8 lookup); zero in non-profiling builds
+//   60 "DBTS" 0x44425453  61 stats ABI version (1)  62 features: bit 0 tick sampling, bit 1 PROFILE
 //   64 tick samples  65 in translated code  66 exit stub  67 stub window
 //   68 translating  69 helper  70 idle (sleep)  71 user-mode pcs  72 of those
 //   not in the ROM image  73 kernel pcs outside the histogram
@@ -70,10 +73,14 @@ static __inline void ClasspadHcLcdPush(DWORD src, DWORD top, DWORD rows, DWORD w
 //   disabled), 120 after the fpu/fallback helpers, 121 asm hash hit, 122
 //   rte/bank trampolines;  123..127 the last five kernel pcs outside the histogram
 //   128..383 the histogram: tick samples per bucket of guest code by physical address
+//   384 PLLCR  385 FLLFRQ (with 82 FRQCR: the clock tree; the fx-CP400 does
+//   not run the fx-CG50 clocks bsp_cfg.h assumes, see tick/rtc in the window)
+//   386 guest pc of the slowest translation so far (PROFILE=1 builds)
 #define HC_STAT_SAMPLES     64
 #define HC_STAT_HIST_BASE   74
 #define HC_STAT_HIST        128
 #define HC_STAT_HIST_N      256
+#define HC_STAT_N           387
 static __inline DWORD ClasspadHcGetStat(DWORD index) { return __asm1("trapa #251", index); }
 
 #endif

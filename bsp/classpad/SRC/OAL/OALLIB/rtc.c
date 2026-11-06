@@ -75,10 +75,57 @@ BOOL OEMSetRealTime(LPSYSTEMTIME lpst)
 }
 
 //------------------------------------------------------------------------------
+//------------------------------------------------------------------------------
+//  Kernel alarm (SetKernelAlarm) on the hardware RTC's alarm registers. The
+//  hardware RTC keeps Casio's calendar, CE's clock is g_baseSeconds + the tick,
+//  so the alarm is programmed as "hardware now + (alarm - CE now)". Its
+//  interrupt (INTEVT 0xA80, intr.c) is one-shot; it is also the wake-up from
+//  R-standby (power.c), where the RTC keeps running in the RCLK domain.
+//
+static BOOL ReadHardwareSeconds(UINT64 *seconds);
+static void SecondsToSystemTime(UINT64 secs, UINT16 millis, LPSYSTEMTIME pst);
+static BOOL g_alarmArmed;
+static UINT8 ToBcd(UINT32 v) { return (UINT8)(((v / 10) << 4) | (v % 10)); }
+
 BOOL OEMSetAlarmTime(LPSYSTEMTIME lpst)
 {
-    // No alarm source yet
-    return FALSE;
+    UINT64 target, now, hwNow;
+    UINT32 elapsed;
+    SYSTEMTIME t;
+    if (lpst == NULL) {                                     // cancel
+        MMIO_W8(RTC_RCR1, 0);
+        MMIO_W8(INTC_IMR(10), INTC_IMR10_RTC_ALARM);
+        g_alarmArmed = FALSE;
+        return TRUE;
+    }
+    if (!SystemTimeToSeconds(lpst, &target) || !ReadHardwareSeconds(&hwNow)) return FALSE;
+    elapsed = CurMSec - g_baseTick + g_baseMillis;
+    now = g_baseSeconds + elapsed / 1000;
+    if (target <= now) target = now + 1;
+    SecondsToSystemTime(hwNow + (target - now), 0, &t);
+    MMIO_W8(RTC_RCR1, 0);                                   // AIE off, AF clear while programming
+    MMIO_W8(RTC_RSECAR, (UINT8)(ToBcd(t.wSecond) | 0x80));
+    MMIO_W8(RTC_RMINAR, (UINT8)(ToBcd(t.wMinute) | 0x80));
+    MMIO_W8(RTC_RHRAR,  (UINT8)(ToBcd(t.wHour) | 0x80));
+    MMIO_W8(RTC_RWKAR,  0);
+    MMIO_W8(RTC_RDAYAR, (UINT8)(ToBcd(t.wDay) | 0x80));
+    MMIO_W8(RTC_RMONAR, (UINT8)(ToBcd(t.wMonth) | 0x80));
+    MMIO_W8(RTC_RCR3,   0);                                 // the year is not compared
+    MMIO_W8(RTC_RCR1, RTC_RCR1_AIE);
+    MMIO_W8(INTC_IMCR(10), INTC_IMR10_RTC_ALARM);
+    g_alarmArmed = TRUE;
+    return TRUE;
+}
+
+BOOL ClasspadRtcAlarmArmed(void) { return g_alarmArmed && (MMIO_R8(RTC_RCR1) & RTC_RCR1_AIE) != 0; }
+BOOL ClasspadRtcAlarmFired(void) { return (MMIO_R8(RTC_RCR1) & RTC_RCR1_AF) != 0; }
+
+UINT32 ClasspadRtcAlarmIsr(void)                            // intr.c, INTEVT 0xA80
+{
+    MMIO_W8(RTC_RCR1, 0);                                   // AF cleared, AIE off: one-shot
+    MMIO_W8(INTC_IMR(10), INTC_IMR10_RTC_ALARM);
+    g_alarmArmed = FALSE;
+    return SYSINTR_RTC_ALARM;
 }
 
 //------------------------------------------------------------------------------

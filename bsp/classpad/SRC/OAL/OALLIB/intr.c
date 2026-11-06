@@ -23,6 +23,7 @@ static const CLASSPAD_IRQ_MASK g_irqMask[] = {
     { IRQ_TMU2_TUNI2, 4, INTC_IMR4_TMU2 },
     { IRQ_KEYSC,      5, INTC_IMR5_KEYSC },
     { IRQ_TOUCH_PEN,  3, INTC_IMR3_TOUCH },
+    { IRQ_RTC_ALARM,  10, INTC_IMR10_RTC_ALARM },
 };
 
 static const CLASSPAD_IRQ_MASK *FindMask(UINT32 irq)
@@ -68,6 +69,11 @@ static UINT32 TouchIntrHandler(void)
 {
     return DeviceIntrHandler(3, INTC_IMR3_TOUCH, IRQ_TOUCH_PEN);
 }
+extern UINT32 ClasspadRtcAlarmIsr(void);
+static UINT32 RtcAlarmIntrHandler(void)
+{
+    return ClasspadRtcAlarmIsr();           // SYSINTR_RTC_ALARM, one-shot (rtc.c)
+}
 
 //------------------------------------------------------------------------------
 BOOL OALIntrInit()
@@ -82,9 +88,11 @@ BOOL OALIntrInit()
     MMIO_W8(INTC_IMR(4), INTC_IMR4_TMU0 | INTC_IMR4_TMU1 | INTC_IMR4_TMU2);
     MMIO_W8(INTC_IMR(5), INTC_IMR5_KEYSC);
     MMIO_W8(INTC_IMR(3), INTC_IMR3_TOUCH);
+    MMIO_W8(INTC_IMR(10), INTC_IMR10_RTC_ALARM);
     MMIO_W16(INTC_IPRA, (MMIO_R16(INTC_IPRA) & 0x0FFF) | (IRQ_TMU0_PRIORITY << 12));
     MMIO_W16(INTC_IPRF, (MMIO_R16(INTC_IPRF) & 0x0FFF) | (IRQ_KEYSC_PRIORITY << 12));
     MMIO_W16(INTC_IPRB, (MMIO_R16(INTC_IPRB) & 0xFF0F) | (IRQ_TOUCH_PRIORITY << 4));
+    MMIO_W16(INTC_IPRK, (MMIO_R16(INTC_IPRK) & 0x0FFF) | (IRQ_RTC_PRIORITY << 12));
 
     if (!HookAndSetPriority(IRQ_TMU0_TUNI0, (FARPROC)OALTimerIntrHandler, IRQ_TMU0_PRIORITY)) {
         return FALSE;
@@ -95,6 +103,10 @@ BOOL OALIntrInit()
     if (!HookAndSetPriority(IRQ_TOUCH_PEN, (FARPROC)TouchIntrHandler, IRQ_TOUCH_PRIORITY)) {
         return FALSE;
     }
+    if (!HookAndSetPriority(VEC_RTC_ALARM, (FARPROC)RtcAlarmIntrHandler, IRQ_RTC_PRIORITY)) {
+        return FALSE;
+    }
+    OALIntrStaticTranslate(SYSINTR_RTC_ALARM, IRQ_RTC_ALARM);
 
     OALMSG(OAL_INTR && OAL_FUNC, (L"-OALIntrInit()\r\n"));
     return TRUE;

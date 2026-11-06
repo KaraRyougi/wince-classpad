@@ -243,6 +243,11 @@ in a topmost strip at the top of the screen:
   started, as P1 addresses and offsets into the ROM image;
 - page 2: the same for the last interval.
 
+On the fx-CP400 board `tick/rtc` read 1.69 on 2026-11-06: TMU0/TMU1 run
+about 1.67x faster than `bsp_cfg.h` assumes (FRQCR 0x18001102, not the
+CG50 value). The second line also shows PLLCR and FLLFRQ (indices 384/385)
+and the guest pc of the slowest translation so far (386, `PROFILE=1`).
+
 A tap turns the page, a tap on the `x` in the top-right corner closes it.
 Start it from the shell (`\Windows\classpad_dbtstat.exe`), or for a boot
 profile add `"Launch70"="classpad_dbtstat.exe"` with `"Depend70"=hex:1e,00`
@@ -319,7 +324,34 @@ reproduced in this run. The screenshot and paired eActivity translator are
 in the ignored `dbt/build-touch-validation/` directory. Hardware validation
 is still pending; emulator sensor behavior cannot establish hardware success.
 
-## Suspend/resume validation
+## Suspend: R-standby (2026-11-06, unbuilt)
+
+`OEMPowerOff` now powers the core off the way the stock OS does (SH7305
+R-standby, docs/06-deep-suspend.md): it saves INTC, KEYSC and the CPG module
+stops, configures the KEYSC autonomous scan of Clear/ON's row and column,
+unmasks the RTC alarm when `OEMSetAlarmTime` armed one, and calls the
+translator's `HC_STANDBY` hypercall, which writes the caches back, puts the
+SDRAM into self-refresh, sets BAR to its resume stub in RS memory and
+executes SLEEP with STBCR.RSTBY. After the core reset the stub restores the
+SDRAM controller, caches, MMU registers and VBR and the hypercall returns 1;
+the OAL loops until Clear is down or the alarm fired (any other wake-up
+sleeps again), restores its state, and the kernel re-programs TMU0 through
+`pfnInitClock` (timer.c). When the hypercall cannot be issued (SR.BL set) or
+returns 0, the CPU-sleep implementation below is used. The translator half
+passes its emulator test (`make -C dbt run GUEST=standby`); this OAL half has
+not been compiled yet (VM) and nothing has run on the board.
+
+The VM's `PLATFORM\CLASSPAD` is the Codex branch (atomic timer updates, TMU
+recovery scan in the CPU-sleep fallback, rotation, capture window), so the
+R-standby changes were merged onto that tree rather than copied over it:
+`C:\WINCE600\claude-standby\` holds the nine merged files (`files\`, already
+installed into `PLATFORM\CLASSPAD`), the versions they replaced (`orig\`),
+`build.bat` (OALLIB, OALEXE, DBTSTAT, makeimg -> `NK-standby.bin`), the
+matching `wince.hh3` and a README with the board test steps. The window's
+stats ABI check (HC_GETSTAT 60 = "DBTS", 61 = 1) is served by this
+translator too.
+
+## Suspend/resume validation (the CPU-sleep fallback)
 
 The power update saves interrupt, timer and keypad state, suspends the touch
 bus and display, and enters CPU sleep with retained RAM. Only Clear/ON
