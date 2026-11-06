@@ -161,6 +161,34 @@ loosely (`docs/04` "Limits"); the window not being free on that OS version
 - Debug serial: SCIF; KITL over the same port.
 - Memory: `MainMemoryEndAddress` = 0x8CFFFFFF on 16 MiB units.
 
+## The EXT region in the hole (2026-11-06)
+
+With the NK image in the eActivity area (`NK_WINDOW=eact`), the hole
+0x0EE0000-0x13E0000 is free, all 5 MiB of it from its real start (the NK
+window used 3.875 MiB from 16 MiB). It holds a second, files-only ROM region
+(`bsp/classpad/EXT`, `tools/mkextrom.py`): "ECEC" at +0x40, a ROMHDR with no
+modules, FILESentry records, names and the files uncompressed. `OEMInit`
+validates it (`classpad_extrom.h`) and sets `g_pOemGlobal->pROMChain`;
+`KernelFindMemory` (after `OEMInit` on SH, `mdsh3.c`) appends the NK region,
+and the loader and the ROM file system walk the chain, so the files appear in
+`\Windows`. `wince.hhk` / `nkflash.hhk` flash `\fls0\EXT.bin` there next to
+`NK.bin` (window table in `hhk/nkflash.c`), only when it differs.
+
+Is the hole safe to write? Casio's OS checksum covers it: a byte sum over
+[0x20000, 0x14FFEB0) + [0x14FFEF0, 0x14FFFF8), stored big-endian at 0x14FFFF8
+(0xce1e234b on OS 02.01.7003; casio-emu `docs/classpad-experimental.txt`), so
+any data there breaks the stored sum, and it cannot be restored from inside
+the hole (erased bytes are already the maximum). In casio-emu's cold boot,
+which runs Casio's boot code from the reset vector, it does not matter: with
+1 MiB written into the hole (sum 0xc626234b) the boot reaches the same
+Language screen as the pristine NOR, frame for frame, and after 1M ticks no
+sector of the chip has changed, the hole included (emulator only; other
+paths such as the OS updater may still check the sum). An OS update rewrites
+the image and erases the region; CE then boots without it ("no EXT ROM
+region" from the OAL). Before relying on it on hardware: dump the hole from
+HollyHock, write one sector, RESET and power-cycle, check that Casio's OS
+boots and the sector survives.
+
 ## The eActivity area as an alternative window (experiment, 2026-11-05)
 
 The Standard Shell image is 6.95 MB (`notes/ce/NK-shell1.bin`, not

@@ -71,7 +71,22 @@ NK_FLASH_MAX ?= 0x003E0000
 endif
 NK_FLASH     := $(shell printf '0x%08X' $$((0x80000000 + $(NK_FLASH_OFF))))
 FLASH_DEFS   := -DNK_FLASH=$(NK_FLASH)u -DNK_FLASH_MAX=$(NK_FLASH_MAX)u
+# The EXT region (docs/03): a files-only ROM region in the erased hole of
+# Casio's OS image, chained to the kernel by the OAL (classpad_extrom.h, which
+# holds the same two numbers), flashed by wince.hhk/nkflash.hhk from
+# \fls0\EXT.bin. Only with the NK image in the eActivity area: the hole
+# window overlaps it. EXTBIN=<EXT.bin> adds it to an emulator run's NOR.
+ifeq ($(NK_WINDOW),eact)
+EXT_FLASH     ?= 0x80EE0000
+EXT_FLASH_MAX ?= 0x00500000
+FLASH_DEFS   += -DEXT_FLASH=$(EXT_FLASH)u -DEXT_FLASH_MAX=$(EXT_FLASH_MAX)u
+endif
 HOST_CFLAGS  += $(FLASH_DEFS)
+# the extrom guest checks a small test region from inside the translator
+ifeq ($(GUEST),extrom)
+EXTBIN       ?= $(BUILD)/extrom-test.bin
+endif
+EXTBIN       ?=
 # make DEVICE=1 hhk: a translator without the emulator's debug port (byte
 # stores to 0xFFFFF000, undefined on the real SoC); its prints then go only to
 # the debug ring. Use a private BUILD dir so emulator builds keep their port.
@@ -87,7 +102,7 @@ CONSOLE ?= 0
 HOST_CFLAGS  += $(if $(filter 1,$(DEVICE)),-DDBT_NO_DEBUG_PORT -DDBT_IRQPIN_GUARD $(if $(filter 1,$(CONSOLE)),-DDBT_LCD_CONSOLE,),)
 NK_PADDED = $(BUILD)/nk-flash.bin
 NK_OFF_FILE = $(BUILD)/nk-flash.off
-NK_ENV = $(if $(NKBIN),HLE_OSROM=$(abspath $(NK_PADDED)) HLE_OSROM_PAD=$$(cat $(NK_OFF_FILE)),)   # recursive: nkrun sets NKBIN per target
+NK_ENV = $(if $(NKBIN)$(EXTBIN),HLE_OSROM=$(abspath $(NK_PADDED)) HLE_OSROM_PAD=$$(cat $(NK_OFF_FILE)),)   # recursive: nkrun sets NKBIN per target
 # casio-emu remembers the last machine profile (model.txt), so pin it. The
 # ClassPad profile (fx-cp400: 320x528 panel, IIC0 touch sensor, INTC
 # priorities) is the target and the default since 2026-11-05; it needs
@@ -100,10 +115,10 @@ RUN_SECS ?= 20
 # make DEVALL=1 GUEST=x run: the guest asks for device-aware translation of its whole code (start.S)
 GUEST_CFLAGS += $(if $(filter 1,$(DEVALL)),-DDEVAWARE_ALL,)
 define NK_PAD
-mkdir -p $(BUILD) && python3 ../tools/nkflash.py $(NKBIN) $(NK_PADDED) $(NK_FLASH_OFF) > $(NK_OFF_FILE) && echo "flash offset $$(cat $(NK_OFF_FILE))"
+mkdir -p $(BUILD) && python3 ../tools/nkflash.py $(or $(NKBIN),-) $(NK_PADDED) $(NK_FLASH_OFF) $(if $(EXTBIN),--ext $(EXTBIN)) > $(NK_OFF_FILE) && echo "flash offset $$(cat $(NK_OFF_FILE))"
 endef
 
-.PHONY: all clean run nkrun nkshot screenshot disasm hhk hhk-check hhkrun flashtest
+.PHONY: all clean run nkrun nkshot screenshot disasm hhk hhk-check hhkrun flashtest extrom
 
 IMG := $(BUILD)/dbt-$(GUEST)
 
@@ -143,7 +158,7 @@ $(LAYOUT_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.layout-*
 	touch $@
 
-$(BUILD)/$(GUEST).elf: $(GUEST_START) guest/$(GUEST).c $(GUEST_EXTRA) guest/hyper.h guest/mmio.h ../bsp/classpad/SRC/INC/classpad_power.h ../bsp/classpad/SRC/INC/classpad_keysc.h ../bsp/classpad/SRC/INC/bsp_base_regs.h ../bsp/classpad/SRC/INC/classpad_touch_bus.h ../bsp/classpad/SRC/INC/classpad_touch.h $(GUEST_LD) $(DEVALL_STAMP) $(LAYOUT_STAMP) | $(BUILD)
+$(BUILD)/$(GUEST).elf: $(GUEST_START) guest/$(GUEST).c $(GUEST_EXTRA) guest/hyper.h guest/mmio.h ../bsp/classpad/SRC/INC/classpad_extrom.h ../bsp/classpad/SRC/INC/classpad_power.h ../bsp/classpad/SRC/INC/classpad_keysc.h ../bsp/classpad/SRC/INC/bsp_base_regs.h ../bsp/classpad/SRC/INC/classpad_touch_bus.h ../bsp/classpad/SRC/INC/classpad_touch.h $(GUEST_LD) $(DEVALL_STAMP) $(LAYOUT_STAMP) | $(BUILD)
 	$(CC) $(GUEST_CFLAGS) -T $(GUEST_LD) -o $@ $(GUEST_START) guest/$(GUEST).c $(GUEST_EXTRA)
 
 # the guest wrapped as a CE .bin (records + ROMHDR pointer) for the loader test;
@@ -158,6 +173,18 @@ $(BUILD)/$(GUEST).nk.bin: $(BUILD)/$(GUEST).bin ../tools/mkbin.py
 
 $(BUILD)/$(GUEST).bin: $(BUILD)/$(GUEST).elf
 	$(OBJCOPY) -O binary $< $@
+
+# --- the EXT region (tools/mkextrom.py, docs/03) ---
+# make NK_WINDOW=eact XPANDER=<unpacked cab> extrom -> $(BUILD)/EXT.bin, copied to
+# \fls0\EXT.bin for wince.hhk; EXTROM picks another manifest
+EXTROM ?= ../bsp/classpad/EXT/xpander.txt
+extrom: $(BUILD)/EXT.bin
+$(BUILD)/EXT.bin: $(EXTROM) ../tools/mkextrom.py $(LAYOUT_STAMP) | $(BUILD)
+	$(if $(EXT_FLASH),,$(error the EXT region needs NK_WINDOW=eact))
+	python3 ../tools/mkextrom.py $< $@ --base $(EXT_FLASH) --max $(EXT_FLASH_MAX)
+$(BUILD)/extrom-test.bin: guest/extrom.txt guest/extrom-data.txt ../tools/mkextrom.py $(LAYOUT_STAMP) | $(BUILD)
+	$(if $(EXT_FLASH),,$(error the extrom guest needs NK_WINDOW=eact))
+	python3 ../tools/mkextrom.py $< $@ --base $(EXT_FLASH) --max $(EXT_FLASH_MAX)
 
 # --- translator image (big-endian) ---
 # image files are named after the guest so that switching GUEST= relinks
@@ -215,7 +242,7 @@ $(WINCE_HHK): $(HHK_COMMON) $(HHK_FLASH) hhk/launcher.c hhk/takeover.S hhk/paylo
 	cp $@ $(@:.hhk=.hh3)
 
 $(NKFLASH_HHK): $(HHK_COMMON) $(HHK_FLASH) hhk/hhk.ld hhk/util.h hhk/os.h hhk/nkflash.h hhk/norflash.h $(LAYOUT_STAMP)
-	$(CC) $(HHK_CFLAGS) -DNKFLASH_STANDALONE -DHHK_APP_NAME='"CE image flasher"' -DHHK_APP_DESC='"writes fls0/NK.bin into the NOR window for Windows CE"' $(HHK_LD) -o $@ $(HHK_COMMON) $(HHK_FLASH) -lgcc
+	$(CC) $(HHK_CFLAGS) -DNKFLASH_STANDALONE -DHHK_APP_NAME='"CE image flasher"' -DHHK_APP_DESC='"writes fls0/NK.bin (and EXT.bin) into the NOR for Windows CE"' $(HHK_LD) -o $@ $(HHK_COMMON) $(HHK_FLASH) -lgcc
 	cp $@ $(@:.hhk=.hh3)
 
 hhk: $(WINCE_HHK) $(NKFLASH_HHK) hhk-check
@@ -236,7 +263,7 @@ $(BUILD)/dbt-$(GUEST)-hhk.g3a: $(BUILD)/dbt-$(GUEST)-hhk.elf
 	( dd if=/dev/zero bs=28672 count=1 2>/dev/null; cat $(<:.elf=.bin) ) > $@
 
 hhkrun: $(BUILD)/dbt-$(GUEST)-hhk.g3a
-	$(if $(NKBIN),$(NK_PAD))
+	$(if $(NKBIN)$(EXTBIN),$(NK_PAD))
 	-$(EMU_ENV) $(NK_ENV) $(EMU)/run-headless.sh $(abspath $<) $(RUN_SECS)
 
 # norflash.c against the emulator's NOR command decoder (HLE_FLASH_CMD=1)
@@ -254,8 +281,8 @@ flashtest: $(BUILD)/flashtest.g3a
 # press (chord 20, held) while it sleeps in R-standby (ticks = 1/32768 s)
 RUN_ENV_standby := HLE_CB_CHORD=20 HLE_CB_CHORD_AT=250000 HLE_CB_CHORD_HOLD=100000
 RUN_ENV ?= $(RUN_ENV_$(GUEST))
-run: $(IMG).g3a
-	$(if $(NKBIN),$(NK_PAD))
+run: $(IMG).g3a $(if $(filter extrom,$(GUEST)),$(BUILD)/extrom-test.bin)
+	$(if $(NKBIN)$(EXTBIN),$(NK_PAD))
 	-$(EMU_ENV) $(RUN_ENV) $(NK_ENV) $(EMU)/run-headless.sh $(abspath $(IMG).g3a) $(RUN_SECS)
 
 # run the current guest through the .bin loader (image in emulated flash)
@@ -268,7 +295,7 @@ nkrun: $(IMG).g3a $(BUILD)/$(GUEST).nk.bin
 # last one to $(IMG).png; HLE_FORCE_R61524 presents the LCD controller's pixels
 # nkshot: the same for a CE image (NKBIN=..., RUN_SECS=n) -> build/nk.png
 nkshot: $(IMG).g3a
-	$(if $(NKBIN),$(NK_PAD))
+	$(if $(NKBIN)$(EXTBIN),$(NK_PAD))
 	-$(EMU_ENV) $(NK_ENV) HLE_FBDUMP=$(abspath $(BUILD)/nk.ppm) HLE_FORCE_R61524=1 $(EMU)/run-headless.sh $(abspath $(IMG).g3a) $(RUN_SECS)
 	python3 ../tools/ppm2png.py $(BUILD)/nk.ppm $(BUILD)/nk.png
 

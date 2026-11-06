@@ -23,3 +23,5 @@ bsp/tests/test_touch_bus
 bsp/tests/test_timer
 
 /dbt/bench-integrated-normal/
+bsp/tests/test_extrom
+bsp/tests/extrom-test.bin

@@ -86,3 +86,14 @@
 [HKEY_LOCAL_MACHINE\init]
     "Launch94"="classpad_rotatekey.exe"
     "Depend94"=hex:14,00,1e,00,32,00
+
+; Math Xpander workbooks (.mwb), as its Pocket PC cab registers them, with the
+; program at its ROM path in the EXT region (bsp/classpad/EXT).
+[HKEY_CLASSES_ROOT\.mwb]
+    @="isce_mwbfile"
+[HKEY_CLASSES_ROOT\isce_mwbfile]
+    @="Math Xpander Workbook"
+[HKEY_CLASSES_ROOT\isce_mwbfile\DefaultIcon]
+    @="\\Windows\\MathXpander.exe,0"
+[HKEY_CLASSES_ROOT\isce_mwbfile\Shell\Open\Command]
+    @="\"\\Windows\\MathXpander.exe\" %1"

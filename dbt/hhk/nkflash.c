@@ -1,21 +1,23 @@
-/* nkflash.c - write a Windows CE image into the NOR from Casio's OS, where
- * the translator's launcher looks for it (NK_FLASH, docs/05 section 1).
- * Reads \fls0\NK.bin (Platform Builder's B000FF output, copied to the
- * calculator's storage over USB) and does what tools/nkflash.py does for the
- * emulator:
- *   - an XIP build (image start == NK_FLASH, config.bib ROMSTART): every
- *     record is programmed at its own address (P1 address - 0x80000000);
- *   - a RAM image (image start in RAM): the .bin is programmed as is at
- *     NK_FLASH, where the translator copies the records into RAM.
- * Only the window NK_FLASH .. NK_FLASH + NK_FLASH_MAX is ever touched
- * (the erased hole inside Casio's OS image, docs/03), and a sector in it is
- * erased only when it is still blank, the window already holds a CE image
- * of ours or (NK_WINDOW=eact) the eActivity volume; anything else stops
- * before the first erase.
+/* nkflash.c - write Windows CE images into the NOR from Casio's OS, where
+ * the translator's launcher and the OAL look for them (docs/03, docs/05).
+ * Two windows, each fed by a B000FF file on the calculator's storage:
+ *   - NK (NK_FLASH .. + NK_FLASH_MAX, \fls0\NK.bin): the image the translator
+ *     boots. An XIP build (image start == NK_FLASH) has every record
+ *     programmed at its own address (P1 address - 0x80000000); a RAM image
+ *     is programmed as is at NK_FLASH and copied into RAM by the translator.
+ *   - EXT (EXT_FLASH .. + EXT_FLASH_MAX, \fls0\EXT.bin, only with an NK
+ *     window elsewhere, i.e. NK_WINDOW=eact): the files-only ROM region of
+ *     tools/mkextrom.py in the hole inside Casio's OS image, which the OAL
+ *     chains to the kernel (classpad_extrom.h). Casio's boots leave it alone,
+ *     so it is normally written once and found identical afterwards.
+ * A window is only ever touched inside its own bounds, and a sector in it is
+ * erased only when it is still blank, the window already holds a CE image of
+ * ours ("ECEC" at +0x40 or a B000FF header) or (NK, NK_WINDOW=eact) the
+ * eActivity volume; anything else stops before the first erase.
  *
  * Two users: wince.hhk (hhk/launcher.c) calls nkflash_open / compare /
- * write to bring the flash up to date before it boots, and nkflash.hhk
- * (NKFLASH_STANDALONE) is the same as a tool of its own. */
+ * write per window to bring the flash up to date before it boots, and
+ * nkflash.hhk (NKFLASH_STANDALONE) is the same as a tool of its own. */
 #include "util.h"
 #include "os.h"
 #include "norflash.h"
@@ -27,20 +29,39 @@
 #ifndef NK_FLASH_MAX
 #define NK_FLASH_MAX 0x003E0000u
 #endif
-#define WIN_LO (NK_FLASH - NOR_P1)
-#define WIN_HI (WIN_LO + NK_FLASH_MAX)
 #define CHUNK  0x10000u
 #define HDR    15u
 
-static const char *paths[] = { "\\fls0\\NK.bin", "\\fls0\\nk.bin", "\\fls0\\wince\\NK.bin" };
+static const char *const nk_paths[] = { "\\fls0\\NK.bin", "\\fls0\\nk.bin", "\\fls0\\wince\\NK.bin", 0 };
+#ifdef EXT_FLASH
+static const char *const ext_paths[] = { "\\fls0\\EXT.bin", "\\fls0\\ext.bin", "\\fls0\\wince\\EXT.bin", 0 };
+#endif
+
+const nkwindow nk_windows[] = {
+    { "NK", NK_FLASH, NK_FLASH_MAX, nk_paths,
+#ifdef NK_WINDOW_EACT
+      1 },
+#else
+      0 },
+#endif
+#ifdef EXT_FLASH
+    { "EXT", EXT_FLASH, EXT_FLASH_MAX, ext_paths, 0 },
+#endif
+};
+const int nk_nwindows = sizeof nk_windows / sizeof nk_windows[0];
+
 int nk_row = 1;
 
 static struct {
+    const nkwindow *w;
     int fd;
     u32 size, start, length, nrec, lo, hi, entry;
     int xip;
     u8 *buf;
-} nk = { -1, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+} nk = { 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+
+#define WIN_LO (nk.w->base - NOR_P1)
+#define WIN_HI (WIN_LO + nk.w->max)
 
 void nk_say(const char *fmt, ...)
 {
@@ -74,43 +95,33 @@ static int read_exact(int fd, void *buf, u32 n)
     return 0;
 }
 
-static int window_has_our_image(void)
+static int window_has_our_image(const nkwindow *w)
 {
-    const char *p = (const char *)NK_FLASH;
+    const char *p = (const char *)w->base;
     return !memcmp(p + 0x40, "ECEC", 4) || !memcmp(p, "B000FF\n", 7);
 }
 
-/* NK_WINDOW=eact: the window is the eActivity volume, which Casio's OS
+/* NK_WINDOW=eact: the NK window is the eActivity volume, which Casio's OS
  * reformats at every boot that finds it holding something else (docs/03), so
  * everything in it is ours to erase. Fugue is log-structured: on a used
  * calculator its header sector ("Fugue FAT File System" at +0x2020) can be
  * any sector of the area and the first one may well be blank (seen on the
  * first hardware run: "sector at 83880000 is in use" with the first sector
  * passing), so the name is only looked for, never required. */
-static int window_is_fugue_volume(void)
+static int window_is_fugue_volume(const nkwindow *w)
 {
-#ifdef NK_WINDOW_EACT
     u32 s;
-    for (s = 0; s < NK_FLASH_MAX; s += NOR_SECTOR)
-        if (!memcmp((const char *)NK_FLASH + s + 0x2020, "Fugue FAT File System", 21)) return 1;
-#endif
+    if (!w->eact) return 0;
+    for (s = 0; s < w->max; s += NOR_SECTOR)
+        if (!memcmp((const char *)w->base + s + 0x2020, "Fugue FAT File System", 21)) return 1;
     return 0;
 }
 
-static int window_is_eact(void)
+const char *nkflash_window_state(const nkwindow *w)
 {
-#ifdef NK_WINDOW_EACT
-    return 1;
-#else
-    return 0;
-#endif
-}
-
-const char *nkflash_window_state(void)
-{
-    return window_has_our_image() ? "holds a CE image" :
-           window_is_fugue_volume() ? "is the eActivity volume" :
-           window_is_eact() ? "is the eActivity area" : "is blank";
+    return window_has_our_image(w) ? "holds a CE image" :
+           window_is_fugue_volume(w) ? "is the eActivity volume" :
+           w->eact ? "is the eActivity area" : "is blank";
 }
 
 void nkflash_close(void)
@@ -121,15 +132,16 @@ void nkflash_close(void)
     nk.buf = 0;
 }
 
-/* open \fls0\NK.bin, parse the header and walk the records (pass 1) */
-int nkflash_open(void)
+/* open the window's file, parse the header and walk the records (pass 1) */
+int nkflash_open(const nkwindow *w)
 {
     u8 hdr[HDR], rec[12];
     u32 pos, i;
+    nk.w = w;
     nk.fd = -1; nk.nrec = 0; nk.lo = 0xFFFFFFFFu; nk.hi = 0; nk.entry = 0;
-    for (i = 0; i < sizeof paths / sizeof paths[0]; i++) {
-        nk.fd = os_open(paths[i]);
-        if (nk.fd >= 0) { nk_say("file %s", paths[i]); break; }
+    for (i = 0; w->paths[i]; i++) {
+        nk.fd = os_open(w->paths[i]);
+        if (nk.fd >= 0) { nk_say("file %s", w->paths[i]); break; }
     }
     if (nk.fd < 0) return NKF_NOFILE;
     if (os_fsize(nk.fd, &nk.size) || nk.size < HDR) { fail("file size"); goto bad; }
@@ -137,10 +149,10 @@ int nkflash_open(void)
     nk.start = le32(hdr + 7); nk.length = le32(hdr + 11);
     nk_say("image %08x + %x, %u bytes file", nk.start, nk.length, nk.size);
 
-    nk.xip = nk.start >= NK_FLASH && nk.start < NK_FLASH + NK_FLASH_MAX;
+    nk.xip = nk.start >= w->base && nk.start < w->base + w->max;
     if (nk.xip) {
-        if (nk.start != NK_FLASH) { fail("ROMSTART is not NK_FLASH"); goto bad; }
-        if (nk.length > NK_FLASH_MAX) { fail("image larger than the window"); goto bad; }
+        if (nk.start != w->base) { fail("%s image does not start at %08x", w->name, w->base); goto bad; }
+        if (nk.length > w->max) { fail("image larger than the window"); goto bad; }
         pos = HDR;
         for (;;) {
             u32 addr, len, chk;
@@ -157,10 +169,12 @@ int nkflash_open(void)
         }
         nk_say("%u records, %08x..%08x, entry %08x", nk.nrec, NOR_P1 + nk.lo, NOR_P1 + nk.hi, nk.entry);
         if (nk.hi > WIN_HI || nk.lo < WIN_LO) { fail("records leave the window"); goto bad; }
-    } else {
-        nk_say("RAM image: the file goes to %08x", NK_FLASH);
+    } else if (w->base == NK_FLASH) {
+        nk_say("RAM image: the file goes to %08x", w->base);
         nk.lo = WIN_LO; nk.hi = WIN_LO + nk.size + (nk.size & 1);
         if (nk.hi > WIN_HI) { fail("file larger than the window"); goto bad; }
+    } else {
+        fail("%s.bin is not built for %08x", w->name, w->base); goto bad;
     }
     nk.buf = os_malloc(CHUNK + 2);
     if (!nk.buf) { fail("no memory for the buffer"); goto bad; }
@@ -209,7 +223,7 @@ int nkflash_compare(void)
 static int erase_span(u32 lo, u32 hi)
 {
     u32 s, first = lo & ~(NOR_SECTOR - 1), n = 0, i = 0;
-    int ours = window_has_our_image() || window_is_eact();
+    int ours = window_has_our_image(nk.w) || nk.w->eact;
     for (s = first; s < hi; s += NOR_SECTOR) {
         n++;
         if (!nor_sector_erased(s) && !ours)
@@ -257,7 +271,7 @@ int nkflash_write(void)
             if (sum != chk) return fail("record %u checksum", i);
             pos += len;
         }
-        nk_say("ROMHDR marker: %s", !memcmp((const char *)NK_FLASH + 0x40, "ECEC", 4) ? "ECEC found" : "MISSING");
+        nk_say("ROMHDR marker: %s", !memcmp((const char *)nk.w->base + 0x40, "ECEC", 4) ? "ECEC found" : "MISSING");
     } else {
         u32 sum = 0;
         if (os_lseek(nk.fd, 0) < 0) return fail("seek");
@@ -270,25 +284,38 @@ int nkflash_write(void)
 #ifdef NKFLASH_STANDALONE
 int hhk_main(int argc, char **argv, char **envp)
 {
-    int r;
+    int i, r, bad = 0, pending[4];
     os_init(argc, argv, envp);
     if (!os_ok) return 1;                          /* no OS routines: nothing we can do or say */
     ui_clear(); nk_row = 1;
     nk_say("CE image flasher (wince-classpad)");
     nk_say("OS routines: %s", os_source);
-    nk_say("window %08x..%08x %s", NK_FLASH, NK_FLASH + NK_FLASH_MAX, nkflash_window_state());
-    r = nkflash_open();
-    if (r == NKF_NOFILE) { nk_say("no \\fls0\\NK.bin. Any key."); ui_wait_exe_or_clear(); return 1; }
-    if (r != NKF_READY) { nk_say("nothing was written. Any key."); ui_wait_exe_or_clear(); return 1; }
-    nk_say("comparing with the flash...");
-    r = nkflash_compare();
-    if (r == 1) { nk_say("already in flash. Any key."); ui_wait_exe_or_clear(); nkflash_close(); return 0; }
+    for (i = 0; i < nk_nwindows; i++) {
+        const nkwindow *w = &nk_windows[i];
+        pending[i] = 0;
+        nk_say("%s window %08x..%08x %s", w->name, w->base, w->base + w->max, nkflash_window_state(w));
+        r = nkflash_open(w);
+        if (r == NKF_NOFILE) { nk_say("no %s.bin", w->name); continue; }
+        if (r != NKF_READY) { bad = 1; continue; }
+        r = nkflash_compare();
+        nkflash_close();
+        if (r == 1) nk_say("%s.bin already in flash", w->name);
+        else if (r == 0) pending[i] = 1;
+        else bad = 1;
+    }
+    for (r = 0, i = 0; i < nk_nwindows; i++) r |= pending[i];
+    if (bad || !r) { nk_say(bad ? "nothing was written. Any key." : "nothing to write. Any key."); ui_wait_exe_or_clear(); return bad; }
     nk_say("EXE: erase and program   Clear: cancel");
-    if (!ui_wait_exe_or_clear()) { nkflash_close(); return 0; }
-    r = nkflash_write();
-    nkflash_close();
-    nk_say(r ? "nothing more was written. Any key." : "done. Start wince.hhk to boot it. Any key.");
+    if (!ui_wait_exe_or_clear()) return 0;
+    for (i = 0; i < nk_nwindows; i++) {
+        if (!pending[i]) continue;
+        if (nkflash_open(&nk_windows[i]) != NKF_READY) { bad = 1; break; }
+        r = nkflash_write();
+        nkflash_close();
+        if (r) { bad = 1; break; }
+    }
+    nk_say(bad ? "nothing more was written. Any key." : "done. Start wince.hhk to boot it. Any key.");
     ui_wait_exe_or_clear();
-    return r ? 1 : 0;
+    return bad;
 }
 #endif

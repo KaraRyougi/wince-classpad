@@ -6,6 +6,26 @@
 //  through the ring, see debug.c).
 //------------------------------------------------------------------------------
 #include <bsp.h>
+#include <romldr.h>
+#include "classpad_extrom.h"
+
+// The EXT region (classpad_extrom.h): the kernel puts the NK region after it
+// in its ROM chain (KernelFindMemory), which runs after OEMInit.
+static ROMChain_t g_extRom;
+
+static void OALExtRomInit(void)
+{
+    unsigned toc = ClasspadExtRomFind((const void *)CLASSPAD_EXT_ROM_PA, CLASSPAD_EXT_ROM_PA, CLASSPAD_EXT_ROM_BYTES);
+    if (!toc) {
+        RETAILMSG(1, (L"CLASSPAD OAL: no EXT ROM region at %08x\r\n", CLASSPAD_EXT_ROM_PA));
+        return;
+    }
+    g_extRom.pNext = NULL;
+    g_extRom.pTOC = (ROMHDR *)toc;
+    g_pOemGlobal->pROMChain = &g_extRom;
+    RETAILMSG(1, (L"CLASSPAD OAL: EXT ROM region %08x..%08x, %u files\r\n",
+                  g_extRom.pTOC->physfirst, g_extRom.pTOC->physlast, g_extRom.pTOC->numfiles));
+}
 
 void OEMInit()
 {
@@ -25,6 +45,9 @@ void OEMInit()
         OALMSG(OAL_ERROR, (L"ERROR: OEMInit: OALIntrInit failed\r\n"));
     }
     OALTimerInit(TICK_MAX_MSEC, COUNT_FREQUENCY / 1000, TICK_MARGIN_COUNTS);
+
+    // Files in the NOR hole (Math Xpander and the like), if flashed
+    OALExtRomInit();
 
     OALMSG(OAL_FUNC, (L"-OEMInit()\r\n"));
 }

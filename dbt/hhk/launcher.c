@@ -82,39 +82,63 @@ int hhk_main(int argc, char **argv, char **envp)
 #else
     os_init(argc, argv, envp);
     if (os_ok) {
-        int file, same;
+        int file, same, i, pending[4], any = 0;
         ui_clear(); nk_row = 1;
         nk_say("Windows CE launcher (wince-classpad)");
         nk_say("OS routines: %s", os_source);
         nk_say("translator %u bytes, sum %08x %s", len, sum, ok ? "ok" : "MISMATCH");
         if (!ok) return stop("Copy wince.hhk to the calculator again.");
-        nk_say("window %08x %s", (u32)NK_FLASH, nkflash_window_state());
-        file = nkflash_open();
-        if (file == NKF_BAD) return stop("NK.bin rejected: nothing written.");
-        same = 0;
-        if (file == NKF_READY) {
-            nk_say("comparing NK.bin with the flash...");
+        /* NK first (it decides whether CE can boot at all), then the EXT
+         * region in the hole, whose problems only cost its files */
+        for (i = 0; i < nk_nwindows; i++) {
+            const nkwindow *w = &nk_windows[i];
+            pending[i] = 0;
+            nk_say("%s window %08x %s", w->name, w->base, nkflash_window_state(w));
+            file = nkflash_open(w);
+            if (file == NKF_BAD) {
+                if (i == 0) return stop("NK.bin rejected: nothing written.");
+                nk_say("EXT.bin rejected: left as it is");
+                continue;
+            }
+            if (file == NKF_NOFILE) {
+                nk_say(i == 0 ? "no \\fls0\\NK.bin: booting what is there" : "no \\fls0\\EXT.bin: left as it is");
+                continue;
+            }
+            nk_say("comparing %s.bin with the flash...", w->name);
             same = nkflash_compare();
-            if (same < 0) { nkflash_close(); return stop("NK.bin unreadable."); }
-            nk_say(same ? "NK.bin is already in the flash" : "NK.bin differs: will erase and program");
-        } else {
-            nk_say("no \\fls0\\NK.bin: booting what is there");
+            nkflash_close();
+            if (same < 0) {
+                if (i == 0) return stop("NK.bin unreadable.");
+                nk_say("EXT.bin unreadable: left as it is");
+                continue;
+            }
+            nk_say(same ? "%s.bin is already in the flash" : "%s.bin differs: will erase and program", w->name);
+            pending[i] = !same; any |= !same;
         }
         nk_say("CE image: %s", ce_image_kind());
-        if (ce_ram_end() > GUEST_RAM_HI) {
+        if (ce_ram_end() > GUEST_RAM_HI && !pending[0]) {
             nk_say("its RAM ends at %08x, the translator", ce_ram_end());
             nk_say("starts at %08x (config.bib RAM line)", (u32)GUEST_RAM_HI);
-            nkflash_close();
             return stop("Rebuild the image with the current config.bib.");
         }
-        if (file == NKF_NOFILE && !memcmp((const char *)NK_FLASH, "\xff\xff\xff\xff", 4) && memcmp((const char *)NK_FLASH + 0x40, "ECEC", 4))
+        if (!pending[0] && !memcmp((const char *)NK_FLASH, "\xff\xff\xff\xff", 4) && memcmp((const char *)NK_FLASH + 0x40, "ECEC", 4))
             nk_say("(the embedded test guest would run)");
-        nk_say("EXE: %s and boot CE   Clear: cancel", (file == NKF_READY && !same) ? "flash NK.bin" : "go");
-        if (!ui_wait_exe_or_clear()) { nkflash_close(); return 0; }
-        if (file == NKF_READY && !same) {
-            if (nkflash_write()) { nkflash_close(); return stop("Flash failed: not booting."); }
+        nk_say("EXE: %s and boot CE   Clear: cancel", any ? "flash" : "go");
+        if (!ui_wait_exe_or_clear()) return 0;
+        for (i = 0; i < nk_nwindows; i++) {
+            if (!pending[i]) continue;
+            if (nkflash_open(&nk_windows[i]) != NKF_READY || nkflash_write()) {
+                nkflash_close();
+                if (i == 0) return stop("Flash failed: not booting.");
+                return stop("EXT flash failed: not booting (run nkflash.hhk again).");
+            }
+            nkflash_close();
         }
-        nkflash_close();
+        if (pending[0] && ce_ram_end() > GUEST_RAM_HI) {
+            nk_say("the new image's RAM ends at %08x, the", ce_ram_end());
+            nk_say("translator starts at %08x", (u32)GUEST_RAM_HI);
+            return stop("Rebuild the image with the current config.bib.");
+        }
         nk_say("starting the translator (the screen stays");
         nk_say(" until the CE display driver runs)");
     } else if (!ok) {
