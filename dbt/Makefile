@@ -75,10 +75,13 @@ HOST_CFLAGS  += $(FLASH_DEFS)
 # stores to 0xFFFFF000, undefined on the real SoC); its prints then go only to
 # the debug ring. Use a private BUILD dir so emulator builds keep their port.
 DEVICE ?= 0
-# CONSOLE=0 leaves the panel console and the IRQ-pin guard out of a DEVICE=1
-# build (the console-less translator is the one that reached the desktop)
-CONSOLE ?= 1
-HOST_CFLAGS  += $(if $(filter 1,$(DEVICE)),-DDBT_NO_DEBUG_PORT $(if $(filter 1,$(CONSOLE)),-DDBT_LCD_CONSOLE -DDBT_IRQPIN_GUARD,),)
+# CONSOLE=1 adds the panel console (rt/lcdcon.c) to a DEVICE=1 build. Off by
+# default: on the real fx-CP400 a console build ends in a black screen while
+# the same translator without it reaches the desktop (2026-11-05); the cause
+# is not known (the emulator shows no difference). The IRQ-pin guard
+# (rt/irqpins.c) is in every DEVICE=1 build: it only masks a storming pin.
+CONSOLE ?= 0
+HOST_CFLAGS  += $(if $(filter 1,$(DEVICE)),-DDBT_NO_DEBUG_PORT -DDBT_IRQPIN_GUARD $(if $(filter 1,$(CONSOLE)),-DDBT_LCD_CONSOLE,),)
 NK_PADDED = $(BUILD)/nk-flash.bin
 NK_OFF_FILE = $(BUILD)/nk-flash.off
 NK_ENV = $(if $(NKBIN),HLE_OSROM=$(abspath $(NK_PADDED)) HLE_OSROM_PAD=$$(cat $(NK_OFF_FILE)),)   # recursive: nkrun sets NKBIN per target
