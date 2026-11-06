@@ -293,7 +293,24 @@ reproduced in this run. The screenshot and paired eActivity translator are
 in the ignored `dbt/build-touch-validation/` directory. Hardware validation
 is still pending; emulator sensor behavior cannot establish hardware success.
 
-## Suspend/resume validation
+## Suspend: R-standby (2026-11-06, unbuilt)
+
+`OEMPowerOff` now powers the core off the way the stock OS does (SH7305
+R-standby, docs/06-deep-suspend.md): it saves INTC, KEYSC and the CPG module
+stops, configures the KEYSC autonomous scan of Clear/ON's row and column,
+unmasks the RTC alarm when `OEMSetAlarmTime` armed one, and calls the
+translator's `HC_STANDBY` hypercall, which writes the caches back, puts the
+SDRAM into self-refresh, sets BAR to its resume stub in RS memory and
+executes SLEEP with STBCR.RSTBY. After the core reset the stub restores the
+SDRAM controller, caches, MMU registers and VBR and the hypercall returns 1;
+the OAL loops until Clear is down or the alarm fired (any other wake-up
+sleeps again), restores its state, and the kernel re-programs TMU0 through
+`pfnInitClock` (timer.c). When the hypercall cannot be issued (SR.BL set) or
+returns 0, the CPU-sleep implementation below is used. The translator half
+passes its emulator test (`make -C dbt run GUEST=standby`); this OAL half has
+not been compiled yet (VM) and nothing has run on the board.
+
+## Suspend/resume validation (the CPU-sleep fallback)
 
 The power update saves interrupt, timer and keypad state, suspends the touch
 bus and display, and enters CPU sleep with retained RAM. Only Clear/ON

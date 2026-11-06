@@ -1,6 +1,18 @@
 # Deep suspend: R-standby for Windows CE on the fx-CP400 (2026-11-06)
 
-Research note. Nothing here is implemented yet; the last section is the plan.
+Status (2026-11-06): steps 1 and 2 of the plan in section 7 are done. The
+translator has the `HC_STANDBY` hypercall (`rt/standby.S`, `rt.c`
+`dbt_standby`), and `dbt/guest/standby.c` passes under casio-emu: R-standby
+entered and left on the RTC alarm and on a held Clear press through the
+KEYSC autonomous scan, 64 KiB of SDRAM intact across both power-offs, the
+RTC kept time, hypercalls and the pending alarm interrupt work after the
+core reset (`make -C dbt run GUEST=standby`). casio-emu needs
+`dbt/emu-patch/add_sdmr.py` for the SDRAM mode-register write at 0xFEC15040.
+Step 3 is written but unbuilt: `power.c` (R-standby loop with the CPU-sleep
+fallback), `rtc.c` (`OEMSetAlarmTime` on the hardware alarm, INTEVT 0xA80
+one-shot ISR, the second wake source), `intr.c`/`intr_cfg.h` (IRQ 49 /
+vector 68), `timer.c` (`pfnInitClock` re-programs TMU0 after the power-off).
+It must be compiled in the Platform Builder VM; nothing has run on the board.
 
 Sources: Renesas SH7724 hardware manual REJ09B0560-0100 section 18.4.6
 (`~/Downloads/clemu/refs/SH7724_reference.md`, the text version), the stock

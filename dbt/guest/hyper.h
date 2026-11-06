@@ -63,3 +63,11 @@ static inline void hc_lcd_push(const void *src, unsigned top, unsigned rows, uns
     register unsigned r6 __asm__("r6") = rows; register unsigned r7 __asm__("r7") = width;
     __asm__ volatile ("trapa #0xFE" :: "r"(r4), "r"(r5), "r"(r6), "r"(r7) : "memory");
 }
+/* FF: SH7305 R-standby (docs/06): the core is powered off until a KEYSC autonomous
+ * scan or RTC wake-up; returns 1 after the wake-up, 0 if the machine did not enter it */
+static inline unsigned hc_standby(unsigned flags)
+{
+    register unsigned r4 __asm__("r4") = flags; register unsigned r0 __asm__("r0");
+    __asm__ volatile ("trapa #0xFF" : "=r"(r0) : "r"(r4) : "memory");
+    return r0;
+}

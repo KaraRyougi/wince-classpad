@@ -21,6 +21,7 @@
 #define HC_GETSTAT      0xFB        // r4 = index -> r0 (indices below; dbt/rt/rt.c is the reference)
 #define HC_LCD_BLIT     0xFD        // r4 = pixels (P1/P2 address, as the guest stores them), r5 = count, r6 = LCD data port: pushed natively
 #define HC_LCD_PUSH     0xFE        // DCS panel: r4 = pixels (P1/P2), r5 = first row, r6 = rows, r7 = width; window commands + pixels in one go
+#define HC_STANDBY      0xFF        // SH7305 R-standby (docs/06): r4 = flags (0) -> r0 = 1 after the wake-up, 0 if not entered
 
 // shcl: __asm(string, args...) places the arguments in r4, r5, ...; __asm1 returns r0
 extern DWORD __asm1(const char *, ...);
@@ -38,6 +39,7 @@ static __inline void ClasspadHcFlush(DWORD addr, DWORD len)     { __asm("trapa #
 static __inline void ClasspadHcTlbInval(DWORD addr, DWORD len)  { __asm("trapa #249", addr, len); }
 static __inline void ClasspadHcLcdBlit(DWORD src, DWORD pixels, DWORD port) { __asm("trapa #253", src, pixels, port); }
 static __inline void ClasspadHcLcdPush(DWORD src, DWORD top, DWORD rows, DWORD width) { __asm("trapa #254", src, top, rows, width); }
+static __inline DWORD ClasspadHcStandby(DWORD flags) { return __asm1("trapa #255", flags); }
 
 // HC_GETSTAT: one 32-bit counter of the translator (all wrap modulo 2^32:
 // take deltas). Works from user mode too (a trapa is a general exception the

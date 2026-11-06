@@ -42,7 +42,7 @@ HOST_CFLAGS  := -mb -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-sta
 GUEST_CFLAGS := -ml -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables -Wall \
                 -DGUEST_RAM_LO=$(GUEST_RAM_LO)u -DGUEST_RAM_HI=$(GUEST_RAM_HI)u -DMAX_BLOCKS=$(BLOCKS)
 
-RT_SRC := rt/crt0.S rt/stubs.S rt/main.c rt/rt.c rt/lcdcon.c rt/irqpins.c rt/nkbin.c rt/bench.c bench/loops.S src/sh4dec.c src/sh4emit.c src/translate.c \
+RT_SRC := rt/crt0.S rt/stubs.S rt/standby.S rt/main.c rt/rt.c rt/lcdcon.c rt/irqpins.c rt/nkbin.c rt/bench.c bench/loops.S src/sh4dec.c src/sh4emit.c src/translate.c \
           ../fpuemu/src/fpuemu.c ../fpuemu/src/softfloat.c
 
 # A Windows CE .bin to run instead of the embedded guest, placed in the emulated
@@ -91,7 +91,7 @@ NK_ENV = $(if $(NKBIN),HLE_OSROM=$(abspath $(NK_PADDED)) HLE_OSROM_PAD=$$(cat $(
 # casio-emu remembers the last machine profile (model.txt), so pin it. The
 # ClassPad profile (fx-cp400: 320x528 panel, IIC0 touch sensor, INTC
 # priorities) is the target and the default since 2026-11-05; it needs
-# dbt/emu-patch/add_classpad_addin.py applied to the emulator. EMU_MODEL=fx-cg100
+# dbt/emu-patch/add_classpad_addin.py (and add_sdmr.py for GUEST=standby) applied to the emulator. EMU_MODEL=fx-cg100
 # still runs the fx-CG100 profile but it is no longer part of the workflow.
 EMU_MODEL ?= fx-cp400
 EMU_ENV = CALCEMU_MODEL=$(EMU_MODEL)
@@ -115,6 +115,7 @@ $(BUILD):
 # --- guest (little-endian) ---
 GUEST_EXTRA_exc := guest/exc_vectors.S
 GUEST_EXTRA_power := guest/tmu_vectors.S
+GUEST_EXTRA_standby := guest/tmu_vectors.S
 GUEST_EXTRA_tmu := guest/tmu_vectors.S guest/tmu_loops.S
 GUEST_EXTRA_bench := bench/loops.S
 GUEST_EXTRA_apicall := guest/fault_vectors.S
@@ -249,9 +250,13 @@ $(BUILD)/flashtest.g3a: $(BUILD)/flashtest.elf
 flashtest: $(BUILD)/flashtest.g3a
 	-$(EMU_ENV) HLE_FLASH_CMD=1 $(EMU)/run-headless.sh $(abspath $<) 10
 
+# per-guest emulator environment: the standby guest needs an injected Clear
+# press (chord 20, held) while it sleeps in R-standby (ticks = 1/32768 s)
+RUN_ENV_standby := HLE_CB_CHORD=20 HLE_CB_CHORD_AT=250000 HLE_CB_CHORD_HOLD=100000
+RUN_ENV ?= $(RUN_ENV_$(GUEST))
 run: $(IMG).g3a
 	$(if $(NKBIN),$(NK_PAD))
-	-$(EMU_ENV) $(NK_ENV) $(EMU)/run-headless.sh $(abspath $(IMG).g3a) $(RUN_SECS)
+	-$(EMU_ENV) $(RUN_ENV) $(NK_ENV) $(EMU)/run-headless.sh $(abspath $(IMG).g3a) $(RUN_SECS)
 
 # run the current guest through the .bin loader (image in emulated flash)
 nkrun: NKBIN = $(BUILD)/$(GUEST).nk.bin

@@ -49,6 +49,8 @@ static void SetPeriod(UINT32 msec, UINT32 elapsed)
 }
 
 //------------------------------------------------------------------------------
+static VOID OALClasspadInitClock(void);
+
 BOOL OALTimerInit(UINT32 msecPerSysTick, UINT32 countsPerMSec, UINT32 countsMargin)
 {
     OALMSG(OAL_FUNC, (L"+OALTimerInit(%d, %d, %d)\r\n", msecPerSysTick, countsPerMSec, countsMargin));
@@ -74,6 +76,9 @@ BOOL OALTimerInit(UINT32 msecPerSysTick, UINT32 countsPerMSec, UINT32 countsMarg
     // Variable tick: the kernel reports its next wake-up time (kcalls.c
     // KCNextThread, SleepOneMore) and uses OEMGetTickCount for its tick reads.
     if (msecPerSysTick > 1) g_pOemGlobal->pfnUpdateReschedTime = OALTimerUpdateRescheduleTime;
+    // After OEMPowerOff the kernel calls OEMInitClock -> pfnInitClock (kwin32.c
+    // CallOEMPowerOff): TMU0 is powered off in R-standby, so program it again.
+    g_pOemGlobal->pfnInitClock = OALClasspadInitClock;
 
     // Stop channel 0, program it, clear a stale underflow, unmask, start
     MMIO_W8(TMU_TSTR, MMIO_R8(TMU_TSTR) & ~TMU_TSTR_STR0);
@@ -206,4 +211,13 @@ VOID OALStall(UINT32 microSec)
         elapsed += delta;
         base = cur;
     }
+}
+
+//------------------------------------------------------------------------------
+//  pfnInitClock: the kernel's clock re-init after OEMPowerOff (power.c). The
+//  TMU lost its registers in R-standby; CurMSec is the kernel's and stays.
+//
+static VOID OALClasspadInitClock(void)
+{
+    OALTimerInit(g_oalTimer.maxPeriodMSec, g_oalTimer.countsPerMSec, g_oalTimer.countsMargin);
 }

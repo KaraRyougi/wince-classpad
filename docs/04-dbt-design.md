@@ -781,6 +781,9 @@ kernel `VirtualAlloc`) it comes from the UTLB at translation time (until
 2026-11-04 the kernel range was also keyed by pc & 0x1FFFFFFF, so a kernel
 VA whose low bits fell inside the ROM's physical range, say 0xC1xxxxxx, was
 taken for ROM and a translation of a reused page survived the flush).
+R-standby (docs/06) also needs `dbt/emu-patch/add_sdmr.py`: the SDRAM
+mode-register command the resume stub writes at 0xFEC15040 is otherwise an
+invalid address outside the emulator's cold-boot mode.
 
 ## Test platform
 
