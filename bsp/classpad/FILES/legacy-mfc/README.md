@@ -14,29 +14,27 @@ bytes before image compression/alignment. Keep the 211 and 300 names unchanged.
 
 ## Build
 
-`platform.bib` includes these DLLs when `BSP_LEGACY_MFC=1`. They are ROM
-**FILES**, retaining the original PE headers for the runtime loader (including
-SH3), rather than SH4 ROMIMAGE MODULES. Their runtime location is `\Windows`.
-No COM registration is added.
+Only `mfcce300.dll` goes into the image (2026-11-06): `platform.bib` lists it
+unconditionally as a ROM **FILE** (not an SH4 MODULE), so the loader reads
+the original SH3 PE header; at run time it is `\Windows\mfcce300.dll`. Its
+one non-system import, `DocList.dll!DocList_Create`, comes from
+`SRC\APPS\DOCLIST`. The other three DLLs stay here, unused by the image.
 
-1. Make this repository, including the DLLs, available in Windows.
-2. Open the ClasspadUI **Release** Platform Builder build window.
-3. Run `tools\windows\build-legacy-mfc.bat` from this checkout. It copies the
-   DLLs to the installed BSP, backs up and appends to its existing platform.bib
-   if needed, then runs buildrel and makeimg. It preserves the installed BSP's
-   extra application entries and config.bib ROM layout.
-4. Set `BSP_LEGACY_MFC=1` in the OS Design environment settings for later builds.
-5. Check makeimg's size result against the chosen flash window before using
-   NK.bin. This task has not built or flashed a new image.
-
-The existing SH3 loader patch must be present **and built into kernel.dll**.
-The script checks the source marker only; that does not prove the running kernel
-contains it. See `bsp/kernel/README.md` for the kernel rebuild procedure.
+mfcce300 is an SH3 binary: it loads only on a kernel built with
+`bsp/kernel/loader-sh3-images.patch`. Applying the patch to loader.c is not
+enough; `nkmain.lib` has to be rebuilt (`build -c` in
+PRIVATE\WINCEOS\COREOS\NK\KERNEL) and kern.dll relinked (Sysgen, or
+`sysgen -p common nk`). `claude-build\build.bat` on the VM does both once.
+The 2026-11-06 IDE build lacked it: nkmain.lib (Nov 5 03:33) predates the
+patched loader.c (Nov 5 14:30) and kern.dll has no aligned 0x01A2/0x01A3
+constant.
 
 ## Dependency audit (2026-11-06)
 
 Compared every static import by name/ordinal with exports from the mounted
-ClasspadUI CLASSPAD_SH4_Release directory and these four original DLLs:
+ClasspadUI CLASSPAD_SH4_Release directory and these four original DLLs (a
+later check against the 2026-11-06 image, with DocList.dll's .def: all 1358
+imports of the four resolve):
 
 | DLL | Import providers (symbol counts) | Result |
 |---|---|---|

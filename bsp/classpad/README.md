@@ -184,11 +184,11 @@ Delete asks for confirmation. Exports: `DocList_Create`,
 Pocket PC ordinals 50 to 52); not the `CDocList` C++ members. It goes into
 the image with commctrl (`CE_MODULES_COMMCTRL`).
 
-The MFC DLLs themselves are staged separately in `FILES\legacy-mfc`
-(`BSP_LEGACY_MFC=1`, see its README); the 300 pair are SH3 binaries and
-need `bsp/kernel/loader-sh3-images.patch`. Untested so far:
-written and syntax-checked on the host only (2026-11-06), not yet built in
-Platform Builder or run.
+`mfcce300.dll` itself is in `FILES\legacy-mfc` and always in the image
+(platform.bib FILES, see that README); it is an SH3 binary and needs a
+kernel built with `bsp/kernel/loader-sh3-images.patch`. DocList.dll was
+built in Platform Builder and is in the 2026-11-06 image; neither has been
+loaded on CE yet.
 
 ## What the files are
 
