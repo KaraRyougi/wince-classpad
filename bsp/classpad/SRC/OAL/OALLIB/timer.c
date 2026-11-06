@@ -20,7 +20,8 @@
 //  Invariant kept by every write of TCNT0: counts elapsed since the last
 //  tick = actualCountsPerSysTick - 1 - TCNT0. A period is always programmed
 //  relative to the last tick (the ISR measures its own latency from the
-//  reloaded counter). Counter read-to-write latency still needs device validation.
+//  reloaded counter). Reprogramming briefly stops TMU0 for a coherent update;
+//  that stopped interval is not counted and still needs device drift measurement.
 //------------------------------------------------------------------------------
 #ifndef CLASSPAD_TIMER_HOST_TEST
 #include <bsp.h>
@@ -37,14 +38,23 @@ static UINT32 g_maxCounts;      // TCOR0 + 1: the reload period, TICK_MAX_MSEC w
 static void SetPeriod(UINT32 msec, UINT32 counterBase)
 {
     UINT32 counts, elapsed;
+    UINT8 start;
 
     if (msec > g_oalTimer.msecPerSysTick) msec = g_oalTimer.msecPerSysTick;
     counts = msec * g_oalTimer.countsPerMSec;
-    // Re-read at the programming point: translating this function can take
-    // much longer than a native call. A pending underflow belongs to the ISR.
-    if (MMIO_R16(TMU_TCR0) & TMU_TCR_UNF) return;
+    // Freeze channel 0 before checking UNF or changing the software period.
+    // Masking CPU interrupts alone does not stop the hardware: an underflow
+    // between the last UNF read and TCNT write would be charged as the NEW
+    // period (up to 1000 ms) although the OLD short period just elapsed.
+    // Preserve other TMU channels, especially the translator's profiler.
+    start = MMIO_R8(TMU_TSTR);
+    MMIO_W8(TMU_TSTR, start & ~TMU_TSTR_STR0);
+    (void)MMIO_R8(TMU_TSTR); // complete the stop before the status snapshot
+    if (MMIO_R16(TMU_TCR0) & TMU_TCR_UNF) {
+        MMIO_W8(TMU_TSTR, start);
+        return; // leave the old period and pending interrupt to the ISR
+    }
     elapsed = counterBase - 1 - MMIO_R32(TMU_TCNT0);
-    if (MMIO_R16(TMU_TCR0) & TMU_TCR_UNF) return;
     if (counts < elapsed + g_oalTimer.countsMargin) {
         msec   = (elapsed + g_oalTimer.countsMargin + g_oalTimer.countsPerMSec - 1) / g_oalTimer.countsPerMSec;
         counts = msec * g_oalTimer.countsPerMSec;
@@ -52,6 +62,7 @@ static void SetPeriod(UINT32 msec, UINT32 counterBase)
     g_oalTimer.actualMSecPerSysTick   = msec;
     g_oalTimer.actualCountsPerSysTick = counts;
     MMIO_W32(TMU_TCNT0, counts - elapsed - 1);
+    MMIO_W8(TMU_TSTR, start);
 }
 
 //------------------------------------------------------------------------------
@@ -102,6 +113,7 @@ UINT32 OALTimerIntrHandler()
     UINT32 sysIntr = SYSINTR_NOP, msec;
 
     if (ClasspadPowerTimerIsr()) return SYSINTR_NOP;
+    if (!(MMIO_R16(TMU_TCR0) & TMU_TCR_UNF)) return SYSINTR_NOP;
     // Acknowledge: clear UNF (the counter has reloaded TCOR0 and counts on)
     MMIO_W16(TMU_TCR0, MMIO_R16(TMU_TCR0) & ~TMU_TCR_UNF);
 

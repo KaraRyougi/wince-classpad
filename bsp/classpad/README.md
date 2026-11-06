@@ -359,3 +359,24 @@ produced exactly 90,0,90,0 with successful returns and matching 528x320/320x528
 geometry (`ROTATION HARNESS: PASS`). Normal NK SHA256:
 `04eb54538c61b387ae178c1384c8360c38435232b00b6499cc41b49cf80f8af9`.
 Hardware icon-strip hit regions still require confirmation on the device.
+
+Timer recovery (2026-11-06): hardware underflow could occur after SetPeriod's
+last UNF check and before its TCNT write, while software already recorded the
+new period. That charged an old short-period IRQ as up to 1000 ms. A host
+register-model regression fails on the previous code and passes with TMU0
+stopped during the coherent status/period/counter update. Pending UNF retains
+old accounting; stale ISR calls with no UNF do not advance CurMSec. Other TMU
+channel start bits are preserved. The short stopped interval is uncounted;
+hardware drift still needs measurement. This is a demonstrated code defect,
+not yet a confirmed explanation of the reported hardware clock/touch failure.
+
+`tools/windows/build-timer-recovery.bat` builds OAL and makes a normal image,
+a rotation regression image, and `NK-timer-stats.bin`, which starts DBTSTAT
+without requiring touch or Explorer and disables idle timeouts for diagnosis.
+The script restores the normal registry/image after packaging. For emulator
+clock measurements use `dbt/emu-patch/enable_rtc_reference.py`, rebuild the
+emulator, and set HLE_RTC_RUNNING=1: direct HLE boot otherwise leaves the RTC
+stopped, making DBTSTAT's 0.000 ratio invalid. Four-direction touch/geometry
+regression passes with the rebuilt timer; at 120 s app uptime the independent
+emulator RTC comparison reads tick/rtc 0.995. Physical-device confirmation is
+still required.

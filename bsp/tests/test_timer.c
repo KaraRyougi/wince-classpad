@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 typedef uint32_t UINT32, DWORD;
+typedef uint8_t UINT8;
 typedef int32_t INT32;
 typedef uint64_t UINT64;
 typedef int BOOL;
@@ -31,7 +32,7 @@ static void (*pQueryPerformanceFrequency)(void), (*pQueryPerformanceCounter)(voi
 typedef struct { void (*pfnUpdateReschedTime)(DWORD); } OEM_STATE;
 static OEM_STATE oem, *g_pOemGlobal = &oem;
 static UINT32 tcnt, tcor, tcr, tstr, programming_delay;
-static int reload_on_read;
+static int reload_on_read, reload_before_write;
 static int suspended, power_calls, irq_enabled;
 static BOOL INTERRUPTS_ENABLE(BOOL enabled) { BOOL old=irq_enabled; irq_enabled=enabled; return old; }
 static BOOL ClasspadPowerTimerIsr(void) { ++power_calls; return suspended; }
@@ -49,7 +50,14 @@ static UINT32 readreg(UINT32 addr) {
     return 0;
 }
 static void writereg(UINT32 addr, UINT32 v) {
-    if (addr == TMU_TCNT0) tcnt = v;
+    if (addr == TMU_TCNT0) {
+        // Hardware can underflow after the driver's final status read but
+        // before its counter write; writing TCNT does not clear UNF.
+        if (reload_before_write && (tstr & TMU_TSTR_STR0)) {
+            reload_before_write=0; tcr |= TMU_TCR_UNF; tcnt=tcor;
+        }
+        tcnt = v;
+    }
     if (addr == TMU_TCOR0) tcor = v;
     if (addr == TMU_TCR0) tcr = v;
     if (addr == TMU_TSTR) tstr = v;
@@ -94,6 +102,17 @@ int main(void) {
     CHECK("programming uses fresh counter", OALTimerCountsSinceSysTick() == 300);
     init(); suspended=1; tcnt=12345; tcr|=TMU_TCR_UNF;
     CHECK("suspend ISR bypasses scheduler", OALTimerIntrHandler() == SYSINTR_NOP && CurMSec == 100 && tcnt == 12345 && power_calls == 1);
+    init(); tcnt=7371-100; reload_before_write=1;
+    SetPeriod(1000,7372);
+    CHECK("reprogram does not mislabel a pending old-period IRQ", !(tcr & TMU_TCR_UNF) || g_oalTimer.actualMSecPerSysTick == 1);
+    reload_before_write=0;
+    CHECK("reprogram preserves running channel", (tstr & TMU_TSTR_STR0) != 0);
+    init();
+    CHECK("stale IRQ does not advance time", OALTimerIntrHandler() == SYSINTR_NOP && CurMSec == 100);
+    init(); tstr |= 6; tcr |= TMU_TCR_UNF; tcnt=tcor-50;
+    SetPeriod(1000,7372);
+    CHECK("pending IRQ retains old accounting", g_oalTimer.actualMSecPerSysTick==1 && (tcr & TMU_TCR_UNF));
+    CHECK("other channels preserved", tstr==7);
     printf("timer regression: %d failures\n", failures);
     return failures ? 1 : 0;
 }
