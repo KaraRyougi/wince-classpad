@@ -286,6 +286,13 @@ is still pending; emulator sensor behavior cannot establish hardware success.
 
 ## Suspend: R-standby (2026-11-06, unbuilt)
 
+First board test (2026-11-06): the panel went white and Clear/ON reset the
+calculator into the Casio OS. Both are fixed on `claude/rstandby-fix`
+(docs/06-deep-suspend.md section 8): the translator's memory-standby step
+now copies the OS (PLLCR bit 1, not SDCR bit 1, so the SDRAM keeps its
+contents), and the DDI turns the backlight off with DCS 0x51 = 0 before
+DISPOFF and restores the level on resume.
+
 `OEMPowerOff` now powers the core off the way the stock OS does (SH7305
 R-standby, docs/06-deep-suspend.md): it saves INTC, KEYSC and the CPG module
 stops, configures the KEYSC autonomous scan of Clear/ON's row and column,

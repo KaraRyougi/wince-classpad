@@ -11,7 +11,17 @@
  * to dbt_standby_resume_entry, which returns from dbt_standby_sleep with
  * r0 = 1. If SLEEP falls through (no R-standby: the emulator in another
  * profile) everything is undone and 0 is returned.
- * Register values and their order are the stock OS's (docs/06 section 3). */
+ * Register values and their order are the stock OS's (docs/06 section 3).
+ *
+ * The memory-standby step is OS 0x8002095e instruction for instruction:
+ * RTCSR = 0xA55A0000, SDCR (0xFEC10044) = 0, then PLLCR (0xA4150024) bit 1,
+ * PULCRBSC (0xA40501C3) |= 0x12 and PHCR (0xA405010E) &= 0xCFFF. The first
+ * version (2026-11-06) read the PLLCR write as "SDCR |= 2": with SDCR = 2,
+ * the refresh timer off and PLLCR untouched, the SDRAM was not put into
+ * self-refresh and lost its contents while the core was off; the resume
+ * stub (in RS memory) ran, jumped into the decayed SDRAM with SR.BL = 1,
+ * and the first exception there reset the machine into the Casio OS. The
+ * emulator does not model SDRAM refresh, so its test passed. */
 
         .macro SYNCO
         .word   0x00AB
@@ -37,7 +47,10 @@
 #define B_STBCR     0x14
 #define B_SDCR      0x18
 #define B_RTCSR     0x1C
-#define B_SIZE      0x60
+#define B_PLLCR     0x20
+#define B_PULCR     0x24                /* PULCRBSC, a byte */
+#define B_PHCR      0x28                /* PHCR, a word */
+#define B_SIZE      0x80
 
         .text
         .align  2
@@ -96,6 +109,17 @@ _dbt_standby_sleep:
         mov.l   .Lrtcsr, r1
         mov.l   @r1, r0
         mov.l   r0, @(B_RTCSR, r5)
+        mov.l   .Lpllcr, r1
+        mov.l   @r1, r0
+        mov.l   r0, @(B_PLLCR, r5)
+        mov.l   .Lpulcrbsc, r1
+        mov.b   @r1, r0
+        extu.b  r0, r0
+        mov.l   r0, @(B_PULCR, r5)
+        mov.l   .Lphcr, r1
+        mov.w   @r1, r0
+        extu.w  r0, r0
+        mov.l   r0, @(B_PHCR, r5)
         mov.l   .Lmagic, r0
         mov.l   r0, @(B_MAGIC, r4)
         mov     r4, r8                  /* the block, in a register that survives the bank switch */
@@ -130,26 +154,52 @@ _dbt_standby_sleep:
         mov.l   .Lstbcr, r1
         mov     #0x21, r0
         mov.l   r0, @r1
-        /* SDRAM: refresh timer off, self-refresh request (OS 0x8002095e) */
-        mov.l   .Lrtcsr, r1
-        mov.l   .La55a0000, r0
-        mov.l   r0, @r1
-        mov.l   .Lsdcr, r1
+        /* INTEVT = 0 (OS 0x80020e8e) */
+        mov.l   .Lintevt, r1
         mov     #0, r0
         mov.l   r0, @r1
+        /* memory standby, OS 0x8002095e verbatim: refresh timer and SDCR
+         * off, PLLCR bit 1, bus pull-ups, PH6. The OS keeps using its SDRAM
+         * stack after this until SLEEP, so the few fetches below are fine. */
+        mov.l   .Lsdcr, r1
+        mov.l   .La55a0000, r0
+        mov.l   r0, @(4, r1)            /* RTCSR 0xFEC10048 */
+        mov     #0, r0
+        mov.l   r0, @r1                 /* SDCR 0xFEC10044 */
+        mov.l   .Lpllcr, r1
         mov.l   @r1, r0
         or      #2, r0
         mov.l   r0, @r1
-        /* SR = MD|RB|BL, interrupts masked: r0-r7 are bank 1 from here */
+        mov.l   .Lpulcrbsc, r1
+        mov.b   @r1, r0
+        or      #0x12, r0
+        mov.b   r0, @r1
+        mov.l   .Lphcr, r1
+        mov.w   @r1, r0
+        mov.l   .Lcfff, r2
+        and     r2, r0
+        mov.w   r0, @r1
+        /* SR = MD|RB|BL with IMASK = 0 like the OS (0x80020ede): an RTC
+         * alarm can only end the standby if its priority is above IMASK.
+         * r0-r7 are bank 1 from here */
         mov.l   .Lsr_standby, r0
         ldc     r0, sr
         sleep
         /* fell through: no R-standby on this machine. Undo in reverse order. */
+        mov     r8, r2
+        add     #B_HI, r2
+        mov.l   .Lphcr, r1
+        mov.l   @(B_PHCR, r2), r0
+        mov.w   r0, @r1
+        mov.l   .Lpulcrbsc, r1
+        mov.l   @(B_PULCR, r2), r0
+        mov.b   r0, @r1
+        mov.l   .Lpllcr, r1
+        mov.l   @(B_PLLCR, r2), r0
+        mov.l   r0, @r1
         mov.l   .Lsdcr, r1
         mov     #0, r0
         mov.l   r0, @r1
-        mov     r8, r2
-        add     #B_HI, r2
         mov.l   @(B_SDCR, r2), r0
         mov.l   r0, @r1
         mov.l   .Lrtcsr, r1
@@ -203,7 +253,12 @@ _dbt_standby_sleep:
 .Lcc_invalidate: .long 0x00000808       /* ICI | OCI */
 .Lstub_addr:    .long 0xFD801200        /* rt.c copies the stub there */
 .Lreset_vector: .long 0xA0000000
-.Lsr_standby:   .long 0x700000F0        /* MD | RB | BL | IMASK=15 */
+.Lsr_standby:   .long 0x70000000        /* MD | RB | BL, IMASK=0: the OS's value */
+.Lpllcr:        .long 0xA4150024
+.Lpulcrbsc:     .long 0xA40501C3
+.Lphcr:         .long 0xA405010E
+.Lcfff:         .long 0xFFFFCFFF
+.Lintevt:       .long 0xFF000028
 
 /* ------------------------------------------------------------------ */
 /* The resume stub: copied to RS memory (0xFD801200), entered at BAR with
@@ -227,9 +282,37 @@ _dbt_standby_stub:
         mov.l   .Ls_rwtcsr, r1
         mov.w   .Ls_a507, r0
         mov.w   r0, @r1
+        /* the save block (RS memory, no SDRAM needed): without it, cold restart */
+        mov.l   .Ls_block, r4
+        mov.l   @(B_MAGIC, r4), r0
+        mov.l   .Ls_magic, r1
+        cmp/eq  r1, r0
+        bt      3f
+        mov.l   .Ls_reset, r0
+        jmp     @r0
+        nop
+3:      mov     r4, r5
+        add     #B_HI, r5
+        /* OS 0x800209c4: PLLCR bits 1-2 back (here: to their saved state),
+         * SDCR = 0, the pins back, then the settling wait */
+        mov.l   .Ls_pllcr, r1
+        mov.l   @r1, r0
+        mov     #-7, r2                 /* ~6 */
+        and     r2, r0
+        mov.l   @(B_PLLCR, r5), r3
+        mov     #6, r2
+        and     r2, r3
+        or      r3, r0
+        mov.l   r0, @r1
         mov.l   .Ls_sdcr, r1            /* SDRAM: leave self-refresh */
         mov     #0, r0
         mov.l   r0, @r1
+        mov.l   .Ls_phcr, r1
+        mov.l   @(B_PHCR, r5), r0
+        mov.w   r0, @r1
+        mov.l   .Ls_pulcrbsc, r1
+        mov.l   @(B_PULCR, r5), r0
+        mov.b   r0, @r1
         /* wait until the RTC's 64 Hz counter moved by more than 2 (OS 0x80020a32) */
         mov.l   .Ls_r64cnt, r1
         mov.b   @r1, r2
@@ -258,16 +341,7 @@ _dbt_standby_stub:
         mov.l   .Ls_rtcsr, r1
         mov.l   .Ls_a55a0088, r0
         mov.l   r0, @r1
-        /* the save block: without it, cold restart */
-        mov.l   .Ls_block, r4
-        mov.l   @(B_MAGIC, r4), r0
-        mov.l   .Ls_magic, r1
-        cmp/eq  r1, r0
-        bt      3f
-        mov.l   .Ls_reset, r0
-        jmp     @r0
-        nop
-3:      /* caches: invalidate, then the guest's CCR */
+        /* caches: invalidate, then the guest's CCR */
         mov.l   .Ls_ccr, r1
         mov.l   .Ls_cc_invalidate, r0
         mov.l   r0, @r1
@@ -276,8 +350,6 @@ _dbt_standby_stub:
         mov.l   r0, @r1
         SYNCO
         /* MMU registers; the TLB stays empty and refills from TTB */
-        mov     r4, r5
-        add     #B_HI, r5
         mov.l   .Ls_pteh, r1
         mov.l   @(B_PTEH, r4), r0
         mov.l   r0, @r1
@@ -320,6 +392,9 @@ _dbt_standby_stub:
 .Ls_ptel:       .long 0xFF000004
 .Ls_ttb:        .long 0xFF000008
 .Ls_mmucr:      .long 0xFF000010
+.Ls_pllcr:      .long 0xA4150024
+.Ls_pulcrbsc:   .long 0xA40501C3
+.Ls_phcr:       .long 0xA405010E
 .Ls_a507:       .word 0xA507
         .align  2
 .Ls_block:      .long 0                 /* patched: the save block address */

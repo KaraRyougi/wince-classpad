@@ -67,6 +67,7 @@ class ClasspadGPE : public GPE
     int                 m_panel;            // LCD_PANEL_DCS / LCD_PANEL_R61524
     volatile BOOL       m_suspended, m_resumePending;
     volatile BOOL       m_displayOn;        // DCS: DISPON sent (after the first push)
+    UCHAR               m_brightness;       // DCS: the backlight level saved at power-off
     BYTE               *m_pFrame;           // the primary surface, physically contiguous (AllocPhysMem)
     ULONG               m_framePa;          // its physical address
     int                 m_blit;             // registry "Blit": 1 = HC_LCD_PUSH (default), 2 = HC_LCD_BLIT with our window commands, 0 = translated stores
@@ -135,6 +136,7 @@ ClasspadGPE::ClasspadGPE()
     m_panel     = panel;
     m_displayOn = FALSE;
     m_suspended = m_resumePending = FALSE;
+    m_brightness = LCD_BRIGHTNESS_DEFAULT;
 
     m_iRotate = DMDO_0;
     m_mode.modeId    = 0;
@@ -409,16 +411,35 @@ void ClasspadGPE::PushRows(int top, int bottom)
 }
 
 // Power off / on from GWES. Called with the system mostly stopped: register
-// writes only, no synchronisation. Off: blank and sleep the DCS panel (GRAM
-// kept). On: wake it and let the push thread, whose wait times out every
-// DISP_PUSH_MS, repaint the whole screen; DISPON follows that push. The
-// R61524 path does nothing, as before.
+// writes only, no synchronisation. Off: backlight to 0, blank and sleep the
+// DCS panel (GRAM kept). On: wake it and let the push thread, whose wait
+// times out every DISP_PUSH_MS, repaint the whole screen and put the
+// backlight level back; DISPON follows that push. The R61524 path does
+// nothing, as before.
+//
+// The fx-CP400's backlight follows the panel's brightness register (DCS
+// 0x51), not SLPIN: with DISPOFF + SLPIN alone the backlight stays on and
+// the normally-white panel shows white for as long as the machine is off
+// (user report 2026-11-06). The stock OS powers the panel down with
+// 0x51 = 0, DISPOFF, SLPIN (ROM 0x80038a9a, 0x800380ba); it then also puts
+// the panel into deep standby (0xB9/0xBD/0xB1, which needs a full re-init)
+// and stops a port and a timer channel, which CE does not do: it keeps the
+// Casio OS's panel set-up and only needs SLPOUT to come back.
 VOID ClasspadGPE::PowerHandler(BOOL bOff)
 {
     if (m_panel != LCD_PANEL_DCS) return;
     if (bOff) {
+        UCHAR level;
         m_suspended = TRUE;
         m_resumePending = FALSE;
+        LcdCommand(LCD_DCS_RDDISBV);
+        (void)LcdReadParam();                   // dummy
+        level = LcdReadParam();
+        // 0 is what the emulator reads (no RDDISBV there), and a level this
+        // low would not have been the user's: come back at full brightness
+        m_brightness = level >= 0x10 ? level : LCD_BRIGHTNESS_DEFAULT;
+        LcdCommand(LCD_DCS_WRDISBV);
+        LcdParam(0);
         LcdCommand(LCD_DCS_DISPOFF);
         LcdCommand(LCD_DCS_SLPIN);
         m_displayOn = FALSE;
@@ -446,6 +467,8 @@ DWORD WINAPI ClasspadGPE::PushThread(LPVOID pThis)
             LcdCommand(LCD_DCS_SLPOUT);
             Sleep(120); // panel recovery must run in thread context
             if (p->m_suspended) continue;
+            LcdCommand(LCD_DCS_WRDISBV);         // the backlight back (PowerHandler set it to 0)
+            LcdParam(p->m_brightness);
             p->Dirty(0, p->m_nScreenHeightSave);
         }
         EnterCriticalSection(&p->m_cs);
