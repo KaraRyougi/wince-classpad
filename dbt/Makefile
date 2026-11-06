@@ -75,7 +75,10 @@ HOST_CFLAGS  += $(FLASH_DEFS)
 # stores to 0xFFFFF000, undefined on the real SoC); its prints then go only to
 # the debug ring. Use a private BUILD dir so emulator builds keep their port.
 DEVICE ?= 0
-HOST_CFLAGS  += $(if $(filter 1,$(DEVICE)),-DDBT_NO_DEBUG_PORT -DDBT_LCD_CONSOLE -DDBT_IRQPIN_GUARD,)
+# CONSOLE=0 leaves the panel console and the IRQ-pin guard out of a DEVICE=1
+# build (the console-less translator is the one that reached the desktop)
+CONSOLE ?= 1
+HOST_CFLAGS  += $(if $(filter 1,$(DEVICE)),-DDBT_NO_DEBUG_PORT $(if $(filter 1,$(CONSOLE)),-DDBT_LCD_CONSOLE -DDBT_IRQPIN_GUARD,),)
 NK_PADDED = $(BUILD)/nk-flash.bin
 NK_OFF_FILE = $(BUILD)/nk-flash.off
 NK_ENV = $(if $(NKBIN),HLE_OSROM=$(abspath $(NK_PADDED)) HLE_OSROM_PAD=$$(cat $(NK_OFF_FILE)),)   # recursive: nkrun sets NKBIN per target
