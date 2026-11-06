@@ -48,15 +48,43 @@ static const char *opname(sf_u32 op)
     return b;
 }
 
+static void check_packed_metadata(void)
+{
+    sf_u32 storage[DBT_MAX_META * sizeof(dbt_imeta) / 4 + 1];
+    dbt_block packed = blk;
+    unsigned bytes, i;
+    int ok = 1;
+    storage[sizeof(storage)/sizeof(storage[0])-1] = 0xA55A1234u;
+    bytes = dbt_pack_meta(storage, &blk);
+    packed.meta = (dbt_imeta *)storage; packed.packed_meta = 1;
+    if (bytes > (blk.nmeta + 1) * sizeof(dbt_imeta)) ok = 0;
+    for (i = 0; i <= blk.nmeta; ++i) {
+        dbt_imeta m, *orig = &blk.meta[i]; dbt_get_meta(&packed, (int)i, &m);
+        if (m.host_off != orig->host_off || m.kind != orig->kind ||
+            m.commit_rel != orig->commit_rel || m.fix_kind != orig->fix_kind || m.fix_reg != orig->fix_reg) ok = 0;
+        if ((m.kind == META_INSN || m.kind == META_LINEAR) && m.guest_off != orig->guest_off) ok = 0;
+        if (dbt_meta_has_targets(m.kind) && (m.target != orig->target || m.fallthrough != orig->fallthrough)) ok = 0;
+    }
+    for (i = 0; i < (unsigned)blk.host_len; ++i)
+        if (dbt_block_find(&packed, i) != dbt_block_find(&blk, i)) ok = 0;
+    if (storage[sizeof(storage)/sizeof(storage[0])-1] != 0xA55A1234u) ok = 0;
+    checks++;
+    if (!ok) { failures++; printf("FAIL packed metadata and exception range lookup\n"); }
+}
+
 /* Translate `n` guest opcodes placed at GBASE; returns status. */
+static dbt_link blk_links[DBT_MAX_LINKS];
+
 static int translate(const sf_u32 *ops, int n, int max_insns)
 {
-    int i;
+    int i, result;
     memset(gmem, 0, sizeof gmem);
     for (i = 0; i < n; i++) put16(GBASE + i * 2, ops[i]);
     env.max_insns = max_insns;
-    blk.meta = blk_meta; blk.spills = blk_spills;
-    return dbt_translate_block(&env, GBASE, HBASE, hbuf, DBT_BLOCK_WORDS, &blk, 0);
+    blk.meta = blk_meta; blk.spills = blk_spills; blk.links = blk_links;
+    result = dbt_translate_block(&env, GBASE, HBASE, hbuf, DBT_BLOCK_WORDS, &blk, 0);
+    if (result == DBT_OK) check_packed_metadata();
+    return result;
 }
 
 /* Compare host words [from, from+n) with expected. */
@@ -132,7 +160,14 @@ int main(void)
       int r = translate(ops, 3, 3);
       expect("alu status", r == DBT_OK);
       expect_seq("alu pass", 0, exp, 3);
+#ifdef DBT_LINEAR_META
+      expect("alu metadata coalesces copied instructions", blk.nmeta == 2 &&
+             blk.meta[1].kind == META_LINEAR && blk.meta[1].host_off == 2 &&
+             blk.meta[1].guest_off + 4 - blk.meta[1].host_off == 4 &&
+             dbt_block_find(&blk, 4) == 1 && blk.meta[2].host_off == 6);
+#else
       expect("alu meta", blk.nmeta == 3 && blk.meta[1].host_off == 2 && blk.meta[2].guest_off == 4 && blk.meta[3].host_off == 6 && blk.meta[3].guest_off == 6);
+#endif
       /* fall-through: nop (no borrowed register) ; lds r1,x0 ; mov.l lit,r1 ; jmp @r1 ; sts x0,r1 */
       expect("alu tail", hbuf[3] == OP_NOP && hbuf[4] == LDS_X0(1) && (hbuf[5] & 0xFF00) == 0xD100 && hbuf[6] == OP_JMP(1) && hbuf[7] == STS_X0(1));
       expect("alu link", blk.nlinks == 1 && blk.links[0].guest_target == GBASE + 6);
@@ -224,20 +259,21 @@ int main(void)
       expect("bsr pr", lit_of_movl(2) == GBASE + 4);
     }
 
-    /* 10. rts ; nop -> slot, then the PR inline cache: lds r1,y0; sts pr,r1; lds r2,y1; mov.l g,r2;
-     * cmp/eq r1,r2; bf +3; sts y0,r1; mov.l h,r2; jmp @r2; sts y1,r2; miss: sts y1,r2; lds r1,x0;
-     * mov.l a,r1; lds r1,x1; mov.l lookup_ic,r1; jmp @r1; sts y0,r1 */
+    /* 10. PR inline cache saves T in X1 and restores it on both paths. */
     { sf_u32 ops[] = { 0x000B, 0x0009 };
-      sf_u32 exp[] = { 0x0009, LDS_Y0(1), OP_STS_PR(1), op_lds_slot(2, SLOT_Y1), 0, OP_CMPEQ_RR(1, 2), OP_BF(3), STS_Y0(1), 0,
-                       OP_JMP(2), op_sts_slot(SLOT_Y1, 2), op_sts_slot(SLOT_Y1, 2), LDS_X0(1), 0, LDS_X1(1), 0, OP_JMP(1), STS_Y0(1) };
+      sf_u32 exp[] = { 0x0009, LDS_Y0(1), OP_STS_PR(1), op_lds_slot(2, SLOT_Y1), OP_STC_SR(2), LDS_X1(2), 0,
+                       OP_CMPEQ_RR(1, 2), OP_BF(5), op_sts_slot(SLOT_X1,2), OP_LDC_SR(2), STS_Y0(1), 0,
+                       OP_JMP(2), op_sts_slot(SLOT_Y1,2), op_sts_slot(SLOT_X1,2), OP_LDC_SR(2),
+                       op_sts_slot(SLOT_Y1,2), LDS_X0(1), 0, LDS_X1(1), 0, OP_JMP(1), STS_Y0(1) };
       translate(ops, 2, 4);
-      exp[4] = hbuf[4]; exp[8] = hbuf[8]; exp[13] = hbuf[13]; exp[15] = hbuf[15];
-      expect_seq("rts", 0, exp, 18);
+      exp[6] = hbuf[6]; exp[12] = hbuf[12]; exp[19] = hbuf[19]; exp[21] = hbuf[21];
+      expect_seq("rts preserves T on hit and miss", 0, exp, 24);
       expect("rts meta", blk.meta[1].kind == META_TARGET_PR && blk.meta[1].host_off == 2);
-      expect("rts ic literals", blk.ic_off > 0 && lit_of_movl(8) == 1 && lit_of_movl(16) == 0 && lit_of_movl(26) == HBASE + (sf_u32)blk.ic_off
-             && lit_of_movl(30) == env.rt_lookup_ic && hbuf[blk.ic_off / 2 + 1] == 1 && hbuf[blk.ic_off / 2 + 2] == 0);
-      { dbt_spill sp[4]; int n = dbt_block_pending_spills(&blk, 1, 18, sp, 4);    /* at the jmp of the hit path */
-        expect("rts ic pending", n == 2); }
+      expect("rts ic literals", blk.ic_off > 0 && lit_of_movl(12) == 1 && lit_of_movl(24) == 0 && lit_of_movl(38) == HBASE + (sf_u32)blk.ic_off
+             && lit_of_movl(42) == env.rt_lookup_ic && hbuf[blk.ic_off / 2 + 1] == 1 && hbuf[blk.ic_off / 2 + 2] == 0);
+      { dbt_spill sp[4]; int n = dbt_block_pending_spills(&blk, 1, 26, sp, 4);
+        expect("rts IC interrupt recovers GPRs and T", n == 3 && sp[0].gpr == DBT_SPILL_T && sp[0].slot == SLOT_X1); }
+
     }
 
     /* 11. jmp @r2 with slot that redefines r2: target captured first */
@@ -252,23 +288,25 @@ int main(void)
     { sf_u32 ops[] = { 0x440B, 0x0009 };
       /* lds r1,y0; mov.l ret,r1; lds r1,pr; nop; mov.l g,r1; cmp/eq r4,r1; bf +2; mov.l h,r1; jmp @r1; sts y0,r1;
        * miss: lds r4,x0; mov.l a,r1; lds r1,x1; mov.l lookup_ic,r1; jmp @r1; sts y0,r1 */
-      sf_u32 exp[] = { LDS_Y0(1), 0, OP_LDS_PR(1), 0x0009, 0, OP_CMPEQ_RR(4, 1), OP_BF(2), 0, OP_JMP(1), STS_Y0(1),
-                       LDS_X0(4), 0, LDS_X1(1), 0, OP_JMP(1), STS_Y0(1) };
+      sf_u32 exp[] = { LDS_Y0(1), 0, OP_LDS_PR(1), 0x0009, OP_STC_SR(1), LDS_X1(1), 0,
+                       OP_CMPEQ_RR(4,1), OP_BF(4), op_sts_slot(SLOT_X1,1), OP_LDC_SR(1), 0, OP_JMP(1), STS_Y0(1),
+                       op_sts_slot(SLOT_X1,1), OP_LDC_SR(1), LDS_X0(4), 0, LDS_X1(1), 0, OP_JMP(1), STS_Y0(1) };
       translate(ops, 2, 4);
-      exp[1] = hbuf[1]; exp[4] = hbuf[4]; exp[7] = hbuf[7]; exp[11] = hbuf[11]; exp[13] = hbuf[13];
-      expect_seq("jsr", 0, exp, 16);
-      expect("jsr pr", lit_of_movl(2) == GBASE + 4 && lit_of_movl(8) == 1 && lit_of_movl(14) == 0 && lit_of_movl(26) == env.rt_lookup_ic);
+      exp[1] = hbuf[1]; exp[6] = hbuf[6]; exp[11] = hbuf[11]; exp[17] = hbuf[17]; exp[19] = hbuf[19];
+      expect_seq("jsr preserves T on hit and miss", 0, exp, 22);
+      expect("jsr pr", lit_of_movl(2) == GBASE + 4 && lit_of_movl(12) == 1 && lit_of_movl(22) == 0 && lit_of_movl(38) == env.rt_lookup_ic);
       expect("jsr meta", blk.meta[1].kind == META_TARGET_REG && blk.meta[1].fix_reg == 4 && blk.meta[1].host_off == 8);
-      /* r1 (PR scratch) is spilled from 0 to its miss-path restore at 30 */
-      expect("jsr kept scratch", blk.nspills == 1 && blk.spills[0].gpr == 1 && blk.spills[0].slot == SLOT_Y0 && blk.spills[0].start == 0 && blk.spills[0].end == 30);
+      expect("jsr kept scratch", blk.nspills == 2 && blk.spills[0].gpr == 1 && blk.spills[0].slot == SLOT_Y0 && blk.spills[0].start == 0 && blk.spills[0].end == 42);
+
     }
-    /* 12b. jmp @r3 ; nop : no PR, 7-instruction hit path */
+    /* 12b. Register target: both lookup paths preserve T and scratch GPRs. */
     { sf_u32 ops[] = { 0x432B, 0x0009 };
       translate(ops, 2, 4);
-      /* nop; lds r1,y0; mov.l g,r1; cmp/eq r3,r1; bf +2; mov.l h,r1; jmp @r1; sts y0,r1; miss: lds r3,x0; ... */
-      expect("jmp fast", hbuf[0] == 0x0009 && hbuf[1] == LDS_Y0(1) && hbuf[3] == OP_CMPEQ_RR(3, 1) && hbuf[4] == OP_BF(2)
-             && hbuf[6] == OP_JMP(1) && hbuf[7] == STS_Y0(1) && hbuf[8] == LDS_X0(3) && hbuf[10] == LDS_X1(1)
-             && hbuf[12] == OP_JMP(1) && hbuf[13] == STS_Y0(1) && blk.meta[1].kind == META_TARGET_REG && blk.meta[1].fix_reg == 3);
+      /* X1 holds saved SR until the miss tail replaces it with the IC address. */
+      expect("jmp fast", hbuf[0] == 0x0009 && hbuf[1] == LDS_Y0(1) && hbuf[5] == OP_CMPEQ_RR(3,1) && hbuf[6] == OP_BF(4)
+             && hbuf[8] == OP_LDC_SR(1) && hbuf[10] == OP_JMP(1) && hbuf[11] == STS_Y0(1) && hbuf[14] == LDS_X0(3)
+             && hbuf[16] == LDS_X1(1) && hbuf[18] == OP_JMP(1) && hbuf[19] == STS_Y0(1)
+             && blk.meta[1].kind == META_TARGET_REG && blk.meta[1].fix_reg == 3);
     }
 
     /* 13. bt +4 (no slot): bf over the jump, block continues */
@@ -276,8 +314,15 @@ int main(void)
       sf_u32 exp[] = { OP_BF(4), OP_NOP, LDS_X0(1), 0, OP_JMP(1), STS_X0(1), 0x7101 };
       translate(ops, 2, 2);
       exp[3] = hbuf[3];
+#ifdef DBT_BASIC_BLOCKS
+      exp[6] = OP_NOP;
+      expect_seq("bt", 0, exp, 7);
+      expect("bt successors have independent entries", blk.guest_len == 2 && blk.nlinks == 2 &&
+             blk.links[0].guest_target == GBASE + 8 && blk.links[1].guest_target == GBASE + 2);
+#else
       expect_seq("bt", 0, exp, 7);
       expect("bt links", blk.nlinks == 2 && blk.links[0].guest_target == GBASE + 8 && blk.links[1].guest_target == GBASE + 4);
+#endif
     }
 
     /* 14. bt/s with a T-writing slot: bt/s +6 ; cmp/eq r1,r2 */
@@ -335,7 +380,7 @@ int main(void)
       int r; sf_u32 fa = 0;
       memset(gmem, 0, sizeof gmem); put16(GBASE + 4092, ops[0]); put16(GBASE + 4094, ops[0]);
       env.max_insns = 4;
-      blk.meta = blk_meta; blk.spills = blk_spills;
+      blk.meta = blk_meta; blk.spills = blk_spills; blk.links = blk_links;
       r = dbt_translate_block(&env, GBASE + 4092, HBASE, hbuf, DBT_BLOCK_WORDS, &blk, &fa);
       expect("fault", r == DBT_ERR_FETCH && fa == GBASE + 4096 && blk.guest_len == 4);
     }
@@ -378,7 +423,7 @@ int main(void)
       int i, r3_spilled = 0;
       translate(ops, 2, 2);
       for (i = 0; i < blk.nspills; i++) if (blk.spills[i].gpr == 3) r3_spilled = 1;
-      expect("jsr slot avoids the target register", !r3_spilled && blk.nspills == 2 && blk.spills[0].gpr == 4 && blk.spills[1].gpr == 5
+      expect("jsr slot avoids the target register", !r3_spilled && blk.nspills == 3 && blk.spills[0].gpr == 4 && blk.spills[1].gpr == 5
              && blk.meta[1].kind == META_TARGET_REG && blk.meta[1].fix_reg == 3);
     }
 
@@ -505,10 +550,16 @@ int main(void)
         expect_seq("dev load fast path", 16, exp + 16, 4);
         expect("dev bra slow skips the fast path", (hbuf[14] & 0xF000) == 0xA000 && (hbuf[14] & 0xFFF) == 6);   /* over 4 fast words + bra/nop */
         {
+            const int slow_word = 22;
             int w, found = 0;
-            for (w = 22; w < 40 && w < blk.code_len / 2; w++)
+            for (w = slow_word; w < 40 && w < blk.code_len / 2; w++)
                 if ((hbuf[w] & 0xF000) == 0xD000 && lit_of_movl(2 * w) == env.rt_fallback) found = 1;
+#ifdef DBT_INLINE_DEVICE_READ
+            expect("device read is native and has a commit point", !found && hbuf[slow_word] == ops[0] &&
+                   blk.meta[dbt_block_find(&blk, slow_word * 2)].commit_rel == 0);
+#else
             expect("dev slow path calls the fallback helper", found);
+#endif
         }
         env.dev_lo = env.dev_hi = 0;
         expect("plain load again without the range", translate(ops, 1, 0) == DBT_OK && blk.code_len < 22);
@@ -547,7 +598,13 @@ int main(void)
       expect("borrow cache kill def", hbuf[5] == 0x7001 && hbuf[6] == OP_SWAPB(0,1) && hbuf[9] == 0x2412);
       /* bf +4 ; sts a0,r1 ; lds r2,x0 ; mov.l ; jmp ; sts x0,r2 ; swap.b ... */
       expect("borrow cond exit", hbuf[10] == OP_BF(4) && hbuf[11] == STS_A0(1) && hbuf[12] == LDS_X0(2) && hbuf[14] == OP_JMP(2)
-             && hbuf[15] == STS_X0(2) && hbuf[16] == OP_SWAPB(0,1) && hbuf[19] == 0x2412);
+             && hbuf[15] == STS_X0(2));
+#ifdef DBT_BASIC_BLOCKS
+      expect("borrow restored at false successor", hbuf[16] == STS_A0(1) && blk.guest_len == 8 &&
+             blk.links[1].guest_target == GBASE + 8);
+#else
+      expect("borrow cache killed on fall-through", hbuf[16] == OP_SWAPB(0,1) && hbuf[19] == 0x2412);
+#endif
       expect("borrow cond link", blk.links[0].cond == 1 && blk.links[0].jump_off == 22 && blk.links[0].w0 == STS_A0(1) && blk.links[0].skip_w == OP_BF(4));
     }
 
@@ -595,7 +652,7 @@ int main(void)
       translate(ops, 4, 4);
       /* park; swaps; store; store (cached); lds r2,y0; mov.l; lds r2,pr; store (cached); sts a0,r1; cache... */
       expect("borrow jsr kept scratch", blk.borrow == 1 && hbuf[5] == 0x2512 && hbuf[6] == LDS_Y0(2) && hbuf[8] == OP_LDS_PR(2)
-             && hbuf[9] == 0x2512 && hbuf[10] == STS_A0(1) && hbuf[12] == OP_CMPEQ_RR(4, 2));
+             && hbuf[9] == 0x2512 && hbuf[10] == STS_A0(1) && hbuf[14] == OP_CMPEQ_RR(4, 2));
       for (i = 0; i < blk.code_len / 2; i++) if (hbuf[i] == LDS_Y0(1) || hbuf[i] == LDS_X0(1) || hbuf[i] == op_lds_slot(1, SLOT_Y1) || hbuf[i] == LDS_X1(1)) bad = 1;
       expect("borrow never spilled elsewhere", !bad);
     }
@@ -632,6 +689,69 @@ int main(void)
       translate(ops, 2, 2);
       for (i = 0; i < blk.code_len / 2; i++) if ((hbuf[i] & 0xF0FF) == 0x407A || (hbuf[i] & 0xF0FF) == 0x007A) a0 = 1;
       expect("slot_x0 third slot is y0", blk.borrow == -1 && !a0);
+    }
+
+    /* A hypercall may use r4-r7 without explicit instructions touching them
+     * in this block. Borrowing r4 would corrupt its argument on direct entry. */
+    {
+      sf_u32 ops[] = { 0x2212, 0x6333, 0xc3fb };
+      env.no_borrow = 0;
+      translate(ops, 3, 3);
+      expect("hypercall implicit arguments are never borrowed", blk.borrow == 8);
+    }
+
+    /* Packed recovery records must preserve r15 and offsets above 255 bytes.
+     * Exercise both alignments of the auxiliary 32-bit branch-target tail. */
+    {
+      dbt_imeta meta[DBT_MAX_META];
+      sf_u32 storage[DBT_MAX_META * sizeof(dbt_imeta) / 4];
+      dbt_block source = {0}, packed;
+      int n, i, ok = 1;
+      source.meta = meta;
+      for (n = DBT_MAX_META - 2; n < DBT_MAX_META; ++n) {
+        source.nmeta = n;
+        for (i = 0; i <= n; ++i) {
+          memset(&meta[i], 0, sizeof meta[i]);
+          meta[i].host_off = i * 4; meta[i].guest_off = i * 2;
+          meta[i].kind = i == n ? META_INSN : META_COND_REG;
+          meta[i].commit_rel = 255; meta[i].fix_kind = FIX_CR_BASE + CR_RBANK;
+          meta[i].fix_reg = 15;
+          meta[i].target = 0x81234560u + i; meta[i].fallthrough = 0xc1234560u + i;
+        }
+        dbt_pack_meta(storage, &source); packed = source;
+        packed.meta = (dbt_imeta *)storage; packed.packed_meta = 1;
+        for (i = 0; i <= n; ++i) {
+          dbt_imeta recovered; dbt_get_meta(&packed, i, &recovered);
+          if (recovered.fix_reg != 15 || recovered.fix_kind != meta[i].fix_kind ||
+              recovered.commit_rel != 255 || recovered.host_off != meta[i].host_off) ok = 0;
+          if (i == n) { if (recovered.guest_off != i * 2) ok = 0; }
+          else if (recovered.target != meta[i].target || recovered.fallthrough != meta[i].fallthrough) ok = 0;
+        }
+      }
+      expect("packed metadata bounds and auxiliary alignment", ok);
+    }
+
+    {
+      sf_u32 ops[] = { 0xe001, 0xe007, 0x000b, 0x0009 };
+      int off;
+      env.no_borrow = 1;
+      translate(ops, 4, 4);
+      off = dbt_block_entry(&blk, GBASE + 2);
+      expect("interior entry starts at the requested guest instruction", off >= 0 && hbuf[off / 2] == 0xe007);
+      expect("interior entry rejects original start and odd pc", dbt_block_entry(&blk, GBASE) < 0 && dbt_block_entry(&blk, GBASE + 3) < 0);
+      expect("interior entry rejects delay slot and end sentinel", dbt_block_entry(&blk, GBASE + 6) < 0 && dbt_block_entry(&blk, GBASE + 8) < 0);
+      blk.borrow = 8;
+      expect("interior entry rejects borrowed-register code", dbt_block_entry(&blk, GBASE + 2) < 0);
+      blk.borrow = -1;
+      blk.spills[0].start = 0; blk.spills[0].end = off + 2; blk.nspills = 1;
+      expect("interior entry rejects outstanding scratch save", dbt_block_entry(&blk, GBASE + 2) < 0);
+      blk.nspills = 0;
+      {
+        sf_u32 storage[DBT_MAX_META * sizeof(dbt_imeta) / 4];
+        dbt_block packed = blk;
+        dbt_pack_meta(storage, &blk); packed.meta = (dbt_imeta *)storage; packed.packed_meta = 1;
+        expect("interior entry works with packed recovery records", dbt_block_entry(&packed, GBASE + 2) == off);
+      }
     }
 
     printf("%d checks, %d failures\n", checks, failures);

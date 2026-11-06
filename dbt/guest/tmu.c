@@ -21,6 +21,7 @@
 
 extern char guest_vectors[];
 void trap_probe(volatile unsigned *out);
+unsigned loop_tcarry(unsigned, volatile unsigned *);
 unsigned loop_trapa(unsigned, volatile unsigned *), loop_alu(unsigned, volatile unsigned *), loop_bfs(unsigned, volatile unsigned *), loop_tslot(unsigned, volatile unsigned *),
          loop_ld(unsigned, volatile unsigned *), loop_ldpost(unsigned, volatile unsigned *), loop_ldself(unsigned, volatile unsigned *),
          loop_st(unsigned, volatile unsigned *), loop_stpre(unsigned, volatile unsigned *), loop_r0idx(unsigned, volatile unsigned *),
@@ -120,7 +121,16 @@ void guest_main(void)
     check("UNF pending in TCR0 meanwhile", (mmio_r16(TCR0) & 0x0100) != 0);
 
     irq_enable();
-    for (i = 0; i < 100000 && ticks < 3; i++) ;
+    /* Bound this wait by timer progress, not translated loop speed. Faster
+     * chaining can finish the old empty loop before three timer periods. */
+    {
+        unsigned previous = mmio_r32(TCNT0), elapsed = 0;
+        for (i = 0; i < 1000000 && elapsed < 10 * PERIOD && ticks < 3; ++i) {
+            unsigned current = mmio_r32(TCNT0);
+            elapsed += previous >= current ? previous - current : previous + PERIOD + 1 - current;
+            previous = current;
+        }
+    }
     check("interrupts arrive with IMASK=0", ticks >= 3);
     check("INTEVT = 0x400 (TMU0)", last_intevt == 0x400 && bad_intevt == 0);
     check("SR restored by rte: BL=0, IMASK=0", (get_sr() & (SR_BL | SR_IMASK)) == 0);
@@ -152,7 +162,7 @@ void guest_main(void)
      * construct per loop (tmu_loops.S), each run with interrupts off then on */
     {
         static const struct { const char *name; unsigned (*fn)(unsigned, volatile unsigned *); } loops[] = {
-            { "alu + bf", loop_alu }, { "bf/s", loop_bfs }, { "bt/s with dt in the slot", loop_tslot },
+            { "T across indirect calls", loop_tcarry }, { "alu + bf", loop_alu }, { "bf/s", loop_bfs }, { "bt/s with dt in the slot", loop_tslot },
             { "load", loop_ld }, { "post-increment load", loop_ldpost }, { "mov.l @r6,r6", loop_ldself },
             { "store", loop_st }, { "pre-decrement store", loop_stpre }, { "r0-indexed store", loop_r0idx },
             { "r0 data store", loop_r0disp }, { "load-modify-store", loop_rmw }, { "pc-relative", loop_pcrel },
@@ -162,6 +172,7 @@ void guest_main(void)
         for (k = 0; k < n; k++) {
             irq_disable();
             expect = loops[k].fn(30000, scratch);
+            if (loops[k].fn == loop_tcarry) check("T carry baseline is exact", expect == 30000);
             irq_enable();
             before = ticks;
             got = loops[k].fn(30000, scratch);
@@ -228,6 +239,7 @@ void guest_main(void)
     mmio_w8(TSTR, mmio_r8(TSTR) & (unsigned char)~1u);
     irq_disable();
     hc_puts("ticks total: "); hc_puthex(ticks); hc_putc('\n');
+    if (hc_getstat(16)) check("interrupt return reuses safe interior entries", hc_getstat(15) > 0);
     hc_stats();
     hc_puts(fails ? "RESULT: FAIL\n" : "RESULT: PASS\n");
     hc_exit(fails);

@@ -13,25 +13,26 @@ BUILD    ?= build
 # RAM layout (16 MiB at 0x8C000000), the single place these addresses live:
 #   0x8C000000-0x8C0FFFFF  launcher workspace (casio-emu starts us with sp=0x8C080000)
 #   0x8C100000-0x8C8FFFFF  guest window: 8 MiB (test guests linked at 0x8C100000; config.bib RAM)
-#   0x8C900000-0x8CDFFFFF  translator image (text ~64 KiB, bss ~4.4 MiB: 8192 block headers,
-#                          2.5 MiB metadata arena) and its C stack below the top
-#   0x8CE00000-0x8CFFFFFF  code cache, 2 MiB
+#   0x8C900000-0x8CCFFFFF  translator image (compact headers, 2624 KiB arena)
+#                          and its C stack below the top
+#   0x8CD00000-0x8CFFFFFF  code cache, 3 MiB
 # Until 2026-11-05 the window was 11.5 MiB with 4096 blocks and a 1 MiB cache;
 # the Standard Shell boot hit the 4096-block cap 28 times before POSTINIT
 # (115k translations), so the tables doubled at the expense of 3.5 MiB of CE RAM.
-# The translator's tables scale with BLOCKS (block headers, ~180 B each) and
-# ARENA_KB (per-block metadata, ~320 B per block); the image region must hold
+# Compact link storage now allows 14400 headers (56 B each) and a 3 MiB
+# code cache without reducing the CE RAM window. Tables scale with BLOCKS and
+# ARENA_KB (per-block metadata, packed instruction records plus auxiliary targets); the image region must hold
 # text + bss + a 128 KiB stack (rt/image.ld asserts it). Override on the
 # command line to try other sizes; config.bib's RAM line must agree with
 # GUEST_RAM_HI (the window ends 4 KiB earlier at the debug ring).
 GUEST_RAM_LO := 0x8C100000
 GUEST_RAM_HI ?= 0x8C900000
 IMAGE_BASE   ?= 0x8C900000
-IMAGE_STACK  ?= 0x8CE00000
-CACHE_BASE   ?= 0x8CE00000
-CACHE_SIZE   ?= 0x00200000
-BLOCKS       ?= 8192
-ARENA_KB     ?= 2560
+IMAGE_STACK  ?= 0x8CD00000
+CACHE_BASE   ?= 0x8CD00000
+CACHE_SIZE   ?= 0x00300000
+BLOCKS       ?= 14400
+ARENA_KB     ?= 2624
 LAYOUT_DEFS  := -DGUEST_RAM_LO=$(GUEST_RAM_LO)u -DGUEST_RAM_HI=$(GUEST_RAM_HI)u -DIMAGE_BASE=$(IMAGE_BASE) \
                 -DCACHE_BASE=$(CACHE_BASE)u -DCACHE_SIZE=$(CACHE_SIZE)u -DMAX_BLOCKS=$(BLOCKS) -DMETA_ARENA_BYTES=$(ARENA_KB)*1024u
 LAYOUT_LD    := -Wl,--defsym,IMAGE_BASE=$(IMAGE_BASE) -Wl,--defsym,_image_stack_top=$(IMAGE_STACK)
@@ -74,6 +75,8 @@ HOST_CFLAGS  += $(FLASH_DEFS)
 # make DEVICE=1 hhk: a translator without the emulator's debug port (byte
 # stores to 0xFFFFF000, undefined on the real SoC); its prints then go only to
 # the debug ring. Use a private BUILD dir so emulator builds keep their port.
+PROFILE ?= 0
+HOST_CFLAGS += $(if $(filter 1,$(PROFILE)),-DDBT_PROFILE,)
 DEVICE ?= 0
 # CONSOLE=1 adds the panel console (rt/lcdcon.c) to a DEVICE=1 build. Off by
 # default: on the real fx-CP400 a console build ends in a black screen while
@@ -111,6 +114,7 @@ $(BUILD):
 
 # --- guest (little-endian) ---
 GUEST_EXTRA_exc := guest/exc_vectors.S
+GUEST_EXTRA_power := guest/tmu_vectors.S
 GUEST_EXTRA_tmu := guest/tmu_vectors.S guest/tmu_loops.S
 GUEST_EXTRA_bench := bench/loops.S
 GUEST_EXTRA_apicall := guest/fault_vectors.S
@@ -133,12 +137,12 @@ DEVALL_STAMP := $(BUILD)/.devall-$(if $(filter 1,$(DEVALL)),1,0)
 $(DEVALL_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.devall-*
 	touch $@
-LAYOUT_STAMP := $(BUILD)/.layout-$(GUEST_RAM_HI)-$(IMAGE_BASE)-$(CACHE_BASE)-$(CACHE_SIZE)-$(BLOCKS)-$(ARENA_KB)-$(NK_FLASH)-$(NK_FLASH_MAX)-$(DEVICE)-$(CONSOLE)-$(IRQPINS)
+LAYOUT_STAMP := $(BUILD)/.layout-$(GUEST_RAM_HI)-$(IMAGE_BASE)-$(CACHE_BASE)-$(CACHE_SIZE)-$(BLOCKS)-$(ARENA_KB)-$(NK_FLASH)-$(NK_FLASH_MAX)-$(DEVICE)-$(CONSOLE)-$(IRQPINS)-$(PROFILE)
 $(LAYOUT_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.layout-*
 	touch $@
 
-$(BUILD)/$(GUEST).elf: $(GUEST_START) guest/$(GUEST).c $(GUEST_EXTRA) guest/hyper.h guest/mmio.h $(GUEST_LD) $(DEVALL_STAMP) $(LAYOUT_STAMP) | $(BUILD)
+$(BUILD)/$(GUEST).elf: $(GUEST_START) guest/$(GUEST).c $(GUEST_EXTRA) guest/hyper.h guest/mmio.h ../bsp/classpad/SRC/INC/classpad_power.h ../bsp/classpad/SRC/INC/classpad_keysc.h ../bsp/classpad/SRC/INC/bsp_base_regs.h ../bsp/classpad/SRC/INC/classpad_touch_bus.h ../bsp/classpad/SRC/INC/classpad_touch.h $(GUEST_LD) $(DEVALL_STAMP) $(LAYOUT_STAMP) | $(BUILD)
 	$(CC) $(GUEST_CFLAGS) -T $(GUEST_LD) -o $@ $(GUEST_START) guest/$(GUEST).c $(GUEST_EXTRA)
 
 # the guest wrapped as a CE .bin (records + ROMHDR pointer) for the loader test;
@@ -156,7 +160,7 @@ $(BUILD)/$(GUEST).bin: $(BUILD)/$(GUEST).elf
 
 # --- translator image (big-endian) ---
 # image files are named after the guest so that switching GUEST= relinks
-$(IMG).elf: $(RT_SRC) rt/guest_blob.S rt/image.ld rt/rt.h rt/nkbin.h rt/ctx_offsets.h rt/lcdcon.h rt/lcdfont.h $(BUILD)/$(GUEST).bin $(LAYOUT_STAMP)
+$(IMG).elf: $(RT_SRC) $(wildcard src/*.h) rt/guest_blob.S rt/image.ld rt/rt.h rt/profile.h rt/nkbin.h rt/ctx_offsets.h rt/lcdcon.h rt/lcdfont.h $(BUILD)/$(GUEST).bin $(LAYOUT_STAMP)
 	$(CC) $(HOST_CFLAGS) $(LAYOUT_LD) -DGUEST='"$(BUILD)/$(GUEST).bin"' -T rt/image.ld -o $@ $(RT_SRC) rt/guest_blob.S -lgcc
 
 $(IMG).bin: $(IMG).elf
@@ -189,6 +193,12 @@ IRQPINS    ?= mask
 HHK_CFLAGS := $(HOST_CFLAGS) -I hhk -DHHK_APP_VERSION='"$(HHK_VERSION)"' $(if $(filter keep,$(IRQPINS)),-DHHK_IRQPINS_KEEP,)
 HHK_LD     := -T hhk/hhk.ld -Wl,--defsym,HHK_BASE=$(HHK_BASE) -Wl,--defsym,HHK_LIMIT=$(HHK_LIMIT) -Wl,--defsym,PAYLOAD_BASE=$(IMAGE_BASE)
 HHK_COMMON := hhk/start.S hhk/util.c hhk/os.c
+
+.PHONY: lcdprobe
+lcdprobe: $(BUILD)/lcdprobe.hh3
+$(BUILD)/lcdprobe.hh3: $(HHK_COMMON) hhk/lcdprobe.c rt/lcd_io.h hhk/hhk.ld | $(BUILD)
+	$(CC) $(HHK_CFLAGS) -DHHK_APP_NAME='"LCD takeover probe"' -DHHK_APP_DESC='"Step through display handoff without booting CE or flashing"' $(HHK_LD) -o $@ $(HHK_COMMON) hhk/lcdprobe.c -lgcc
+	python3 ../tools/hhkcheck.py $@
 PAYLOAD_H  := $(BUILD)/dbt-$(GUEST)-payload.h
 WINCE_HHK  := $(BUILD)/wince.hhk
 NKFLASH_HHK := $(BUILD)/nkflash.hhk

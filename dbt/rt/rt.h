@@ -87,6 +87,7 @@ void dbt_sync_code(sf_u32 addr, sf_u32 len);        /* ocbwb + icbi over the ran
 extern char dbt_lookup[], dbt_lookup_link[], dbt_lookup_ic[], dbt_rte_stub[], dbt_fpu_stub[], dbt_fallback_stub[], dbt_ldc_sr_stub[];
 /* window labels for exception recovery inside the stubs (see stubs.S) */
 extern char dbt_lk_s1[], dbt_lk_s2[], dbt_lk_s3[], dbt_lkl_s1[], dbt_lkl_s2[], dbt_lkl_s3[], dbt_lki_s1[], dbt_lki_s2[], dbt_lki_s3[], dbt_lk_region_end[];
+extern char dbt_lk_ts[], dbt_lkl_ts[], dbt_lki_ts[];
 extern char dbt_hit_a[], dbt_hit_b[], dbt_hit_c[], dbt_hit_end[];
 extern char dbt_full_m1[], dbt_full_m2[], dbt_full_m3[], dbt_full_m4[], dbt_full_end[];
 extern char dbt_bank_tramp[], dbt_bt_s1[], dbt_bt_end[];
@@ -120,6 +121,7 @@ typedef struct {
     sf_u32 ic_misses_c;                  /* inline-cache misses that also missed the asm hash probe */
     sf_u32 probe_faults, helper_faults;                 /* code-probe faults delivered to the guest (TLB misses, address errors) */
     sf_u32 unchained, asid_switches, tlb_hooks;
+    sf_u32 asid_unchanged, tlb_scan_skips;
     sf_u32 arena_bytes;                  /* metadata arena in use */
     sf_u32 synth_exceptions;             /* address errors synthesized for unfetchable guest pcs */   /* exceptions resumed inside a block: restart / after the memory op */
     sf_u32 dbgring_bytes;          /* bytes printed from the guest debug ring */

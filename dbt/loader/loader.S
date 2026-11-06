@@ -4,6 +4,20 @@
         .text
         .global _start
 _start:
+#ifdef DBT_TEST_BOOT_POWER_SEED
+#ifdef DBT_NO_DEBUG_PORT
+#error inherited-power injection is emulator-only
+#endif
+        /* Regression fixture: enter with deep standby selected and the
+         * three CE clock sources gated, unlike the emulator's reset state. */
+        mov.l   .Ltest_stbcr, r0
+        mov     #0x20, r1
+        mov.l   r1, @r0
+        mov.l   .Ltest_mstp, r0
+        mov.l   .Ltest_gates, r1
+        mov.l   r1, @r0
+        .word   0x00AB
+#endif
         mov.l   .Lsrc, r0
         mov.l   .Ldst, r1
         mov.l   .Lend, r2
@@ -31,6 +45,11 @@ _start:
 .Lend:  .long _image_end
 .Ldst:  .long IMAGE_BASE               /* from the Makefile layout */
 .Lsize: .long _image_end - _image_start
+#ifdef DBT_TEST_BOOT_POWER_SEED
+.Ltest_stbcr: .long 0xA4150020
+.Ltest_mstp:  .long 0xA4150030
+.Ltest_gates: .long 0x00008060
+#endif
 
         .section .rodata
         .balign 32

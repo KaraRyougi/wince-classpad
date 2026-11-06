@@ -31,33 +31,36 @@ enum sh_br { BR_BRA, BR_BSR, BR_BT, BR_BF, BR_BTS, BR_BFS, BR_BRAF, BR_BSRF,
 
 enum sh_pc { PC_MOVW, PC_MOVL, PC_MOVA };
 
+/* Decoding is hot during cache refills. Keep operands narrow so the
+ * pre-pass copies 28 bytes per instruction instead of 84. Displacements
+ * retain signed 16-bit range; register masks retain all sixteen bits. */
 typedef struct {
-    int    kind;
-    sf_u32 op;
+    signed char    kind;
+    sf_u16 op;
     /* K_MEM */
-    int size;          /* 1, 2, 4 */
-    int is_store;
-    int am;            /* enum sh_am */
-    int base;          /* base register (ignored for AM_GBR) */
-    int data;          /* data register: Rn for loads, Rm for stores; r0 for fixed forms */
-    int disp;          /* byte displacement, already scaled */
-    int ctrl;          /* enum sh_cr when the data side is a control register (lds.l/sts.l/ldc.l/stc.l) */
-    int ctrl_bank;     /* bank index for CR_RBANK */
-    int movca;         /* movca.l r0,@rn */
+    signed char size;          /* 1, 2, 4 */
+    signed char is_store;
+    signed char am;            /* enum sh_am */
+    signed char base;          /* base register (ignored for AM_GBR) */
+    signed char data;          /* data register: Rn for loads, Rm for stores; r0 for fixed forms */
+    short disp;          /* byte displacement, already scaled */
+    signed char ctrl;          /* enum sh_cr when the data side is a control register (lds.l/sts.l/ldc.l/stc.l) */
+    signed char ctrl_bank;     /* bank index for CR_RBANK */
+    signed char movca;         /* movca.l r0,@rn */
     /* K_BRANCH */
-    int br;            /* enum sh_br */
-    int br_disp;       /* byte displacement relative to PC+4 */
-    int br_reg;
-    int has_slot;
+    signed char br;            /* enum sh_br */
+    short br_disp;       /* byte displacement relative to PC+4 */
+    signed char br_reg;
+    signed char has_slot;
     /* K_PCREL */
-    int pcrel;         /* enum sh_pc */
-    int pc_reg;
+    signed char pcrel;         /* enum sh_pc */
+    signed char pc_reg;
     /* K_PRIV: ctrl, plus mem fields when .l form (am/base/is_store set) */
-    int priv_mem;
+    signed char priv_mem;
     /* generic */
-    int writes_t;      /* writes SR.T */
-    sf_u32 touched;    /* GPR bitmask read or written */
-    sf_u32 defs;       /* GPR bitmask written */
+    signed char writes_t;      /* writes SR.T */
+    sf_u16 touched;    /* GPR bitmask read or written */
+    sf_u16 defs;       /* GPR bitmask written */
 } sh_insn;
 
 void sh4_decode(sf_u32 op, sh_insn *d);

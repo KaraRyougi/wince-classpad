@@ -1,36 +1,13 @@
 //------------------------------------------------------------------------------
 //  classpad_touch.cpp - DDSI layer of touch.dll for the fx-CP400 panel
 //
-//  The common touch MDD (tchmdd.lib) owns the IST: it waits on its event
-//  hTouchPanelEvent (the interrupt event of gIntrTouch) and calls
-//  DdsiTouchPanelGetPoint. Here gIntrTouch is the contact interrupt (INTEVT
-//  0x700, logical IRQ_TOUCH_PEN) that fires once when the stylus lands;
-//  while the panel is pressed the samples (1000 / sample rate ms apart, each
-//  reading the sensor on IIC0) are driven by this file's sample thread,
-//  which sets hTouchPanelEvent itself (SetEvent on an interrupt event goes
-//  through the kernel's EventModIntr, the ISR's path). The MDD's own way,
-//  a timeout on the IST's wait (gdwTouchIstTimeout), is NOT used: a timed
-//  wait on an interrupt event hits a CE 6.0 R3 kernel hole (WaitOneMore's
-//  retry path, notes/ce/kernel-sh-notes.md section 10) whenever the
-//  timeout expires between the kernel calls that set the wait up, which
-//  the translator makes routine; the event then refuses every later wait.
-//  The first sample without contact is the pen-up (TouchSampleValidFlag
-//  without the down flag), stops the sample thread and re-enables the
-//  interrupt with InterruptDone. gIntrTouchChanged is not used. Hardware
-//  details and the casio-emu model: classpad_touch.h.
-//
-//  The panel exists on the fx-CP400 only. On the fx-CG100 (the profile
-//  casio-emu runs the translator on) the IIC registers are not emulated at
-//  all, so the driver decides at DdsiTouchPanelEnable whether a panel is
-//  present: HKLM\HARDWARE\DEVICEMAP\TOUCH "Panel" (0/1), else the display
-//  height (the fx-CP400 screen has 528 rows, the fx-CG100 216). Without a
-//  panel the interrupt never fires, the IST sleeps forever and no register
-//  of the bus is touched. The raw coordinates are calibrated by the MDD from
-//  "CalibrationData" in the registry (platform.reg), computed from the
-//  emulator's stylus mapping for the 320x528 screen.
-//
-//  Not verified under the translator yet: casio-emu's ClassPad profile only
-//  cold-boots the real OS, so this image has only run on the fx-CG100.
+//  The MDD owns the interrupt event and calls GetPoint. A separate sampler
+//  polls the contact pin even before the first down, so missing/unverified
+//  pen IRQ routing cannot prevent all input. Only the MDD reads IIC0.
+//  Keep the MDD wait infinite (CE WaitOneMore interrupt-event timeout bug).
+//  The sampler waits on an ordinary stop event with a timeout instead.
+//  ClassPad command 0x84 returns x1,y1,z1,gh,x2,y2,z2,dm, NOT contact flags.
+//  Contact comes from Port R bit 5; calibration is supplied by the MDD.
 //------------------------------------------------------------------------------
 #include <windows.h>
 #include <types.h>
@@ -45,8 +22,6 @@
 #define TOUCH_SAMPLE_RATE_LOW       50
 #define TOUCH_SAMPLE_RATE_HIGH      100
 #define TOUCH_PANEL_MIN_ROWS        500         // a display this tall is the fx-CP400 panel
-#define TOUCH_IIC_POLLS             64          // DTE polls between 1 ms sleeps
-#define TOUCH_IIC_ROUNDS            100         // 100 ms per byte at most
 #define TOUCH_THREAD_PRIORITY       109         // the MDD's default for its IST ("Priority256")
 
 // MDD globals (tchmain.c). gdwTouchIstTimeout is left at its INFINITE default.
@@ -75,9 +50,9 @@ static INT      g_lastX, g_lastY;
 static LONG     g_attached;
 static DWORD    g_samples, g_contacts, g_busErrors;
 static HANDLE   g_hSampler;                     // sample thread
-static HANDLE   g_hevSample;                    // wakes it when the stylus lands
+static HANDLE   g_hevSample;                    // manual-reset shutdown event
 static volatile BOOL g_sampling;                // stylus down: keep waking the IST
-static volatile BOOL g_quit;
+static volatile BOOL g_quit, g_suspended;
 
 static DWORD RegDword(LPCTSTR name, DWORD dflt)
 {
@@ -90,56 +65,16 @@ static DWORD RegDword(LPCTSTR name, DWORD dflt)
 }
 
 //------------------------------------------------------------------------------
-//  IIC0, polled (ICIC = 0: the emulator then signals DTE for every byte)
-//
-static BOOL IicWaitDte(void)
-{
-    int rounds, polls;
-    for (rounds = 0; rounds < TOUCH_IIC_ROUNDS; rounds++) {
-        for (polls = 0; polls < TOUCH_IIC_POLLS; polls++) {
-            UINT8 sr = MMIO_R8(IIC0_ICSR);
-            if (sr & ICSR_DTE) return TRUE;
-            if (sr & (ICSR_TACK | ICSR_AL)) return FALSE;
-        }
-        Sleep(1);
-    }
-    return FALSE;
-}
+//  Polled IIC state machine, shared with the host protocol regression test.
+#include "classpad_touch_bus.h"
 
-// Start condition in transmit mode, then the address byte
-static BOOL IicStart(UINT8 address)
-{
-    MMIO_W8(IIC0_ICCR, ICCR_ICE | ICCR_TRS | ICCR_BBSY);
-    if (!IicWaitDte()) return FALSE;
-    MMIO_W8(IIC0_ICDR, address);
-    return IicWaitDte();
-}
-
-static void IicIdle(void)
-{
-    MMIO_W8(IIC0_ICCR, ICCR_ICE);
-}
-
-// Command 0x84 (snapshot), repeated start, read n bytes of the packet
 static BOOL TouchReadPacket(UINT8 *pkt, int n)
 {
-    int i;
-    if (!IicStart((UINT8)(TOUCH_IIC_ADDRESS << 1))) goto fail;
-    MMIO_W8(IIC0_ICDR, TOUCH_CMD_SNAPSHOT);
-    if (!IicWaitDte()) goto fail;
-    if (!IicStart((UINT8)((TOUCH_IIC_ADDRESS << 1) | 1))) goto fail;
-    MMIO_W8(IIC0_ICCR, ICCR_ICE | ICCR_SCP);        // receive, more bytes follow
-    for (i = 0; i < n; i++) {
-        if (i == n - 1) MMIO_W8(IIC0_ICCR, ICCR_ICE); // last byte
-        if (!IicWaitDte()) goto fail;
-        pkt[i] = MMIO_R8(IIC0_ICDR);
-    }
-    IicIdle();
-    return TRUE;
-fail:
+    if (TouchBusRead(pkt, n)) return TRUE;
     g_busErrors++;
-    if (g_busErrors <= 5) RETAILMSG(1, (TEXT("CLASSPAD TOUCH: IIC transfer failed (ICSR %02x)\r\n"), MMIO_R8(IIC0_ICSR)));
-    IicIdle();
+    if (g_busErrors <= 5 || (g_busErrors % 100) == 0)
+        RETAILMSG(1, (TEXT("CLASSPAD TOUCH: IIC error %d stage=%d status=%02x\r\n"),
+                      g_busErrors, g_touchBusStage, g_touchBusStatus));
     return FALSE;
 }
 
@@ -149,18 +84,16 @@ static BOOL PenDown(void)
 }
 
 //------------------------------------------------------------------------------
-//  Sampling while pressed: wake the MDD's IST every 1000 / rate ms. Started by
-//  DdsiTouchPanelGetPoint on the down transition, stopped by the pen-up.
-//
+//  Poll for the first down as well as movement/up. The sampler never reads
+//  IIC: the MDD serializes all transfers. A failed packet is retried while
+//  contact stays low, even if no down has been accepted yet.
 static DWORD WINAPI SampleThread(LPVOID)
 {
     CeSetThreadPriority(GetCurrentThread(), (int)RegDword(TEXT("Priority256"), TOUCH_THREAD_PRIORITY));
     while (!g_quit) {
-        WaitForSingleObject(g_hevSample, INFINITE);     // an ordinary event: no interrupt-event wait here
-        while (g_sampling && !g_quit) {
-            Sleep(1000 / (DWORD)g_rate);
-            SetEvent(hTouchPanelEvent);
-        }
+        DWORD rc = WaitForSingleObject(g_hevSample, 1000 / (DWORD)g_rate);
+        if (rc != WAIT_TIMEOUT || g_quit) break;
+        if (!g_suspended && hTouchPanelEvent && (PenDown() || g_sampling)) SetEvent(hTouchPanelEvent);
     }
     return 0;
 }
@@ -254,13 +187,22 @@ BOOL DdsiTouchPanelEnable(void)
     g_prevDown = FALSE;
     g_sampling = FALSE;
     if (g_panel) {
-        MMIO_W8(IIC0_ICIC, 0);                      // polled
-        IicIdle();
+        // Own the bus and pins instead of depending on the Casio OS state.
+        MMIO_W32(TOUCH_MSTPCR2, MMIO_R32(TOUCH_MSTPCR2) & ~TOUCH_IIC_STOP);
+        MMIO_W16(TOUCH_PJCR, MMIO_R16(TOUCH_PJCR) & ~0x0F00); // PJ4/5: IIC
+        MMIO_W16(TOUCH_PRCR, (MMIO_R16(TOUCH_PRCR) & ~0x0C00) | 0x0C00); // PR5 input
+        MMIO_W8(INTC_IMR(7), 0xF0);                 // IIC IRQs masked; status is polled
+        TouchBusReset();
         if (!g_hSampler) {
             g_quit = FALSE;
-            g_hevSample = CreateEvent(NULL, FALSE, FALSE, NULL);
+            g_hevSample = CreateEvent(NULL, TRUE, FALSE, NULL);
             if (g_hevSample) g_hSampler = CreateThread(NULL, 0, SampleThread, NULL, 0, NULL);
-            if (!g_hSampler) RETAILMSG(1, (TEXT("CLASSPAD TOUCH: no sample thread (%d), pen-up will not be seen\r\n"), GetLastError()));
+            if (!g_hSampler) {
+                if (g_hevSample) { CloseHandle(g_hevSample); g_hevSample = NULL; }
+                KernelIoControl(IOCTL_HAL_RELEASE_SYSINTR, &gIntrTouch, sizeof gIntrTouch, NULL, 0, NULL);
+                gIntrTouch = SYSINTR_UNDEFINED;
+                return FALSE;
+            }
         }
     }
     RETAILMSG(1, (TEXT("CLASSPAD TOUCH: enabled, SYSINTR %d, %s\r\n"), gIntrTouch,
@@ -274,7 +216,7 @@ void DdsiTouchPanelDisable(void)
     if (g_hSampler) {
         g_quit = TRUE; g_sampling = FALSE;
         SetEvent(g_hevSample);
-        WaitForSingleObject(g_hSampler, 500);
+        WaitForSingleObject(g_hSampler, INFINITE);
         CloseHandle(g_hSampler); g_hSampler = NULL;
         CloseHandle(g_hevSample); g_hevSample = NULL;
     }
@@ -296,8 +238,10 @@ LONG DdsiTouchPanelDetach(void)
 
 void DdsiTouchPanelPowerHandler(BOOL bOff)
 {
-    // nothing to switch; called with interrupts off, no messages
-    (void)bOff;
+    g_suspended = bOff;
+    if (!g_panel) return;
+    if (bOff) MMIO_W8(IIC0_ICCR, 0);
+    else { TouchBusReset(); g_sampling = TRUE; }
 }
 
 void DdsiTouchPanelGetPoint(P_TOUCH_PANEL_SAMPLE_FLAGS pTipState, INT *pUncalX, INT *pUncalY)
@@ -308,15 +252,19 @@ void DdsiTouchPanelGetPoint(P_TOUCH_PANEL_SAMPLE_FLAGS pTipState, INT *pUncalX, 
     *pUncalX = g_lastX;
     *pUncalY = g_lastY;
 
+    if (g_suspended) return;
     if (g_panel && PenDown()) {
         UINT8 pkt[TOUCH_PACKET_BYTES];
         if (TouchReadPacket(pkt, TOUCH_PACKET_BYTES)) {
-            UINT contact = (pkt[4] << 8) | pkt[5];
-            if (contact & TOUCH_CONTACT_BIT) {
+            if (PenDown()) {                       // z1 is a measurement, not a flag
                 down = TRUE;
                 g_lastX = (INT)(((pkt[0] << 8) | pkt[1]) >> 4);
                 g_lastY = (INT)(((pkt[2] << 8) | pkt[3]) >> 4);
             }
+        } else {
+            // A bus error is not a pen-up. Keep the previous contact and
+            // retry on the next poll; only the contact pin ends a stroke.
+            if (PenDown()) return;
         }
     }
 
@@ -329,7 +277,6 @@ void DdsiTouchPanelGetPoint(P_TOUCH_PANEL_SAMPLE_FLAGS pTipState, INT *pUncalX, 
             if (g_contacts <= 20 || (g_contacts % 50) == 0)
                 RETAILMSG(1, (TEXT("CLASSPAD TOUCH: down raw (%d,%d) contact %d\r\n"), g_lastX, g_lastY, g_contacts));
             g_sampling = TRUE;                      // the sample thread wakes the IST from here on
-            if (g_hevSample) SetEvent(g_hevSample);
         }
     } else {
         if (g_prevDown) {

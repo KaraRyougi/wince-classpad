@@ -2,9 +2,9 @@
  * main.c - translator image entry: find the guest, load it, run it.
  * Memory layout (fx-CG100 / fx-CP400 class, 16 MiB RAM) is defined in
  * dbt/Makefile and passed in as GUEST_RAM_LO/HI, IMAGE_BASE, CACHE_BASE/SIZE:
- *   0x8C100000 .. 0x8CC7FFFF  guest RAM, 11.5 MiB (test guests linked at 0x8C100000)
- *   0x8CC80000 .. 0x8CDFFFFF  this image (text/data/bss) + C stack
- *   0x8CE00000 .. 0x8CFFFFFF  code cache
+ *   0x8C100000 .. 0x8C8FFFFF  guest RAM, 8 MiB (test guests linked at 0x8C100000)
+ *   0x8C900000 .. 0x8CCFFFFF  this image (text/data/bss) + C stack
+ *   0x8CD00000 .. 0x8CFFFFFF  code cache, 3 MiB
  * Guest sources, in order of preference:
  *   1. a Windows CE .bin image in flash at NK_FLASH (P1 alias of the NOR;
  *      casio-emu: HLE_OSROM=... HLE_OSROM_PAD=<offset>, tools/nkflash.py
@@ -17,12 +17,13 @@
  */
 #include "rt.h"
 #include "nkbin.h"
+#include "boot_power.h"
 
 #ifndef GUEST_RAM_LO
 #define GUEST_RAM_LO 0x8C100000u
-#define GUEST_RAM_HI 0x8CC80000u
-#define CACHE_BASE   0x8CE00000u
-#define CACHE_SIZE   0x00200000u
+#define GUEST_RAM_HI 0x8C900000u
+#define CACHE_BASE   0x8CD00000u
+#define CACHE_SIZE   0x00300000u
 #endif
 #define GUEST_LOAD   GUEST_RAM_LO
 #ifndef NK_FLASH
@@ -76,6 +77,14 @@ void dbt_main(void)
     nkbin_info info;
     sf_u32 n = (sf_u32)(guest_blob_end - guest_blob_start);
     sf_u32 host, entry;
+    /* HollyHock inherits the Casio OS's module gates and standby selection.
+     * CE's OEMIdle emits a native SLEEP and assumes the system timer runs.
+     * The emulator's all-zero reset state used to hide this dependency. */
+#ifdef DBT_BOOT_POWER_INIT
+    dbt_boot_power((volatile unsigned *)0xA4150020u,
+                   (volatile unsigned *)0xA4150030u);
+    __asm__ volatile ("synco" ::: "memory");
+#endif
     memset(&info, 0, sizeof info);
 
     dbt_puts("[dbt] translator image up, guest blob "); dbt_puthex(n); dbt_puts(" bytes\n");

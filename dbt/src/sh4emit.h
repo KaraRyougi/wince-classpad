@@ -80,6 +80,7 @@ int  emit_lits_bytes(const emitter *e);
 #define OP_STC_SPC(n)      (0x0042u | ((n) << 8))
 #define OP_STC_SGR(n)      (0x003Au | ((n) << 8))
 #define OP_STC_DBR(n)      (0x00FAu | ((n) << 8))
+#define OP_LDC_SR(m)       (0x400Eu | ((m) << 8))
 #define OP_STC_SR(n)       (0x0002u | ((n) << 8))
 #define OP_STC_RBANK(b,n)  (0x0082u | ((n) << 8) | ((b) << 4))
 #define OP_LDC_GBR(m)      (0x401Eu | ((m) << 8))

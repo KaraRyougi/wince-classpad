@@ -47,9 +47,11 @@ typedef struct {
     int no_borrow;
 } dbt_env;
 
+enum { DBT_SPILL_T = 16 }; /* saved SR.T, not a GPR index */
+
 typedef struct {
     sf_u8  insn;             /* meta index the spill belongs to */
-    sf_u8  gpr, slot;        /* guest register saved in DSP slot */
+    sf_u8  gpr, slot;        /* guest GPR or DBT_SPILL_T saved in DSP slot */
     sf_u8  pad;
     sf_u16 start, end;       /* host byte offsets of the lds (start) and sts (end) */
 } dbt_spill;
@@ -62,7 +64,8 @@ enum { META_INSN = 0,        /* guest_pc + guest_off (restart the instruction) *
        META_TARGET_PR,       /* same, target is the guest PR (rts) */
        META_COND,            /* bt/s, bf/s after the slot: SSR.T ? target : fallthrough */
        META_COND_REG,        /* same, but the deciding T bit is bit 0 of r[fix_reg] (slot wrote T) */
-       META_RTE };           /* guest rte pending: not resumable */
+       META_RTE,
+       META_LINEAR };       /* copied instructions: guest offset advances with host offset */           /* guest rte pending: not resumable */
 
 /* Fix-up the runtime applies when an exception lands after the range's
  * memory operation has executed (host_off + commit_rel < exception offset):
@@ -87,39 +90,74 @@ typedef struct {
 #define DBT_MAX_META   (DBT_MAX_INSNS * 2 + 2)
 #define DBT_MAX_BLOCK_SPILLS 64
 
-/* A translated block. `meta` and `spills` point at storage the caller
- * provides before translation (at least DBT_MAX_META / DBT_MAX_BLOCK_SPILLS
- * entries); the runtime translates into a scratch block and then copies the
- * used entries into a compact arena, so the block table stays small. */
 typedef struct {
-    sf_u32 guest_pc;
-    sf_u32 guest_len;        /* bytes of guest code consumed */
-    sf_u32 host_base;        /* host address of buf[0] */
-    int    host_len;         /* bytes emitted (code + stubs + pool) */
-    int    code_len;         /* bytes of translated code before stubs */
-    dbt_imeta *meta;         /* nmeta + 1 entries used (the sentinel at guest_len) */
-    int    nmeta;
-    dbt_spill *spills;
-    int    nspills;
-    struct {
         sf_u16 lit_off;          /* host offset of the link literal (patched by the runtime) */
         sf_u16 stub_off;         /* host offset of the exit stub */
         sf_u16 jump_off;         /* host offset of the 4-word jump sequence (lds rT,X0 ...) */
         sf_u16 w0, w1, w2, skip_w; /* original words 0-2 of the sequence (and the skip), to undo chaining */
         sf_u8 cond;              /* the word before jump_off is the inverted bt/bf skip */
         sf_u8 backward;          /* guest target is at or before the branch (loop back edge) */
-        sf_u32 guest_target;     /* (20 bytes: 4096 blocks keep 8 of these each) */
-    } links[DBT_MAX_LINKS];
-    int    nlinks;
-    int    ic_off;           /* host offset of the inline cache {guest pc, host} literal pair, or -1 */
-    int    end_reason;       /* enum below */
-    /* Register borrowed for the whole block (-1: none): a GPR no instruction
-     * of the block touches, parked in A0 by the block's first instruction and
-     * restored before every exit. Stores byte-swap into it without a spill
-     * of their own, and it caches the swapped value of the last register
-     * stored (see translate.c, "borrowed register"). */
-    int    borrow;
+        sf_u32 guest_target;     /* 20 bytes, stored only for actual links */
+} dbt_link;
+
+/* A translated block. `meta`, `spills` and `links` point at storage the caller
+ * provides before translation (at least DBT_MAX_META / DBT_MAX_BLOCK_SPILLS
+ * entries, and DBT_MAX_LINKS links); the runtime translates into a scratch
+ * block and then copies the used entries into a compact arena, so the block table stays small. */
+/* 36-byte target header: bounded offsets/counts do not need full words. */
+typedef struct {
+    sf_u32 guest_pc, host_base;
+    dbt_imeta *meta;         /* nmeta + 1 entries, including the sentinel */
+    dbt_spill *spills;
+    dbt_link *links;
+    sf_u16 guest_len, host_len, code_len;
+    short ic_off;           /* inline cache pair offset, or -1 */
+    sf_u8 nmeta, packed_meta, nspills, nlinks, end_reason;
+    /* A GPR untouched by the block, parked in A0 and restored at exits;
+     * -1 means none. Used for byte-swapped stores and their cached value. */
+    signed char borrow;
 } dbt_block;
+typedef char check_meta_count[(DBT_MAX_META <= 255) ? 1 : -1];
+typedef char check_spill_count[(DBT_MAX_BLOCK_SPILLS <= 255) ? 1 : -1];
+typedef char check_host_offset[(DBT_BLOCK_WORDS * 2 <= 32767) ? 1 : -1];
+
+/* Runtime metadata: ordinary instructions need only six bytes.
+ * guest_half holds a halfword offset, or an index into the aligned branch
+ * target tail. kind_reg packs the 4-bit recovery kind and 4-bit GPR. */
+typedef struct {
+    sf_u16 host_off;
+    sf_u8 guest_half, kind_reg, commit_rel, fix_kind;
+} dbt_pmeta;
+typedef char check_pmeta_size[(sizeof(dbt_pmeta) == 6) ? 1 : -1];
+static inline unsigned dbt_meta_aux_offset(unsigned nmeta)
+{
+    return ((nmeta + 1) * sizeof(dbt_pmeta) + 3u) & ~3u;
+}
+static inline int dbt_meta_has_targets(unsigned kind)
+{
+    return kind == META_TARGET_CONST || kind == META_TARGET_REG ||
+           kind == META_COND || kind == META_COND_REG;
+}
+static inline unsigned dbt_meta_kind(const dbt_block *b, int i)
+{
+    return b->packed_meta ? (((const dbt_pmeta *)b->meta)[i].kind_reg & 15) : b->meta[i].kind;
+}
+static inline void dbt_get_meta(const dbt_block *b, int i, dbt_imeta *out)
+{
+    const dbt_pmeta *p;
+    if (!b->packed_meta) { *out = b->meta[i]; return; }
+    p = &((const dbt_pmeta *)b->meta)[i];
+    out->host_off = p->host_off; out->guest_off = (sf_u16)p->guest_half * 2;
+    out->kind = p->kind_reg & 15; out->commit_rel = p->commit_rel;
+    out->fix_kind = p->fix_kind; out->fix_reg = p->kind_reg >> 4;
+    out->target = out->fallthrough = 0;
+    if (dbt_meta_has_targets(out->kind)) {
+        const sf_u32 *aux = (const sf_u32 *)((const sf_u8 *)b->meta + dbt_meta_aux_offset(b->nmeta));
+        out->target = aux[p->guest_half * 2]; out->fallthrough = aux[p->guest_half * 2 + 1];
+    }
+}
+/* out needs at most (nmeta+1)*sizeof(dbt_imeta), aligned to 4 bytes. */
+unsigned dbt_pack_meta(void *out, const dbt_block *b);
 
 enum { END_BRANCH, END_TRAP, END_PRIV, END_FULL, END_ILLEGAL, END_FAULT };
 
@@ -153,9 +191,14 @@ int dbt_chain_direct(sf_u16 *code, sf_u32 host, sf_u32 target, int cond, int bac
 
 /* Map a host byte offset inside a block to its guest instruction. Returns
  * the meta index or -1. */
+/* Safe interior entry with canonical guest registers, or -1. No borrowed
+ * register, unfinished scratch save, delay-slot entry or end sentinel. */
+int dbt_block_entry(const dbt_block *b, sf_u32 guest_pc);
+
 int dbt_block_find(const dbt_block *b, sf_u32 host_off);
 
-/* Spills that must be undone (gpr <- slot) if an exception hit at host_off:
+/* Spills to undo at host_off: GPR <- slot, or SR.T <- slot bit 0 for
+ * DBT_SPILL_T. Pending means
  * those with start < host_off <= end, in undo order (apply in sequence; an
  * outer spill of the same register comes last and wins). `idx` is unused
  * (ranges and spills are independent). Returns count, fills up to `max`. */

@@ -1,0 +1,10 @@
+!INCLUDE $(_TARGETPLATROOT)\sources.cmn
+TARGETNAME=powertest
+TARGETTYPE=PROGRAM
+RELEASETYPE=PLATFORM
+WINCEOEM=1
+EXEENTRY=WinMainCRTStartup
+SOURCES=powertest.cpp
+TARGETLIBS=$(_PROJECTROOT)\cesysgen\sdk\lib\$(_CPUINDPATH)\coredll.lib
+
+INCLUDES=$(INCLUDES);$(_WINCEROOT)\public\common\sdk\inc;$(_WINCEROOT)\public\common\oak\inc

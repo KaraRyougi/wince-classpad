@@ -21,6 +21,7 @@
 #include "rt.h"
 #include "lcdcon.h"
 #include "lcdfont.h"
+#include "lcd_io.h"
 
 #define PORT   (*(volatile sf_u16 *)0xB4000000u)
 #define PRDR   (*(volatile sf_u8 *)0xA405013Cu)
@@ -38,7 +39,7 @@ static int    g_state;                 /* 0 untouched, 1 drawing, 2 handed over,
 static int    g_match;                 /* bytes of the hand-over string matched so far */
 static const char g_handover[] = "CLASSPAD DDI: ";   /* then 'c' ("console kept"): the driver leaves the top rows to us */
 
-static void cmd(unsigned c)  { PRDR = (sf_u8)(PRDR & ~0x10u); PORT = (sf_u16)c; PRDR = (sf_u8)(PRDR | 0x10u); }
+static void cmd(unsigned c)  { dbt_lcd_select(&PRDR, &PORT, c); }
 static void dat(unsigned v)  { PORT = (sf_u16)v; }
 static void delay(unsigned n) { volatile unsigned i; for (i = 0; i < n; i++) ; }
 

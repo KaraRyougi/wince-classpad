@@ -11,12 +11,12 @@
 //
 //  IIC0 (SH-Mobile I2C, 8-bit registers at 4-byte spacing):
 //    ICDR  data, ICCR control (ICE, TRS, BBSY/start, SCP), ICSR status
-//    (BUSY, AL, TACK, WAIT, DTE), ICIC interrupt enables (kept 0: polled),
-//    ICCL/ICCH clock. With ICIC=0 the emulator turns the WAIT handshake
-//    into DTE, so a transfer is: start, wait DTE, write a byte, wait DTE...
+//    (BUSY, AL, TACK, WAIT, DTE), ICIC status enables, ICCL/ICCH clock.
+//    The production transaction polls WAIT/DTE with peripheral IRQs masked
+//    at the INTC; ICIC=0x0E keeps WAIT/TACK status functional.
 //
-//  Sensor packet (command 0x84, 16 bytes, big-endian words): x, y, contact
-//  (0x8000 while pressed), then zeros. x and y are 12-bit left-aligned by
+//  Sensor packet (command 0x84, 16 bytes, big-endian words):
+//  x1,y1,z1,gh,x2,y2,z2,dm. Contact is PRDR, not z1. x/y are left-aligned by
 //  four; the uncalibrated point handed to the touch MDD is the 12-bit value.
 //  casio-emu maps the stylus to raw = 0x20B + x * 0x9B6 / 256 (x 0..319)
 //  and 0xF4 + y * 0x66F / 256 (y 0..575; rows 528..575 are the printed icon
@@ -25,14 +25,10 @@
 //
 //  Contact: Port R bit 5 reads 0 while the panel is pressed and INTEVT 0x700
 //  (mask IMR3 bit 4, priority IPRB bits 7:4) is raised on the down edge. The
-//  release and the samples while down come from polling (the MDD's IST
-//  timeout, gdwTouchIstTimeout).
-//
-//  Unverified on hardware and under the translator: casio-emu's ClassPad
-//  profile runs the translator image since 2026-11-05 (make EMU_MODEL=fx-cp400,
-//  dbt/emu-patch/add_classpad_addin.py; HLE_CB_TOUCH="x,y" presses the stylus
-//  headlessly); platform.reg says 320x528 since the same day, so the next
-//  image built exercises this driver there; see docs/05 section 5.
+//  sampler polls PRDR before the first contact too: the 0x700 routing is
+//  modeled by casio-emu but is not a prerequisite for receiving input.
+//  Hardware reference: ClasspadDev/gint src/touch/{driver,i2c,i2c_inth,touch}.c.
+//  End-to-end device validation is still required.
 //------------------------------------------------------------------------------
 #ifndef __CLASSPAD_TOUCH_H
 #define __CLASSPAD_TOUCH_H
@@ -60,8 +56,12 @@
 
 #define TOUCH_IIC_ADDRESS       0x40
 #define TOUCH_CMD_SNAPSHOT      0x84
-#define TOUCH_PACKET_BYTES      6       // x, y, contact (the 10 remaining bytes are zero)
-#define TOUCH_CONTACT_BIT       0x8000
+#define TOUCH_PACKET_BYTES      16      // x1,y1,z1,gh,x2,y2,z2,dm (BE words)
+
+#define TOUCH_MSTPCR2           0xA4150038
+#define TOUCH_IIC_STOP          (1u << 11)
+#define TOUCH_PJCR              0xA4050110
+#define TOUCH_PRCR              0xA405011C
 
 #define TOUCH_PRDR_CONTACT      0x20    // Port R bit 5, 0 = pressed
 

@@ -68,18 +68,16 @@
     "CalibrationData"="2076,1942 833,578 833,3306 3319,3306 3319,578 "
 ; @CESYSGEN ENDIF CE_MODULES_POINTER
 
-; Power Manager: never leave the On state on its own. The default timeouts
-; (UserIdle 60 s, SystemIdle 300 s, BattSuspend 300 s) would put the panel to
-; sleep through the display driver's PowerHandler on the real device; nothing
-; wakes the OAL's OEMPowerOff properly yet, and a calculator with no battery
-; driver has no reason to idle. 0 = disabled.
+; Power Manager: 60 s UserIdle, another 60 s SystemIdle (display off),
+; then 180 s without system activity before retained-RAM suspend.
+; The OAL arms only Clear/ON for full suspend. Display-idle alone can still
+; be cancelled by ordinary user input through the standard PM policy.
 ; @CESYSGEN IF CE_MODULES_PM
 [HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Power\Timeouts]
-    "ACUserIdle"=dword:0
-    "ACSystemIdle"=dword:0
-    "ACSuspend"=dword:0
-    "BattUserIdle"=dword:0
-    "BattSystemIdle"=dword:0
-    "BattSuspend"=dword:0
+    "ACUserIdle"=dword:3c
+    "ACSystemIdle"=dword:3c
+    "ACSuspend"=dword:b4
+    "BattUserIdle"=dword:3c
+    "BattSystemIdle"=dword:3c
+    "BattSuspend"=dword:b4
 ; @CESYSGEN ENDIF CE_MODULES_PM
-

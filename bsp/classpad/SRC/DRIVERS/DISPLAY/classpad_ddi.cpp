@@ -64,6 +64,7 @@ class ClasspadGPE : public GPE
     int                 m_dirtyBottom;
     DWORD               m_pushes;
     int                 m_panel;            // LCD_PANEL_DCS / LCD_PANEL_R61524
+    volatile BOOL       m_suspended, m_resumePending;
     volatile BOOL       m_displayOn;        // DCS: DISPON sent (after the first push)
     BYTE               *m_pFrame;           // the primary surface, physically contiguous (AllocPhysMem)
     ULONG               m_framePa;          // its physical address
@@ -91,7 +92,7 @@ public:
     SCODE           WrappedLine(GPELineParms *pParms);
     SCODE           WrappedBlt(GPEBltParms *pParms);
     void            Dirty(int top, int bottom);
-    void            PushRows(int top);
+    void            PushRows(int top, int bottom);
     static DWORD WINAPI PushThread(LPVOID pThis);
 };
 
@@ -130,6 +131,7 @@ ClasspadGPE::ClasspadGPE()
     if (height <= 0 || height > maxHeight) height = maxHeight;
     m_panel     = panel;
     m_displayOn = FALSE;
+    m_suspended = m_resumePending = FALSE;
 
     m_mode.modeId    = 0;
     m_mode.width     = width;
@@ -280,13 +282,14 @@ void ClasspadGPE::PanelInit()
     LcdParam(LCD_DCS_COLMOD_16BPP);
 }
 
-// Stream rows top..height-1 of the primary surface into the panel window.
-void ClasspadGPE::PushRows(int top)
+// DCS: stream dirty rows [top,bottom). R61524: retain its bottom-of-frame presentation rule.
+void ClasspadGPE::PushRows(int top, int bottom)
 {
     const BYTE *fb = (const BYTE *)m_pPrimarySurface->Buffer();
     int stride = m_pPrimarySurface->Stride(), width = m_nScreenWidth, height = m_nScreenHeight, x, y;
     if (!fb) return;
     if (top < m_consoleRows) top = m_consoleRows;          // the console's rows are not ours
+    if (m_panel == LCD_PANEL_DCS && bottom < height) height = bottom;
     if (top >= height) return;
     if (m_panel == LCD_PANEL_DCS && m_pFrame && m_blit == 1 && ClasspadCanTrap()) {
         // Native push by the translator with the window set there too
@@ -298,7 +301,12 @@ void ClasspadGPE::PushRows(int top)
         const BYTE *src = fb + top * stride;
         DWORD len = (DWORD)(height - top) * stride;
         CacheRangeFlush((LPVOID)src, len, CACHE_SYNC_WRITEBACK);
-        ClasspadHcLcdPush(0xA0000000 | ((m_framePa + top * stride) & 0x1FFFFFFF), (DWORD)top, (DWORD)(height - top), (DWORD)width);
+        // Each trap runs with BL=1. Bound it to four rows and return to
+        // guest code between strips so pending input/timer IRQs can run.
+        for (y = top; y < height; y += 4) {
+            DWORD rows = (DWORD)((height - y < 4) ? height - y : 4);
+            ClasspadHcLcdPush(0xA0000000 | ((m_framePa + y * stride) & 0x1FFFFFFF), (DWORD)y, rows, (DWORD)width);
+        }
     } else {
         if (m_panel == LCD_PANEL_DCS) {
             // window columns 0..width-1, rows top..height-1; RAMWR resets the cursor to its corner
@@ -349,26 +357,45 @@ VOID ClasspadGPE::PowerHandler(BOOL bOff)
 {
     if (m_panel != LCD_PANEL_DCS) return;
     if (bOff) {
+        m_suspended = TRUE;
+        m_resumePending = FALSE;
         LcdCommand(LCD_DCS_DISPOFF);
         LcdCommand(LCD_DCS_SLPIN);
         m_displayOn = FALSE;
     } else {
-        LcdCommand(LCD_DCS_SLPOUT);
-        m_dirtyTop = 0; m_dirtyBottom = m_nScreenHeight;
+        m_resumePending = TRUE;
+        m_suspended = FALSE;
     }
 }
 
 DWORD WINAPI ClasspadGPE::PushThread(LPVOID pThis)
 {
     ClasspadGPE *p = (ClasspadGPE *)pThis;
+    DWORD nextPush = GetTickCount();
     while (p->m_run) {
         int top, bottom;
         WaitForSingleObject(p->m_hEvent, DISP_PUSH_MS);
+        // An event wakes the thread immediately; it is not a rate limit.
+        // Keep collecting dirty rows until the next allowed push time.
+        LONG wait = (LONG)(nextPush - GetTickCount());
+        if (wait > 0) Sleep((DWORD)wait);
+        if (!p->m_run) break;
+        if (p->m_suspended) continue;
+        if (p->m_resumePending) {
+            p->m_resumePending = FALSE;
+            LcdCommand(LCD_DCS_SLPOUT);
+            Sleep(120); // panel recovery must run in thread context
+            if (p->m_suspended) continue;
+            p->Dirty(0, p->m_nScreenHeight);
+        }
         EnterCriticalSection(&p->m_cs);
         top = p->m_dirtyTop; bottom = p->m_dirtyBottom;
         p->m_dirtyTop = p->m_nScreenHeight; p->m_dirtyBottom = 0;
         LeaveCriticalSection(&p->m_cs);
-        if (top < bottom) p->PushRows(top);
+        if (top < bottom) {
+            p->PushRows(top, bottom);
+            nextPush = GetTickCount() + DISP_PUSH_MS;
+        }
     }
     return 0;
 }

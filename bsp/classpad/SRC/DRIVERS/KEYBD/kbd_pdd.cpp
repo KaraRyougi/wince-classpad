@@ -55,6 +55,7 @@ static HANDLE           g_hThread;                  // IST
 static HANDLE           g_hPoll;                    // poll thread
 static CRITICAL_SECTION g_csScan;                   // one scan at a time
 static UINT16           g_image[KEYSC_WORDS];       // last matrix image
+static volatile BOOL    g_suppressClear;
 static DWORD            g_events;                   // key events delivered
 
 static DWORD RegDword(LPCTSTR name, DWORD dflt)
@@ -112,6 +113,10 @@ static UINT KeyscScan(void)
     UINT16 now[KEYSC_WORDS];
     UINT w, b, n = 0;
     for (w = 0; w < KEYSC_WORDS; w++) now[w] = MMIO_R16(KEYSC_KIUDATA(w));
+    if (g_suppressClear) {
+        if (!(now[0] & KEYSC_CLEAR_MASK)) g_suppressClear = FALSE;
+        now[0] &= ~KEYSC_CLEAR_MASK;
+    }
     for (w = 0; w < KEYSC_WORDS; w++) {
         UINT16 changed = (UINT16)(now[w] ^ g_image[w]);
         if (!changed) continue;
@@ -165,6 +170,9 @@ static DWORD WINAPI KeyscIst(LPVOID)
         g_dwSysIntr = SYSINTR_UNDEFINED;
     }
 
+    if (g_dwSysIntr != SYSINTR_UNDEFINED &&
+        !KernelIoControl(IOCTL_HAL_ENABLE_WAKE, &g_dwSysIntr, sizeof g_dwSysIntr, NULL, 0, NULL))
+        RETAILMSG(1, (TEXT("CLASSPAD KEYBD: wake registration failed %d\r\n"), GetLastError()));
     KeyscInit();
     KeyscScan();        // keys already held: report them, start from the live image
     g_hPoll = CreateThread(NULL, 0, KeyscPoll, (LPVOID)pollMs, 0, NULL);
@@ -202,6 +210,7 @@ static void WINAPI ClassPad_PowerHandler(UINT, BOOL fTurnOff)
     // Called with interrupts off: no RETAILMSG, no waits
     if (fTurnOff) KeyscStop();
     else {
+        g_suppressClear = TRUE;
         MMIO_W16(KEYSC_KOUTPINSET, KEYSC_KOUT_ALL);
         MMIO_W16(KEYSC_KINPINSET, KEYSC_KIN_ALL);
         MMIO_W16(KEYSC_KIUMODEREG, KEYSC_MODE_VALUE);

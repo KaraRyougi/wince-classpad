@@ -39,6 +39,7 @@
 .Lsr_init\sfx:      .long 0x400010F0        /* MD | DSP | IMASK=15 */
 .Lhmask\sfx:        .long 8191              /* HSIZE - 1, must match rt.c */
 .Lhash\sfx:         .long _dbt_hash
+.Llookup_sr\sfx:    .long _dbt_lookup_sr
 .Limask\sfx:        .long 0x000000F0
 .Lctx_rt\sfx:       .long _dbt_ctx_rt
 .Lctx_rt_rend\sfx:  .long _dbt_ctx_rt + CTX_REND
@@ -133,13 +134,22 @@ _dbt_sync_code:
 /* Lookup stubs. In: X0 = guest target pc, X1 = link literal address (link
  * variant) or inline-cache literal pair (ic variant). r0,r1,r2 are saved to
  * Y0,Y1,A0 (window: resume = X0). */
-        .macro LOOKUP name, link, ic, cfunc, s1, s2, s3
+        .macro LOOKUP name, link, ic, cfunc, s1, s2, s3, ts
         .global _dbt_\name
 _dbt_\name:
         LDSX    0, SLOT_Y0
 \s1:    LDSX    1, SLOT_Y1
 \s2:    LDSX    2, SLOT_A0
 \s3:    STSX    SLOT_X0, 0             /* r0 = gpc */
+        stc     sr, r1
+        mov.l   .Llookup_srA, r2
+\ts:    mov.l   r1, @r2
+        .if \ic
+        /* User-target refills must register the IC in the active-ASID list.
+         * The translated site's own IC hit remains the unchanged fast path. */
+        cmp/pz  r0
+        bt      2f
+        .endif
         .if \link
         bra     2f                     /* a link is resolved once: let C patch and chain it */
         nop
@@ -147,6 +157,12 @@ _dbt_\name:
         mov     r0, r1
         shlr    r1                     /* gpc >> 1 */
         swap.w  r0, r2                 /* low half = gpc >> 16 */
+#ifdef DBT_HASH_FOLD14
+        /* rotate-right 14: include bits 14/15 that the old fold omitted.
+         * Original SR.T is already saved and restored by this stub. */
+        rotl    r2
+        rotl    r2
+#endif
         xor     r2, r1                 /* same index as hidx() in rt.c */
         mov.l   .LhmaskA, r2
         and     r2, r1
@@ -175,10 +191,14 @@ _dbt_\name:
         STSX    SLOT_X0, 0
         mov.l   r0, @r2
         .endif
+        mov.l   .Llookup_srA, r0
+        mov.l   @r0, r0
+        ldc     r0, sr
         bra     _dbt_tail_hit
         nop
 2:      /* miss: r0 = gpc (also in X0) */
-        stc     sr, r1                 /* guest SR */
+        mov.l   .Llookup_srA, r2
+        mov.l   @r2, r1                /* guest SR before hash/IC comparisons */
         mov.l   .LimaskA, r2
         or      r1, r2
         ldc     r2, sr                 /* interrupts masked from here on */
@@ -197,10 +217,11 @@ _dbt_\name:
         nop
         .endm
 
-        LOOKUP  lookup, 0, 0, .LresolveA, _dbt_lk_s1, _dbt_lk_s2, _dbt_lk_s3
-        LOOKUP  lookup_link, 1, 0, .LresolveA, _dbt_lkl_s1, _dbt_lkl_s2, _dbt_lkl_s3
-        LOOKUP  lookup_ic, 0, 1, .Lresolve_icA, _dbt_lki_s1, _dbt_lki_s2, _dbt_lki_s3
+        LOOKUP  lookup, 0, 0, .LresolveA, _dbt_lk_s1, _dbt_lk_s2, _dbt_lk_s3, _dbt_lk_ts
+        LOOKUP  lookup_link, 1, 0, .LresolveA, _dbt_lkl_s1, _dbt_lkl_s2, _dbt_lkl_s3, _dbt_lkl_ts
+        LOOKUP  lookup_ic, 0, 1, .Lresolve_icA, _dbt_lki_s1, _dbt_lki_s2, _dbt_lki_s3, _dbt_lki_ts
         .global _dbt_lk_s1, _dbt_lk_s2, _dbt_lk_s3, _dbt_lkl_s1, _dbt_lkl_s2, _dbt_lkl_s3, _dbt_lki_s1, _dbt_lki_s2, _dbt_lki_s3
+        .global _dbt_lk_ts, _dbt_lkl_ts, _dbt_lki_ts
         .global _dbt_lk_region_end
 _dbt_lk_region_end:
 

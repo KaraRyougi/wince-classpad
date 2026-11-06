@@ -21,5 +21,9 @@
 { IOCTL_PROCESSOR_INFORMATION,              0,  OALIoCtlProcessorInfo       },
 { IOCTL_HAL_GETREGSECUREKEYS,               0,  OALIoCtlHalGetRegSecureKeys },
 { IOCTL_HAL_UPDATE_MODE,                    0,  OALIoCtlHalUpdateMode       },
+{ IOCTL_HAL_PRESUSPEND,                     0, OALIoCtlHalPresuspend      },
+{ IOCTL_HAL_ENABLE_WAKE,                    0, OALIoCtlHalEnableWake      },
+{ IOCTL_HAL_DISABLE_WAKE,                   0, OALIoCtlHalDisableWake     },
+{ IOCTL_HAL_GET_WAKE_SOURCE,                0, OALIoCtlHalGetWakeSource   },
 // Required Termination
 { 0,                                        0,  NULL                        }

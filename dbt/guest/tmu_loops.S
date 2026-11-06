@@ -332,3 +332,32 @@ _loop_sub:
         add     #3, r1
         rts
         xor     r1, r2
+
+/* Carry both T values through an indirect call while IRQs sweep the IC. */
+        .align 2
+        .global _loop_tcarry
+_loop_tcarry:
+        sts.l   pr,@-r15
+        mov     r4,r6
+        mov     #0,r7
+        mov.l   .Ltreader,r1
+1:      clrt
+        jsr     @r1
+        nop
+        add     r0,r7
+        sett
+        jsr     @r1
+        nop
+        add     r0,r7
+        dt      r6
+        bf      1b
+        mov     r7,r0
+        lds.l   @r15+,pr
+        rts
+        nop
+        .align 2
+.Ltreader: .long _loop_treader
+_loop_treader:
+        movt    r0
+        rts
+        nop

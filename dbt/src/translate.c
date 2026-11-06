@@ -252,6 +252,15 @@ static void tr_mem_dev(tctx *t, const sh_insn *d)
     slow = emit_pos(e);
     emit_patch16(e, bra_slow, OP_BRA((slow - (bra_slow + 4)) / 2));
     begin_meta_kind(t, META_INSN, goff, 0, 0);
+#ifdef DBT_INLINE_DEVICE_READ
+    if (!d->is_store) {
+        /* P4 register reads already have the guest's numeric value. They
+         * neither change ASID nor invalidate mappings, so no C hook is
+         * needed. Keep a commit point for post-increment recovery. */
+        commit(t, FIX_NONE, 0);
+        emit16(e, d->op);
+    } else
+#endif
     call_helper(t, t->env->rt_fallback, 0, 2, d->op, d->touched);
     done = emit_pos(e);
     emit_patch16(e, bra_done, OP_BRA((done - (bra_done + 4)) / 2));
@@ -464,27 +473,57 @@ static void ic_miss_tail(tctx *t, int rT)
     restore(t, rT, SLOT_Y0);
 }
 
+/* IC comparisons must not change the guest's T bit. X1 is free until the
+ * miss tail fills it with the IC address. Track T like a scratch save so
+ * an interrupt between cmp/eq and ldc sr also sees the original value. */
+static void ic_save_t(tctx *t, int r)
+{
+    dbt_block *b = t->blk;
+    emit16(&t->em, OP_STC_SR(r));
+    if (b->nspills < DBT_MAX_BLOCK_SPILLS) {
+        dbt_spill *s = &b->spills[b->nspills++];
+        s->insn = (sf_u8)(t->cur - b->meta);
+        s->gpr = DBT_SPILL_T; s->slot = SLOT_X1; s->pad = 0;
+        s->start = (sf_u16)emit_pos(&t->em); s->end = 0xffff;
+    } else t->err = DBT_ERR_OVERFLOW;
+    emit16(&t->em, op_lds_slot(r, SLOT_X1));
+}
+static void ic_restore_t(tctx *t, int r, int close)
+{
+    int i;
+    emit16(&t->em, op_sts_slot(SLOT_X1, r));
+    if (close) for (i = t->blk->nspills - 1; i >= 0; --i) {
+        dbt_spill *s = &t->blk->spills[i];
+        if (s->gpr == DBT_SPILL_T && s->end == 0xffff) {
+            s->end = (sf_u16)emit_pos(&t->em); break;
+        }
+    }
+    emit16(&t->em, OP_LDC_SR(r));
+}
+
 /* Inline cache comparing guest register `reg` directly (not written between
  * the branch and here); one scratch, which set_pr may have left spilled in
- * Y0 (rT_kept) or which is spilled here. Hit: 6 instructions (7 with the
- * spill). */
+ * Y0 (rT_kept) or which is spilled here. X1 temporarily holds saved SR. */
 static void jump_indirect_ic_reg(tctx *t, int reg, int rT_kept)
 {
     emitter *e = &t->em;
     int rT = rT_kept >= 0 ? rT_kept : pick_scratch(t, R(reg));
     if (rT_kept < 0) spill(t, rT, SLOT_Y0);
+    ic_save_t(t, rT);
     emit_mov_lit(e, rT, 1, TAG_IC_G);
     emit16(e, OP_CMPEQ_RR(reg, rT));
-    emit16(e, OP_BF(2));
+    emit16(e, OP_BF(4));
+    ic_restore_t(t, rT, 0);
     emit_mov_lit(e, rT, 0, TAG_IC_H);
     emit16(e, OP_JMP(rT));
     emit16(e, op_sts_slot(SLOT_Y0, rT));
     /* miss */
+    ic_restore_t(t, rT, 1);
     emit16(e, op_lds_slot(reg, SLOT_X0));                /* park the target for the stub */
     ic_miss_tail(t, rT);
 }
 
-/* Inline cache for rts: the target is PR, read into a scratch. Hit: 10. */
+/* Inline cache for rts: PR is the target; X1 temporarily holds saved SR. */
 static void jump_indirect_ic_pr(tctx *t)
 {
     emitter *e = &t->em;
@@ -492,21 +531,24 @@ static void jump_indirect_ic_pr(tctx *t)
     spill(t, rT, SLOT_Y0);
     emit16(e, OP_STS_PR(rT));
     spill(t, rU, SLOT_Y1);
+    ic_save_t(t, rU);
     emit_mov_lit(e, rU, 1, TAG_IC_G);
     emit16(e, OP_CMPEQ_RR(rT, rU));
-    emit16(e, OP_BF(3));
+    emit16(e, OP_BF(5));
+    ic_restore_t(t, rU, 0);
     emit16(e, op_sts_slot(SLOT_Y0, rT));
     emit_mov_lit(e, rU, 0, TAG_IC_H);
     emit16(e, OP_JMP(rU));
     emit16(e, op_sts_slot(SLOT_Y1, rU));
     /* miss */
+    ic_restore_t(t, rU, 1);
     restore(t, rU, SLOT_Y1);
     emit16(e, op_lds_slot(rT, SLOT_X0));
     ic_miss_tail(t, rT);
 }
 
 /* Indirect branch with a per-site inline cache. X0 holds the guest target.
- * Hit (10 instructions): compare it with the cached guest pc and jump to the
+ * Hit: preserve T, compare it with the cached guest pc and jump to the
  * cached host address. Miss: dbt_lookup_ic with X1 = address of the literal
  * pair, which the stub refills. Both literals are data, patched through the
  * operand cache. The hit-path restores are not recorded: the spill records
@@ -520,14 +562,17 @@ static void jump_indirect_ic(tctx *t)
     spill(t, rT, SLOT_Y0);                               /* w0 */
     emit16(e, op_sts_slot(SLOT_X0, rT));                 /* w1 rT = guest target */
     spill(t, rU, SLOT_Y1);                               /* w2 */
+    ic_save_t(t, rU);
     emit_mov_lit(e, rU, 1, TAG_IC_G);                    /* w3 cached guest pc (1: odd, never matches) */
     emit16(e, OP_CMPEQ_RR(rT, rU));                      /* w4 */
-    emit16(e, OP_BF(3));                                 /* w5 miss -> w10 */
+    emit16(e, OP_BF(5));
+    ic_restore_t(t, rU, 0);
     emit16(e, op_sts_slot(SLOT_Y0, rT));                 /* w6 */
     emit_mov_lit(e, rU, 0, TAG_IC_H);                    /* w7 cached host address */
     emit16(e, OP_JMP(rU));                               /* w8 */
     emit16(e, op_sts_slot(SLOT_Y1, rU));                 /* w9 */
     /* miss */
+    ic_restore_t(t, rU, 1);
     restore(t, rU, SLOT_Y1);                             /* w10 */
     emit_mov_lit(e, rT, 0, TAG_IC_A);                    /* w11 patched after the pool is placed */
     emit16(e, op_lds_slot(rT, SLOT_X1));                 /* w12 */
@@ -920,6 +965,10 @@ static void prepass(tctx *t, sf_u32 guest_pc, int max)
     sf_u32 gpc = guest_pc, touched = 0;
     int n = 0, score = -1, r;
     t->bx = -1; t->cache_reg = -1; t->pre_n = 0;
+    /* The pre-pass exists to choose an untouched borrowed register. With
+     * borrowing disabled, decode directly in the emitter instead of copying
+     * every instruction through g_pre and scanning its register uses. */
+    if (t->env->no_borrow) return;
     while (n < max) {
         sh_insn *d = &g_pre[t->pre_n];
         sf_u32 op;
@@ -927,6 +976,11 @@ static void prepass(tctx *t, sf_u32 guest_pc, int max)
         t->pre_n++;
         sh4_decode(op, d);
         touched |= d->touched;
+        /* Hypercalls are handled directly from the live register context,
+         * without undoing the block's borrowed register. Their implicit
+         * argument/result registers must therefore never be borrowed. */
+        if (d->kind == K_TRAP && (d->op & 0xfff0u) == 0xc3f0u)
+            touched |= R(0) | R(4) | R(5) | R(6) | R(7);
         t->gpc = gpc;
         n++;
         gpc += 2;
@@ -946,6 +1000,9 @@ static void prepass(tctx *t, sf_u32 guest_pc, int max)
                 if (d->br != BR_BRA && d->br != BR_BSR) score -= 1;
                 break;
             }
+#ifdef DBT_BASIC_BLOCKS
+            break;
+#endif
             continue;
         }
         if (borrow_user(t, d)) score += 2;
@@ -968,12 +1025,15 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
     sf_u32 gpc = guest_pc;
 
     {
-        dbt_imeta *m = b->meta; dbt_spill *s = b->spills;      /* caller-provided storage survives the reset */
+        dbt_imeta *m = b->meta; dbt_spill *s = b->spills; dbt_link *l = b->links;      /* caller-provided storage survives the reset */
         memset(b, 0, sizeof *b);
-        b->meta = m; b->spills = s;
+        b->meta = m; b->spills = s; b->links = l;
     }
-    memset(&t, 0, sizeof t);
-    t.env = env; t.blk = b;
+    /* Literal slots are fully written by emit_mov_lit before nlits exposes
+     * them. Do not clear the 768-byte unused array on every translation. */
+    t.env = env; t.blk = b; t.gpc = guest_pc; t.cur = 0;
+    t.err = 0; t.fault = 0; t.slot_x0 = 0; t.slot_avoid = 0;
+    t.bx = -1; t.cache_reg = -1; t.cache_size = 0; t.pre_n = 0;
     emit_init(&t.em, buf, cap);
     b->guest_pc = guest_pc; b->host_base = host_base; b->end_reason = END_FULL; b->ic_off = -1;
     prepass(&t, guest_pc, max);
@@ -985,6 +1045,15 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
         if (emit_pos(&t.em) > 560 || emit_lits_bytes(&t.em) > 160 || b->nlinks >= DBT_MAX_LINKS - 1) break;
         t.gpc = gpc;
         if (!fetch(&t, gpc, &d)) break;
+#ifdef DBT_LINEAR_META
+        if (n > 0 && d.kind == K_PASS) {
+            dbt_imeta *prev = b->nmeta ? &b->meta[b->nmeta - 1] : 0;
+            if (prev && prev->kind == META_LINEAR &&
+                prev->guest_off + emit_pos(&t.em) - prev->host_off == gpc - guest_pc)
+                t.cur = prev;
+            else begin_meta_kind(&t, META_LINEAR, gpc - guest_pc, 0, 0);
+        } else
+#endif
         begin_meta(&t, gpc - guest_pc);
         if (n == 0 && env->exec_ring) trace_prologue(&t);
         if (n == 0 && t.bx >= 0) spill(&t, t.bx, SLOT_A0);        /* park the borrowed register */
@@ -1002,6 +1071,11 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
             tr_branch(&t, &d, slot);
             gpc += d.has_slot ? 4 : 2;
             if (d.br != BR_BT && d.br != BR_BF && d.br != BR_BTS && d.br != BR_BFS) { ended = 1; b->end_reason = END_BRANCH; }
+#ifdef DBT_BASIC_BLOCKS
+            /* Both successors are independently cached. Do not duplicate a
+             * fall-through trace whenever another branch enters its middle. */
+            if (!ended) break;
+#endif
             continue;
         }
         tr_insn(&t, &d, 0);
@@ -1110,13 +1184,33 @@ int dbt_chain_direct(sf_u16 *code, sf_u32 host, sf_u32 target, int cond, int bac
     return 4;
 }
 
+unsigned dbt_pack_meta(void *out, const dbt_block *b)
+{
+    dbt_pmeta *p = (dbt_pmeta *)out;
+    sf_u32 *aux = (sf_u32 *)((sf_u8 *)out + dbt_meta_aux_offset(b->nmeta));
+    unsigned i, naux = 0;
+    for (i = 0; i <= b->nmeta; ++i) {
+        const dbt_imeta *m = &b->meta[i];
+        p[i].host_off = m->host_off; p[i].guest_half = (sf_u8)(m->guest_off / 2);
+        p[i].kind_reg = (sf_u8)(m->kind | (m->fix_reg << 4)); p[i].commit_rel = m->commit_rel;
+        p[i].fix_kind = m->fix_kind;
+        if (dbt_meta_has_targets(m->kind)) {
+            p[i].guest_half = (sf_u8)naux;
+            aux[naux * 2] = m->target; aux[naux * 2 + 1] = m->fallthrough;
+            ++naux;
+        }
+    }
+    return dbt_meta_aux_offset(b->nmeta) + naux * 8;
+}
+
 int dbt_block_find(const dbt_block *b, sf_u32 host_off)
 {
     int lo = 0, hi = b->nmeta;          /* include the sentinel range */
     if (host_off >= (sf_u32)b->code_len) return -1;
     while (lo < hi) {
         int mid = (lo + hi + 1) / 2;
-        if (b->meta[mid].host_off <= host_off) lo = mid; else hi = mid - 1;
+        sf_u32 at = b->packed_meta ? ((const dbt_pmeta *)b->meta)[mid].host_off : b->meta[mid].host_off;
+        if (at <= host_off) lo = mid; else hi = mid - 1;
     }
     return lo;
 }
@@ -1131,4 +1225,27 @@ int dbt_block_pending_spills(const dbt_block *b, int idx, sf_u32 host_off, dbt_s
             out[n++] = *s;
     }
     return n;
+}
+
+int dbt_block_entry(const dbt_block *b, sf_u32 guest_pc)
+{
+    unsigned i;
+    if (b->borrow >= 0 || guest_pc <= b->guest_pc ||
+        guest_pc >= b->guest_pc + b->guest_len || (guest_pc & 1)) return -1;
+    for (i = 0; i < b->nmeta; ++i) {
+        dbt_imeta m;
+        dbt_spill spill;
+        sf_u32 off;
+        dbt_get_meta(b, i, &m);
+        if (m.kind == META_INSN && b->guest_pc + m.guest_off == guest_pc) off = m.host_off;
+        else if (m.kind == META_LINEAR && guest_pc >= b->guest_pc + m.guest_off) {
+            dbt_imeta next;
+            dbt_get_meta(b, i + 1, &next);
+            off = m.host_off + guest_pc - b->guest_pc - m.guest_off;
+            if (off >= next.host_off) continue;
+        } else continue;
+        if (off >= b->code_len || dbt_block_pending_spills(b, i, off, &spill, 1)) return -1;
+        return (int)off;
+    }
+    return -1;
 }

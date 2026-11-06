@@ -34,7 +34,11 @@ static void br(sh_insn *d, int type, int disp, int reg, int slot)
 static int simm8(sf_u32 op) { int v = op & 0xFF; return v & 0x80 ? v - 0x100 : v; }
 static int simm12(sf_u32 op) { int v = op & 0xFFF; return v & 0x800 ? v - 0x1000 : v; }
 
+#ifdef DBT_DECODE_CACHE
+static void decode_uncached(sf_u32 op, sh_insn *d)
+#else
 void sh4_decode(sf_u32 op, sh_insn *d)
+#endif
 {
     int n = (op >> 8) & 0xF, m = (op >> 4) & 0xF;
     memset(d, 0, sizeof *d);
@@ -228,3 +232,23 @@ int sh4_slot_legal(const sh_insn *d)
     if (d->kind == K_TRAP && (d->op & 0xFF00) == 0xC300) return 0;   /* trapa */
     return 1;
 }
+
+#ifdef DBT_DECODE_CACHE
+/* Decode results depend only on the opcode, never on PC or address space.
+ * A zero tag keeps an interrupted/abandoned fill invisible. */
+static sh_insn decode_cache[512];
+static volatile sf_u32 decode_tags[512];
+void sh4_decode(sf_u32 op, sh_insn *d)
+{
+    unsigned slot;
+    op &= 0xffffu;
+    slot = (op ^ (op >> 7)) & 511u;
+    if (decode_tags[slot] == op + 1) { *d = decode_cache[slot]; return; }
+    decode_uncached(op, d);
+    decode_tags[slot] = 0;
+    __asm__ volatile ("" ::: "memory");
+    decode_cache[slot] = *d;
+    __asm__ volatile ("" ::: "memory");
+    decode_tags[slot] = op + 1;
+}
+#endif

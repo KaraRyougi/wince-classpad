@@ -57,8 +57,10 @@ static UINT32 DeviceIntrHandler(UINT32 imr, UINT8 bit, UINT32 irq)
     return (sysIntr == SYSINTR_UNDEFINED) ? SYSINTR_NOP : sysIntr;
 }
 
+extern BOOL ClasspadPowerKeyIsr(void);
 static UINT32 KeyscIntrHandler(void)
 {
+    if (ClasspadPowerKeyIsr()) return SYSINTR_NOP;
     return DeviceIntrHandler(5, INTC_IMR5_KEYSC, IRQ_KEYSC);
 }
 

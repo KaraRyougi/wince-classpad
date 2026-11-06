@@ -8,9 +8,10 @@ DBT_TEST := dbt/tests/test_translate
 
 .PHONY: test clean
 
-test: $(TEST) $(DBT_TEST)
+test: $(TEST) $(DBT_TEST) bsp/tests/test_touch_bus
 	./$(TEST)
 	./$(DBT_TEST)
+	./bsp/tests/test_touch_bus
 
 $(DBT_TEST): dbt/tests/test_translate.c $(DBT_SRC) dbt/src/sh4dec.h dbt/src/sh4emit.h dbt/src/translate.h $(HDR)
 	$(CC) $(CFLAGS) -Idbt/src -Ifpuemu/src -o $@ dbt/tests/test_translate.c $(DBT_SRC)
@@ -19,4 +20,7 @@ $(TEST): fpuemu/tests/test_host.c $(SRC) $(HDR)
 	$(CC) $(CFLAGS) -Ifpuemu/src -o $@ fpuemu/tests/test_host.c $(SRC) -lm
 
 clean:
-	rm -f $(TEST) $(DBT_TEST)
+	rm -f $(TEST) $(DBT_TEST) bsp/tests/test_touch_bus
+
+bsp/tests/test_touch_bus: bsp/tests/test_touch_bus.c bsp/classpad/SRC/INC/classpad_touch_bus.h bsp/classpad/SRC/INC/classpad_touch.h
+	$(CC) $(CFLAGS) -o $@ $<

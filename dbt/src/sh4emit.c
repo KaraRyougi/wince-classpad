@@ -47,14 +47,26 @@ int emit_flush_lits(emitter *e)
     start = emit_pos(e);
     for (i = 0; i < e->nlits; i++) {
         int at = e->lits[i].at;
-        int pool = start + i * 4;
+        int pool = emit_pos(e), shared = 0;
+#ifdef DBT_DEDUP_LITERALS
+        int j;
+        /* Only untagged constants are immutable. Link and IC literals must
+         * retain separate storage even when their initial values match. */
+        if (e->lits[i].tag == -1) for (j = 0; j < i; ++j) {
+            if (e->lits[j].tag == -1 && e->lits[j].value == e->lits[i].value) {
+                pool = e->lits[j].at; shared = 1; break;
+            }
+        }
+#endif
         /* mov.l @(disp,PC),Rn: address = (PC_of_insn + 4) & ~3 + disp*4 */
         int base = (at + 4) & ~3;
         int disp = (pool - base) / 4;
         if (disp < 0 || disp > 255) e->overflow = 1;
         emit_patch16(e, at, OP_MOVL_PC(disp, (e->buf[at / 2] >> 8) & 0xF));
-        emit16(e, e->lits[i].value >> 16);
-        emit16(e, e->lits[i].value & 0xFFFFu);
+        if (!shared) {
+            emit16(e, e->lits[i].value >> 16);
+            emit16(e, e->lits[i].value & 0xFFFFu);
+        }
         e->lits[i].at = pool;      /* now records the literal's own offset */
     }
     e->nlits = -e->nlits;          /* mark flushed; count kept for lookups */

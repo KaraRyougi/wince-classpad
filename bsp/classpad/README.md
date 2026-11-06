@@ -191,5 +191,77 @@ should show the window at 320x528 and exercise touch with this recipe.
   the kernel keeps the FPU disabled in the OAL.
 - Every 16/32-bit device register access through `MMIO_R*/MMIO_W*`.
 - A `trapa` (hypercall) only when `ClasspadCanTrap()` (SR.BL clear).
-- Nothing here has been compiled yet: the first `build -c` in the VM will
-  find the typos.
+- The touch and display drivers were rebuilt in the ClasspadUI SH4 Release
+  environment during the validation below.
+
+
+## Touch correction and validation (2026-11-05)
+
+The production IIC transaction is in `SRC/INC/classpad_touch_bus.h` and is
+shared by the `dbt/guest/touch.c` test. It follows WAIT-stage transitions,
+sets RACK/NACK before the last byte, reads all 16 bytes of command 0x84,
+and bounds every wait. Errors reset the bus and the next sample retries.
+The driver explicitly enables the IIC module clock and configures PJ4/5,
+PR5 and the Casio IIC clock divisors. Peripheral IIC interrupts stay masked
+at INTC while ICIC enables the status/WAIT handshake.
+
+The third packet word is z1, not a 0x8000 contact flag. PRDR bit 5 determines
+contact. A separate thread polls for the first down as well as movement/up;
+only the MDD reads IIC. This avoids relying on the emulator-derived 0x700
+contact interrupt routing on hardware. A transient bus failure does not emit
+a false pen-up. The stop event wakes and joins the sampler before teardown.
+
+References: ClasspadDev/gint `src/touch/driver.c`, `i2c.c`, `i2c_inth.c`,
+`touch.c`, and `include/gint/drivers/touch.h` on its dev branch. The emulator
+fills z1 with 0x8000, which hid the former contact-bit mistake. Real-device
+coordinates, bus clocks and calibration still require a device check.
+
+Validation commands (fxSDK compiler must be on PATH):
+
+```sh
+make test
+HLE_CB_TOUCH=160,264 HLE_CB_TOUCH_AT=6000 HLE_CB_TOUCH_HOLD=10000000 \
+  make -C dbt GUEST=touch BUILD=build-touch-fix RUN_SECS=10 run
+make -C dbt GUEST=aspace PROFILE=1 BUILD=build-aspace-review run
+```
+
+The host bus test covers full packets, last-byte NACK, arbitration loss,
+NACK errors, bounded timeout and subsequent recovery. The translated guest
+reads 32 consecutive production transactions and checks stable coordinates.
+The aspace, tlbdata, devmem, tmu and flush guests pass after the runtime changes.
+
+For the current ClasspadUI Release environment, the staged build script lives
+at `C:\WINCE600\codex-touch-review\build.bat`. Previous changed files are
+under its `backup` directory. This update preserves the remote eActivity ROM
+layout in config.bib; pair its NK.bin with a `NK_WINDOW=eact` translator.
+The earlier touch-only build disabled automatic panel sleep while wake-up
+was not implemented. The power update below supersedes that workaround;
+it does not establish the cause of the originally reported black screen.
+
+The rebuilt image (SHA256
+`608a262214e706b5cdfd37dc79dad05f08b262765ca25c9aa07e9766de914c07`)
+booted in the emulator. Two injected taps produced down/up events (20
+samples total) through the new driver with no reported IIC errors and opened
+My Device. Its directory icons finished loading; a black screen was not
+reproduced in this run. The screenshot and paired eActivity translator are
+in the ignored `dbt/build-touch-validation/` directory. Hardware validation
+is still pending; emulator sensor behavior cannot establish hardware success.
+
+## Suspend/resume validation
+
+The power update saves interrupt, timer and keypad state, suspends the touch
+bus and display, and enters CPU sleep with retained RAM. Only Clear/ON
+(matrix code 20) wakes the system; its wake press is consumed. The normal
+registry enables idle/suspend timeouts again. Actual device wake reliability
+and power consumption still need hardware validation.
+
+The successful Windows build was copied from codex-power-review and checked:
+normal NK.bin SHA256 bec974fca710d06f1832f1d665fa9696ac33d6342facec3ef2521590413b73f5;
+test NK-power-test.bin SHA256 a1b740dc70da9b00952c2066fcea6641c6ead0c80f8113d6637d013e6a40e34a.
+The test image automatically requests two suspend/resume cycles. In the
+emulator, both cycles remained asleep through EXE and touch, resumed only
+on Clear/ON, and returned success (result=0). Both suspended screenshots
+were entirely black; after the second wake the desktop displayed the test
+completion dialog. The ignored dbt/build-power-confirm directory contains
+the images, run log, screenshots and binary/environment provenance.
+This validates the translated emulator path, not physical wake or battery drain.

@@ -93,3 +93,42 @@ BOOL OALIoCtlHalInitRTC(
     }
     return TRUE;
 }
+
+/* The TMU tick stops during suspend. Account for elapsed calendar time
+ * using the battery-backed hardware RTC, without changing Casio's clock. */
+static UINT64 g_suspendRtc;
+static BOOL g_suspendRtcValid;
+static UINT32 FromBcd(UINT32 v)
+{
+    return (v & 15) + ((v >> 4) & 15) * 10 + ((v >> 8) & 15) * 100 + ((v >> 12) & 15) * 1000;
+}
+static BOOL ReadHardwareSeconds(UINT64 *seconds)
+{
+    SYSTEMTIME t;
+    UINT8 sec;
+    UINT32 attempts;
+    if (!(MMIO_R8(SH7305_REG_PA_RTC + 0x1E) & 1)) return FALSE;
+    for (attempts = 0; attempts < 4; ++attempts) {
+        memset(&t, 0, sizeof t);
+        sec = MMIO_R8(SH7305_REG_PA_RTC + 2);
+        t.wSecond = (WORD)FromBcd(sec);
+        t.wMinute = (WORD)FromBcd(MMIO_R8(SH7305_REG_PA_RTC + 4));
+        t.wHour = (WORD)FromBcd(MMIO_R8(SH7305_REG_PA_RTC + 6));
+        t.wDay = (WORD)FromBcd(MMIO_R8(SH7305_REG_PA_RTC + 10));
+        t.wMonth = (WORD)FromBcd(MMIO_R8(SH7305_REG_PA_RTC + 12));
+        t.wYear = (WORD)FromBcd(MMIO_R16(SH7305_REG_PA_RTC + 14));
+        if (t.wYear < 100) t.wYear += 2000;
+        if (sec == MMIO_R8(SH7305_REG_PA_RTC + 2)) return SystemTimeToSeconds(&t, seconds);
+    }
+    return FALSE;
+}
+VOID ClasspadRtcSuspend(void)
+{
+    g_suspendRtcValid = ReadHardwareSeconds(&g_suspendRtc);
+}
+VOID ClasspadRtcResume(void)
+{
+    UINT64 now;
+    if (g_suspendRtcValid && ReadHardwareSeconds(&now) && now >= g_suspendRtc)
+        g_baseSeconds += now - g_suspendRtc;
+}

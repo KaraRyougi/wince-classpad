@@ -100,6 +100,21 @@ void guest_main(void)
     r = call_counted((fn_t)V_CODE, &n);
     check("ASID 2 again: page B, reused", r == 2 && n == 0);
 
+    n = hc_getstat(3);
+    hc_asid(2); hc_asid(2);
+    check("same ASID notification does not switch", hc_getstat(3) == n);
+
+    /* Repeated switches exercise sparse hash tracking and IC resets at the
+     * same indirect-call site, including reuse of already translated code. */
+    { unsigned i;
+      for (i = 0; i < 64; ++i) {
+        set_asid_pv(1); r = call_counted((fn_t)V_CODE, &n);
+        set_asid_pv(2); r += call_counted((fn_t)V_CODE, &n2);
+        if (r != 3 || n != 0 || n2 != 0) break;
+      }
+      check("64 ASID round trips reuse code without stale ICs", i == 64);
+    }
+
     /* 2. a shared page (SH=1) keeps one translation across ASIDs */
     tlb_map(V_SH, P_S, 2, 1);
     r = call_counted((fn_t)V_SH, &n);
@@ -145,6 +160,48 @@ void guest_main(void)
     tlb_map(V_X + 0x1000, P_C2, 1, 0);
     r = call_counted((fn_t)V_X, &n);
     check("second page remapped: chained bra unlinked and re-resolved", r == 4 && n >= 1);
+
+    /* Reuse across ASIDs, then replace only the second ASID's mapping.
+     * Do not use TI: that would hide missing invalidation with a full flush. */
+    mmio_w32(MMUCR, 0x5);
+    mmio_w32(MMUCR, 1);                /* URC=0: replace the same UTLB slot */
+    tlb_map(V_CODE, P_A, 1, 0);
+    r = call_counted((fn_t)V_CODE, &n);
+    mmio_w32(MMUCR, 1);
+    tlb_map(V_CODE, P_A, 2, 0);
+    r += call_counted((fn_t)V_CODE, &n);
+    check("same physical code reused by another ASID", r == 2 && n == 0);
+    mmio_w32(MMUCR, 1);
+    tlb_map(V_CODE, P_B, 2, 0);
+    r = call_counted((fn_t)V_CODE, &n);
+    check("reused code invalidated when second ASID remaps", r == 2 && n >= 1);
+
+    if (hc_getstat(18)) {
+        volatile unsigned short *a = (volatile unsigned short *)P_A;
+        volatile unsigned short *b = (volatile unsigned short *)P_B;
+        unsigned hits, cache_hits;
+        mmio_w32(MMUCR, 0x4);
+        a[0] = b[0] = 0x0009;
+        a[1] = 0xe00b; b[1] = 0xe00d;
+        a[2] = b[2] = 0x000b; a[3] = b[3] = 0x0009;
+        hc_flush(0, 0);
+        mmio_w32(MMUCR, 1); tlb_map(V_CODE, P_A, 1, 0);
+        r = call_counted((fn_t)V_CODE, &n);
+        hits = hc_getstat(17);
+        r += call_counted((fn_t)(V_CODE + 2), &n);
+        check("user interior entry reused", r == 22 && hc_getstat(17) > hits);
+        mmio_w32(MMUCR, 1); tlb_map(V_CODE, P_B, 2, 0);
+        r = call_counted((fn_t)(V_CODE + 2), &n);
+        check("interior target is not reused across different ASIDs", r == 13);
+        cache_hits = hc_getstat(20);
+        mmio_w32(MMUCR, 1); tlb_map(V_CODE, P_A, 1, 0);
+        r = call_counted((fn_t)(V_CODE + 2), &n);
+        check("interior target returns to its original ASID", r == 11);
+        if (hc_getstat(19)) check("cached interior entry reused after ASID return", hc_getstat(20) > cache_hits);
+        mmio_w32(MMUCR, 1); tlb_map(V_CODE, P_B, 1, 0);
+        r = call_counted((fn_t)(V_CODE + 2), &n);
+        check("remap invalidates cached user interior target", r == 13);
+    }
 
     mmio_w32(MMUCR, 0x4);
     hc_stats();

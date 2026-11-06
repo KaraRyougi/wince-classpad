@@ -17,3 +17,5 @@ notes/ce/*
 !notes/ce/*.txt
 *.7z
 *.zip
+
+bsp/tests/test_touch_bus

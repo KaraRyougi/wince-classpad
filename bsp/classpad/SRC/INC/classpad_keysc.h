@@ -39,6 +39,8 @@
 #define KEYSC_COLUMNS           8
 #define KEYSC_SCANCODES         (KEYSC_WORDS * 16)              // 96
 
+#define KEYSC_CLEAR_MASK        0x0002  // fx-CP400 Clear/ON, word 0 bit 1
+
 #define KEYSC_CNT_SCAN_START    0x8000
 
 // Values the fx-CG100 OS 2.00 writes (in this order) when it brings the

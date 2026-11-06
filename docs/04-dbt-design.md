@@ -747,3 +747,479 @@ with `-DDBT_TRACE_EXC` to print every exception delivery as it happens (`[exc] v
 
 The guest blob carries file contents only, so guests zero their own `.bss`
 (`guest/start.S`); a CE image does that itself.
+
+
+### Touch/performance investigation (2026-11-05)
+
+`make -C dbt PROFILE=1 ...` reserves TMU1 (Pphi/4, interrupts off) and
+records calls, cumulative ticks and maximum ticks for completed translations,
+ASID changes, TLB hooks, block invalidation, LCD pixel streaming and full
+cache flushes. Statistics are printed by HC_STATS and every 4096 guest RTES
+in profiling builds. Normal builds do not read the profiling timer.
+HC_GETSTAT 11 reports whether profiling is enabled; 12 is elapsed TMU1 ticks;
+13 is skipped same-ASID notifications; 14 is TLB scans skipped by the user-code
+page filter. Indices 32..49 are six triplets (calls,total,max), in the order
+above. Counters wrap modulo 2^32; take deltas less than one timer wrap apart.
+Buckets overlap (TLB includes any invalidation); do not sum them. Translation
+only measures completed attempts, not C work abandoned on a guest fault.
+Do not combine PROFILE with a guest that owns/reprograms TMU1. At the stock
+clock 7,372,800 ticks are one second on hardware; emulator tick counts are
+instruction-model costs, not measured hardware latency.
+
+The shell exceeded the former 8192-block cache. Instrumented NK-shell-r2 runs
+show repeated full flushes and large translation, ASID and TLB costs. A PTEH
+write with an unchanged ASID now returns without walking the block/IC lists.
+A conservative 8192-bit filter records 1 KiB pages containing user code;
+1/4 KiB TLB refills for pages absent from this filter skip the user-block
+scan. Collisions and dead blocks only cause extra scans, never omitted
+invalidations; large mappings retain the original scan. Bits are published
+before block visibility and reset only at full flush. The aspace guest checks
+same-ASID notifications as well as remapping and cross-page chained branches.
+An instrumented shell snapshot skipped 40,584 of 47,074 TLB scans (86.2%).
+This is a scan count, not a claim of an 86% overall speedup.
+
+The DCS display path now preserves the dirty bottom row and limits each native
+LCD trap to four rows, returning to interruptible guest execution between
+strips. The push thread enforces its delay even when drawing signals its event.
+Measured emulator pixel-loop maxima went from 92,816 ticks for a full-screen
+push to 706 ticks for a four-row strip. These omit trap/window setup and are
+not hardware timing measurements. R61524 keeps its bottom-of-frame presentation
+rule; the optional legacy Blit=2 path is not the bounded DCS default.
+
+### Incremental cache and address-space optimization (2026-11-05)
+
+The current layout keeps CE's 8 MiB guest RAM and uses a 3 MiB code cache,
+14400 compact block headers (now 36 bytes on target), and a 2624 KiB metadata arena. Twelve disjoint
+banks recycle code and metadata together. Before reuse, incoming direct
+links and inline caches are detached; surviving code stays at its original
+host address. FIFO is the default. `DBT_CACHE_LRU` is an experimental policy
+based on C-side access samples, and was slower on the directory benchmark.
+The `flushes` counter also counts bank recycling, since it guards callers
+against patching sites whose storage may have been replaced.
+
+Each block stores only its used links. Instruction recovery metadata uses
+6-byte base records with extra target/fallthrough words only for branch
+records. The translator still uses full records in scratch storage. Host
+tests compare packed and unpacked recovery metadata and host-offset lookup.
+Bank-local host-address searches account for holes left by invalidation.
+
+ASID changes clear only hash slots and inline-cache owners recorded as
+containing user targets. User IC refills pass through C to register the
+owner. Kernel-target ICs remain valid. A page index narrows 1/4 KiB TLB
+checks to blocks touching those pages; large mappings retain the full scan.
+Index nodes are rebuilt when bank indices are reused. Direct-link bank
+masks conservatively skip links that cannot target an invalidated bank;
+IC targets are still checked independently.
+
+`tools/bench_my_device.py` drives two fixed taps and waits for an exact RGB
+match of rows 50 through 199 of a full directory reference. Apply
+`dbt/emu-patch/add_classpad_benchmark.py` to an isolated emulator checkout
+first. The reference excludes the clock but includes all directory icons
+and labels. Both versions must use the same flattened NK image, reference,
+emulator, and tap tick. The result records simulator ticks and host wall
+time separately. The conversion of 32768 simulator ticks per modeled second
+is not a measurement of physical ClassPad latency. Run serially when
+comparing wall time. A failure to match is a failed benchmark.
+
+Local fixed-image measurements (old NK SHA-256
+`608a262214e706b5cdfd37dc79dad05f08b262765ca25c9aa07e9766de914c07`):
+
+| Runtime | Load ticks after second release | Modeled seconds |
+| --- | ---: | ---: |
+| Original 8192-block baseline | 3196152 | 97.539 |
+| Compact headers, larger cache | 1739424 | 53.083 |
+| Active user IC list | 1222908 | 37.320 |
+| Page index and bank recycling | 940080 | 28.689 |
+| Packed metadata, FIFO banks | 847806 | 25.873 |
+| Preserve surviving hash and IC entries | 842346 | 25.706 |
+| Same runtime, experimental `-O3` build | 804672 | 24.556 |
+| Direct-link destination-bank filter (`-O2`) | 823782 | 25.140 |
+
+These measurements have not met the requested 10-second target. The power
+test image is separate and is not substituted into this comparison.
+
+
+Further experiments retain the same CE image: narrow decoded instructions
+from 84 to 28 bytes, an optional 512-entry opcode decode cache
+(`DBT_DECODE_CACHE`), and `-O3 -flto`. The decoder's 21 exposed fields were
+compared for all 65536 opcodes against the original decoder, including
+cache hits and intervening fills; they were identical. Six-byte metadata
+stores guest offsets in halfwords and aligns its auxiliary target tail to
+four bytes. Boundary tests cover offsets above 255 bytes, r15, maximum
+record count, and both tail alignments. TMU recovery, ASID remapping and
+cache-pressure guests pass with the compact structures; TMU and ASID also
+pass with LTO. These flags remain experiments until directory timings and
+broader runtime checks establish the selected configuration.
+
+
+The additional ASID-reuse regression overwrites one UTLB slot without
+MMUCR.TI: ASID 1 maps A, ASID 2 reuses A, then ASID 2 maps B. It failed
+before the fix (stale A translation survived) and passes afterward. Reused
+blocks now carry ASID_ANY for invalidation, and cross-ASID physical reuse
+is restricted to a single minimum-size page, since one physical address
+cannot validate a second page. Benchmark variants preceding this fix are
+exploratory results, not validation of the final runtime.
+
+| Additional experiment (same fixed NK) | Load ticks | Modeled seconds |
+| --- | ---: | ---: |
+| Six-byte metadata, 3 MiB cache, O3 | 782832 | 23.890 |
+| Six-byte metadata, 3.25 MiB cache, O3 | 777372 | 23.724 |
+| Compact decoded instruction structure | 776826 | 23.707 |
+| Optional opcode decode cache | 785016 | 23.957 |
+| LTO with opcode decode cache | 747342 | 22.807 |
+
+The decode cache is not enabled by default: its measured overhead outweighed
+its savings in this workload. LTO and the corrected shared-ASID reuse path
+are being benchmarked separately before a default configuration is chosen.
+
+
+Current experiments additionally support `DBT_LINEAR_META`: adjacent copied
+ALU instructions share one recovery range, with guest PC advancing by the
+host offset inside that range. The entry prologue, rewritten operations,
+branch slots and exit sentinel retain their own recovery records. TMU
+interrupt recovery passes with this encoding. The compact block header is
+36 rather than 56 bytes on the 32-bit target; offset/count bounds are checked
+at compile time.
+
+`DBT_PROFILE_BANK` logs occupied block count, code bytes and metadata bytes
+at bank rotation. This disproved a simple block-cap-only explanation:
+different banks exhaust different resources. Larger block tables alone
+consume metadata space and are not a substantial improvement.
+
+`DBT_INLINE_DEVICE_READ` executes unswapped P4 loads directly, retaining a
+commit point for post-increment recovery. P4 writes still use C so PTEH and
+MMUCR effects are observed. HC_GETSTAT 6 counts C device-helper accesses;
+it excludes inline reads. `DBT_DEDUP_LITERALS` shares only untagged constants
+after their translation-time values are finalized; mutable link and IC
+literals retain individual storage. `DBT_RUNTIME_MAX_INSNS` varies block
+length without changing metadata capacity.
+
+The device test exposed an independent borrowed-register bug: hypercalls
+are intercepted directly from live registers, so borrowing an implicit
+r4-r7 argument corrupts the call when no instruction in that block explicitly
+writes it. The pre-pass now reserves r0/r4-r7 for F0..FF hypercalls. The
+regression passes without diagnostic prints. The TMU arrival test now uses
+elapsed timer ticks rather than a fixed empty-loop count, which can finish
+before three periods after optimization. Its interrupt-count requirement
+is unchanged.
+
+| Experiment | Load ticks | Modeled seconds |
+| --- | ---: | ---: |
+| LTO with corrected shared-ASID invalidation | 762084 | 23.257 |
+| Larger block table alone | 758808 | 23.157 |
+| Coalesced linear metadata | 754986 | 23.040 |
+| Compact header and 20160-block table | 752802 | 22.974 |
+| Inline P4 reads (before hypercall-register fix) | 685644 | 20.924 |
+
+The latest combined build and 16/32-instruction variants are still under
+test. The 10-second target remains unachieved; these are emulator results,
+not physical-device timing claims.
+
+
+`DBT_BATCH_INVALIDATE` marks all affected code ranges in a 32-byte-granularity
+bitmap, then detaches incoming IC/direct links in one pass. Bank reuse clears
+its bitmap bits. ASID, data-TLB and cache-pressure regressions pass. It does
+not substantially improve the measured directory time, so remains opt-in.
+`DBT_KERNEL_BANKS` partitions kernel/user bank allocation; the 4/8 split
+regressed and is not selected.
+
+`DBT_BASIC_BLOCKS` ends a translation at conditional branches, creating
+separate successors. Its host tests and TMU/ASID regressions pass, but its
+measured latency is worse than the 16-instruction cap. Shorter blocks are
+not monotonically faster: fixed headers and exits eventually dominate.
+
+| Experiment, including hypercall-register fix | Load ticks | Modeled seconds |
+| --- | ---: | ---: |
+| Combined 64-instruction configuration | 700932 | 21.391 |
+| 32-instruction cap | 693288 | 21.157 |
+| 16-instruction cap | 492906 | 15.042 |
+| 8-instruction cap | 809586 | 24.707 |
+| 4-instruction cap | 1185234 | 36.170 |
+| Conditional-branch basic blocks | 748980 | 22.857 |
+| Batched invalidation, 32-instruction cap | 696564 | 21.257 |
+| 4 kernel / 8 user banks, batched, 32-instruction cap | 1078218 | 32.905 |
+
+`DBT_IRQ_ENTRY_CACHE` remembers up to 16 safe interior instruction entries
+for RTE. It accepts only blocks without a borrowed GPR, excludes pending
+scratch saves, and requires matching ASID, cache generation and a live
+owner block. Interior aliases are never published in the ordinary hash.
+Both linear-copy ranges and explicit instruction starts are supported;
+other recovery kinds fall back to normal lookup/translation. HC_GETSTAT 15
+reports hits, and 16 reports whether this experiment is enabled. The TMU
+guest verifies that the path was actually exercised while preserving state;
+the ASID regression also passes. Its directory timing, a no-borrow variant,
+a 12-instruction cap, and an 8-instruction build with more headers remain
+under measurement. None is yet a verified sub-10-second result.
+
+
+The fixed-image experiments continue to show strong scheduling sensitivity:
+removing redundant work can change the kernel/cache working set enough to
+regress total latency, so local instruction savings alone are not accepted
+as an end-to-end speed claim.
+
+| Experiment | Load ticks | Modeled seconds |
+| --- | ---: | ---: |
+| Interior-entry reuse, borrowing enabled, 16 instructions | 733692 | 22.391 |
+| Interior-entry reuse, borrowing disabled, 16 instructions | 476526 | 14.542 |
+| 12-instruction cap | 757170 | 23.107 |
+| 8 instructions, 28032 headers / 2080 KiB arena | 807402 | 24.640 |
+| Skip unused literal-array clearing, borrowing enabled | 704754 | 21.507 |
+| Also skip the borrow pre-pass when borrowing is disabled | 647424 | 19.758 |
+
+The pre-pass is unnecessary when no register will be borrowed, and emitter
+literal entries are fully initialized before publication through nlits.
+Host tests and TMU/ASID/device regressions pass after removing those redundant
+operations; their aggregate timing above remains worse than the best earlier
+configuration.
+
+A separate clock diagnostic reads the frozen image's g_pNKGlobal pointer
+at 0x8c1068dc and dwCurMSec at offset 0xc8. These locations were verified by
+matching OALTimerIntrHandler machine code against the old image; they are
+not a stable ABI and are guarded by DBT_CE_TIME_PROBE. Its log compares CE
+milliseconds with free-running TMU1. Busy periods lose elapsed time because
+the OAL adds a fixed millisecond per delivered interrupt, even when multiple
+hardware periods pass while interrupts are masked.
+
+A local diagnostic flat image changes exactly one byte at 0x838658be:
+OEMInit's OALTimerInit argument changes from 1 to 10 ms. The call target,
+original opcode and all other image bytes were checked; the provenance
+manifest is in build-tick-diagnostic/patch.json. This is explicitly a
+separate BSP/tick experiment, not a same-image translator speed comparison.
+No production BSP timer default or shared Windows build files have yet been
+changed for this experiment. Normal production images must be rebuilt from
+source before adopting such a change.
+
+The 10 ms diagnostic completed with exact My Device reference-frame matches:
+
+| Translator | Original 1 ms NK | Diagnostic 10 ms NK |
+| --- | ---: | ---: |
+| No-borrow single-pass + explicit initialization + time probe | 19.708 s | 13.143 s |
+| Earlier no-borrow IRQ-entry build | 14.542 s | 13.859 s |
+
+These are modeled emulator seconds (ticks / 32768), not calculator timings.
+The 10 ms runs took 16.116 s and 17.104 s of host wall time after the second
+release, respectively; overlapping emulator runs make wall-time comparisons
+unsuitable for attributing a speedup. Both remain above the 10 s objective.
+The diagnostic image is not installed in the Windows build tree.
+
+For the earlier no-borrow IRQ-entry build, profile snapshots around the
+My Device tap account for approximately 5.746 s in 33,477 translations,
+0.046 s in 13,461 ASID notifications, 0.871 s in TLB hooks, and 0.781 s
+in invalidation. These are coarse snapshot deltas, not exact click-to-frame
+boundaries, and the TLB/invalidation buckets overlap. After the ASID fast
+path, translation remains a larger measured cost than ASID notification
+itself; effects of ASID changes on subsequent cache misses are not included
+in the ASID bucket.
+
+The newly successful power build's normal NK.bin (SHA256
+bec974fca710d06f1832f1d665fa9696ac33d6342facec3ef2521590413b73f5)
+was separately checked with the earlier no-borrow IRQ-entry translator.
+My Device matched the full reference at tick 7997262: 485262 ticks after
+the second release, 14.809 modeled seconds and
+18.166 host wall seconds. This verifies loading with
+the new power image, not a same-image comparison against the old baseline.
+Artifacts and input hashes are under build-speed-review/power-current.
+
+### Reusing safe interior entries
+
+DBT_INTERIOR_ENTRY extends the page index to kernel code and lets cold
+lookups/RTE find an instruction inside an existing block. dbt_block_entry
+requires an even interior PC, no borrowed register, an INSN or linear
+instruction boundary, and no pending scratch save. Delay slots and end
+sentinels cannot be used. User entries require the owner's current ASID;
+this path deliberately does not broaden cross-ASID physical-code reuse.
+Aliases are never published in the start-PC hash. ICs and direct links
+already detach targets by host range, and the page index is rebuilt on
+bank reuse, so the owning block controls the alias lifetime.
+
+The interior guest confirms that reuse actually occurs, then modifies the
+owner and verifies an already-used call site sees the replacement code.
+The aspace guest additionally checks user interior reuse, ASID isolation,
+switching back, and a bare ldtlb remap without a full cache flush. TMU and
+cache-recycling guests pass. Host tests cover odd/start/end/delay-slot
+rejection, outstanding spills, borrowed registers and packed metadata.
+
+Same frozen NK, no borrowing, IRQ-entry reuse, O3/LTO, 20160 headers and
+2528 KiB arena:
+
+| Configuration | Load ticks | Modeled seconds |
+| --- | ---: | ---: |
+| 32 instructions, no interior reuse | 612480 | 18.691 |
+| 32 instructions, interior reuse | 570984 | 17.425 |
+| 64 instructions, interior reuse | 590094 | 18.008 |
+| 16 instructions, interior reuse | 405000 | 12.360 |
+
+All completed runs matched the exact directory reference frame. These are
+experimental configurations, not a new default or evidence of meeting the
+10-second objective.
+
+DBT_DEVICE_DISPATCH separately simplifies the P4 classifier to
+(top_byte + 1) >> 8, with the device path before the ordinary-memory path.
+This removes four T-neutral arithmetic/shift instructions per tested
+access without changing the normal path's branch count. The ordinary path
+has its own recovery record after the device path. Device tests cover T,
+MMIO, normal memory, addressing modes and delay slots. When this option is
+present, the TMU guest marks only its assembly stress loops device-aware,
+leaving its pre-swapped MMIO handlers outside that range; interrupt state
+and memory recovery pass on the new dispatch path.
+
+With 32-instruction blocks, the compact device classifier completed in
+575898 ticks (17.575 modeled seconds), versus 570984 (17.425) without it.
+Thus the shorter emitted sequence has not demonstrated an end-to-end gain
+in this configuration. Both borrowed and non-borrowed device regression
+builds pass; the option remains experimental. The 16-instruction interior
+configuration also passes its own TMU regression, including actual entry
+reuse after interrupts.
+
+The 16-instruction compact-dispatch combination also regressed: 576444
+load ticks (17.592 modeled seconds) versus 405000 (12.360) without it.
+The compact-dispatch code and its conditional test paths were therefore
+removed from the worktree; its source snapshot is retained only under the
+ignored build-speed-review/dispatch-source directory. The safe interior
+entry optimization and its regression tests remain.
+
+On the latest power-enabled normal image (SHA256 bec974fc...3b73f5),
+interior16 matched the reference at tick 8115744: 603744 load ticks,
+18.425 modeled seconds, and 24.175 host wall seconds. The same image's
+previous IRQ-entry build took 14.809 modeled seconds. Consequently the
+12.360-second result on the frozen touch image does not demonstrate an
+improvement for the current image, and DBT_INTERIOR_ENTRY remains disabled
+by default. The next performance work must explain this image-dependent
+cache/scheduler sensitivity and verify gains on the current normal image.
+
+### Host-side sampling and T preservation
+
+The optional add_dbt_sample.py emulator patch samples native PC/sleep once
+per timer quantum after HLE_DBT_SAMPLE. It does not modify guest memory,
+registers or clocks. Repeating the latest normal image reproduced the exact
+endpoints 7997262 (IRQ-entry build) and 8115744 (interior16). The samples
+include one boundary tick and are approximate attribution, not instruction
+cycle counts: the former had 372411 C/stub, 111187 translated-code and 1665
+sleep samples; the latter 368018 C/stub, 234075 translated-code and 1652
+sleep samples. Thus the regression is not mostly idle waiting, and total
+C/stub occupancy barely changed despite lower translation cost.
+
+DBT_INTERIOR_CACHE adds 256 direct-mapped safe-entry records with ASID,
+owner index and per-bank generation. Only recycling the owner bank (or a
+full flush) changes its generation; individual invalidation is checked via
+the owner's dead flag. Host zero is published first and last with compiler
+barriers around the key/owner fields. ASID-return reuse, remapping and a
+small-cache full-bank recycling test pass. Before the T fix below this
+option took 580812 ticks (17.725 modeled seconds) on the latest image, a
+modest reduction from 18.425; it remains experimental.
+
+Inspection then exposed a correctness defect: inline-cache cmp/eq and the
+lookup stub's shifts/hash comparisons changed SR.T across guest indirect
+jumps/calls/returns. The tflag guest failed cold T=1 and warm T=0 before
+the fix. ICs now temporarily save SR in X1 and restore it on both paths.
+A DBT_SPILL_T recovery record restores T if interrupted before restoration.
+The lookup stubs separately save SR before their tests; their exception
+windows recover the saved T, and both hit and C-call paths restore it.
+The original T-flag cases now pass, including the X0 target form whose delay
+slot overwrites the target register. TMU adds an exact 30000-result loop
+carrying both T values through indirect calls under interrupts; it passes.
+Earlier timing results are historical measurements of a version with this
+known correctness defect and must not be selected as the final artifact.
+
+After T preservation, the current normal NK matched the directory reference
+in 665988 load ticks (20.324 modeled seconds) without interior reuse,
+and 587910 ticks (17.942 seconds) with interior reuse plus the 256-entry
+cache. Both use 16-instruction blocks and no borrowing. The latter took
+23.846 host wall seconds in this run. This remains above the 10-second
+objective. The T fix stays enabled: removing it to recover an earlier time
+would reintroduce the demonstrated ISA error. Cold/warm register and X0
+calls, T across return, interrupted T-carry loops, ASID remaps and bank
+recycling tests pass.
+
+### Publishing safe aliases in the fast hash
+
+DBT_INTERIOR_HASH publishes validated interior PCs in the normal assembly
+lookup hash. A bitmap records which owners have aliases. Individual block
+invalidation scans and clears all hash destinations inside that owner's
+host range; bank recycling already clears the entire victim host range.
+ASID changes still clear user hash entries through the existing sparse list.
+Owner marks and hash publication are made with interrupts masked.
+
+The interior guest verifies hash aliases are removed on code modification,
+then forces all banks to recycle and checks the target again. A negative
+build using a temporary rt.c with alias removal disabled failed both stale
+code and alias-removal checks; the normal source passes. ASID/remap tests
+also pass. With T preservation and the current normal NK, fast alias hashing
+completed in 411006 load ticks (12.543 modeled seconds), versus 587910
+(17.942) with only the separate C entry cache.
+
+DBT_UTLB_HINT is a separate candidate: it remembers one UTLB slot number per
+bucket, but re-reads and checks both hardware words on every use. It caches
+no physical address. VPN, page size, ASID/shared and validity checks are the
+same as the full scan, which is retained on a mismatch. ASID/remap regression
+passes; performance is still being measured.
+
+The current normal-image tick diagnostic changes one byte at 0x838662ca:
+OEMInit's delay-slot mov #1,r4 becomes mov #10,r4. The unique OEMInit
+signature, jsr opcode, call literal 0x83865728 and counts-per-ms literal
+7372 were verified before patching. Its manifest is build-tick-current/patch.json.
+This is a separate BSP configuration experiment and has not changed the
+production BSP source or shared Windows files.
+
+
+### Current-image checks and local alias removal (2026-11-06)
+
+The UTLB-hint profiling build reached the exact My Device reference frame
+in 393534 ticks (12.009705 modeled seconds). The separate 10 ms image with
+the preceding alias-hash build took 397356 ticks (12.126343 seconds).
+Neither establishes a sub-10-second result.
+
+The shipped test loader in `build-device-hh3-test/wince.hh3` uses DEVICE=1,
+PROFILE=0 and the UTLB-hint configuration, without HASH_FOLD14. Its exact
+translator payload was subsequently exercised via the matching .g3a against
+the current normal NK image: 576444 ticks (17.591675 modeled seconds), exact
+frame match. Result and screenshot: `build-speed-review/device-hh3-current/`.
+This does not exercise HollyHock OS calls/flashing or prove hardware timing.
+The profiling configuration's 12.01 seconds must not be attributed to this
+loader. Its bytes have not changed after delivery.
+
+`DBT_ALIAS_LOCAL_REMOVE` narrows alias invalidation from all 8192 hash slots
+to the slots of every aligned guest instruction address inside the owner.
+All published aliases originate in this interval; the destination host-range
+check remains necessary to preserve other blocks after hash collisions.
+This avoids extra reverse-index storage. Expanded interior regression checks
+two distinct aliases, invalidates their modified owner, verifies both see the
+new code, and recycles all cache banks. This and the ASID/remap guest pass.
+Profiling and DEVICE=1/PROFILE=0 directory benchmarks are tracked separately;
+no speed improvement is claimed until their exact-frame runs finish.
+
+The local-removal profiling run completed at 572622 ticks (17.475037
+modeled seconds), with an exact frame match. It regresses versus the
+12.009705-second profiling baseline despite reducing the invalidation
+search bound. It is not enabled in the delivered HH3. The unprofiled
+device configuration must be evaluated independently.
+
+
+### Hardware black screen at DDI takeover (2026-11-05)
+
+User reports no CE desktop, backlight off precisely when the CE display
+initializes, and Clear/ON does not restore it. Treat this as a display-handoff
+failure, not proof of automatic suspend. The new power-state normalization
+experiment is gated by DBT_BOOT_POWER_INIT and is NOT in the LCD-sync loader.
+
+Compared with ClasspadDev/gint dev src/r61523/r61523.c, native HC_LCD_PUSH
+and the debug console lacked SYNCO barriers around cross-bus RS/command
+transitions. rt/lcd_io.h now completes preceding writes, RS-low, command,
+and RS-high separately; HC_LCD_PUSH parameters and the final pixel batch
+are also drained. No per-pixel barrier is added. Existing host regressions
+and target ELF/payload checks pass; physical causality is still unproven.
+
+The reference driver also inherits the live Casio panel configuration,
+whereas our CE PanelInit unconditionally emits SLPOUT and COLMOD=0x55.
+The native lcdprobe.hh3 diagnostic isolates native window/pixel writes and
+these initialization commands one step at a time, outside CE and DBT. It
+uses Casio UI and Clear/EXE; it does not link the flash writer or take over
+the machine. Its successful build is not a hardware validation. The CE
+translated LcdSelect path still lacks explicit barriers and remains under
+investigation; the new native helper only covers native push/console paths.
+
+Hardware lcdprobe result: user reached step 4 successfully. This rules out
+a deterministic failure of these commands in the native Casio environment,
+but does not validate their translated CE execution or scheduling. The next
+controlled hardware check is build-device-lcdsync/wince.hh3 with unchanged
+NK.bin; its boot-power-init experiment remains off.

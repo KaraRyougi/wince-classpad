@@ -16,4 +16,6 @@
 #include "classpad_mmio.h"
 #include "classpad_hc.h"
 
+BOOL OALIoCtlHalPresuspend(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);
+
 #endif
