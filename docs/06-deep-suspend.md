@@ -348,3 +348,27 @@ and, if possible, an RTC alarm wake (a CE notification or alarm). If it
 still resets into the Casio OS, the next suspects are the SDRAM re-init
 order in the stub and the cache write-back before SLEEP.
 
+
+### 8.1 Second board test and the stage diagnostic
+
+With the fix (ad5657a) and the rebuilt image the panel goes dark on suspend
+(the backlight fix works), but Clear/ON still resets into the Casio OS. To
+find the step that fails, `make DEVICE=1 NK_WINDOW=eact STANDBY_DIAG=1 hhk`
+builds a translator whose resume path paints one full-width stripe of 66
+rows per stage, top to bottom, and holds each for about 0.5 s:
+
+| stripe | colour | painted by | meaning |
+|---|---|---|---|
+| 1 | red | resume stub (RS memory) | the core restarted at BAR; the panel is woken first (SLPOUT, DISPON, 0x51 = 0xFF) |
+| 2 | yellow | resume stub | the save block's magic is intact |
+| 3 | green | resume stub | the SDRAM controller is re-initialised |
+| 4 | cyan | resume stub | caches, MMU registers and VBR restored; next: the jump into SDRAM |
+| 5 | blue | rt.c `dbt_standby` | the translator's C code runs again (SDRAM survived) |
+| 6 | white | rt.c `dbt_standby` | IL memory and XYRAM reloaded (`onchip_restore`, claude/ram-layout) |
+| 7 | magenta / grey | rt.c `hypercall` | CE made its first hypercall after the wake-up; grey: it was HC_STANDBY again (the OAL refused the wake reason and sleeps again, panel left lit) |
+
+After stripe 7 the display driver repaints the desktop if the resume
+completes. No stripe at all means the wake-up never reached BAR (or the
+LCD bus is not usable at that point). Verified in casio-emu
+(`make GUEST=standby STANDBY_DIAG=1 run` with `HLE_FBDUMP`: all
+stripes, all checks pass); off by default.

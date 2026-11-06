@@ -2102,6 +2102,26 @@ static void onchip_restore(void)
 }
 extern const sf_u32 dbt_standby_stub[], dbt_standby_stub_end[];
 static sf_u32 g_standbys, g_standby_wakes;
+#ifdef DBT_STANDBY_DIAG
+/* make STANDBY_DIAG=1 (docs/06 section 8): stripes 5-7 of the resume
+ * path; standby.S paints 1-4. Rows 66*(stage-1).. full width, ~0.5 s each. */
+static sf_u32 g_diag_woke;
+static void diag_stripe(sf_u32 stage, sf_u32 colour)
+{
+    volatile sf_u8 *prdr = (volatile sf_u8 *)0xA405013Cu, *r64 = (volatile sf_u8 *)0xA413FEC0u;
+    volatile sf_u16 *port = (volatile sf_u16 *)0xB4000000u;
+    sf_u32 y0 = 66 * (stage - 1), y1 = y0 + 65, n, t;
+    dbt_lcd_select(prdr, port, 0x2A);
+    dbt_lcd_param(port, 0); dbt_lcd_param(port, 0); dbt_lcd_param(port, 1); dbt_lcd_param(port, 0x3F);
+    dbt_lcd_select(prdr, port, 0x2B);
+    dbt_lcd_param(port, y0 >> 8); dbt_lcd_param(port, y0 & 0xFF); dbt_lcd_param(port, y1 >> 8); dbt_lcd_param(port, y1 & 0xFF);
+    dbt_lcd_select(prdr, port, 0x2C);
+    for (n = 320 * 66; n; n--) *port = (sf_u16)colour;
+    dbt_lcd_sync();
+    t = *r64;
+    while (((*r64 - t) & 63) < 32) ;
+}
+#endif
 static sf_u32 dbt_standby(void)
 {
     sf_u32 *stub = (sf_u32 *)RS_STUB, *block = (sf_u32 *)RS_BLOCK;
@@ -2113,7 +2133,13 @@ static sf_u32 dbt_standby(void)
     dbt_dbgring_drain();
     onchip_save();                              /* last: nothing below writes XYRAM before the sleep */
     r = dbt_standby_sleep(block);
+#ifdef DBT_STANDBY_DIAG
+    if (r) diag_stripe(5, 0x001F);              /* blue: the translator's C code in SDRAM runs again */
+#endif
     if (r) onchip_restore();                    /* before anything returns into the IL-memory stubs */
+#ifdef DBT_STANDBY_DIAG
+    if (r) { diag_stripe(6, 0xFFFF); g_diag_woke = 1; }    /* white: IL memory and XYRAM reloaded */
+#endif
     /* back, with the core reset if r == 1: the stub restored caches, MMU
      * registers and VBR; the rest of the machine is the guest's business */
     *(volatile sf_u32 *)0xA4150030u = block[(0x40 + 0x10) / 4];     /* MSTPCR0 */
@@ -2129,6 +2155,11 @@ static sf_u32 dbt_standby(void)
 static int hypercall(dbt_gctx *ctx, sf_u32 nr)
 {
     dbt_stat.hypercalls++;
+#ifdef DBT_STANDBY_DIAG
+    /* the guest's first hypercall after a wake-up: magenta = CE runs again,
+     * grey = it is the OAL going straight back to sleep (wake reason refused) */
+    if (g_diag_woke) { g_diag_woke = 0; diag_stripe(7, nr == HC_STANDBY ? 0x8410 : 0xF81F); }
+#endif
     dbt_dbgring_drain();
     switch (nr) {
     case HC_EXIT:
