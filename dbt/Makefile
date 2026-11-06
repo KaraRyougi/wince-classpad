@@ -71,11 +71,12 @@ NK_FLASH_MAX ?= 0x003E0000
 endif
 NK_FLASH     := $(shell printf '0x%08X' $$((0x80000000 + $(NK_FLASH_OFF))))
 FLASH_DEFS   := -DNK_FLASH=$(NK_FLASH)u -DNK_FLASH_MAX=$(NK_FLASH_MAX)u
-# The EXT region (docs/03): a files-only ROM region in the erased hole of
-# Casio's OS image, chained to the kernel by the OAL (classpad_extrom.h, which
-# holds the same two numbers), flashed by wince.hhk/nkflash.hhk from
-# \fls0\EXT.bin. Only with the NK image in the eActivity area: the hole
-# window overlaps it. EXTBIN=<EXT.bin> adds it to an emulator run's NOR.
+# The EXT region (docs/03): config.bib's second XIP region, in the erased hole
+# of Casio's OS image, chained to the kernel by the OAL (classpad_extrom.h,
+# which holds the same two numbers), flashed by wince.hhk/nkflash.hhk from
+# \fls0\EXT.bin (makeimg writes it next to NK.bin). Only with the NK image in
+# the eActivity area: the hole window overlaps it. EXTBIN=<EXT.bin> adds it to
+# an emulator run's NOR; the translator keeps its blocks like NK's.
 ifeq ($(NK_WINDOW),eact)
 EXT_FLASH     ?= 0x80EE0000
 EXT_FLASH_MAX ?= 0x00500000
@@ -116,7 +117,7 @@ define NK_PAD
 mkdir -p $(BUILD) && python3 ../tools/nkflash.py $(or $(NKBIN),-) $(NK_PADDED) $(NK_FLASH_OFF) $(if $(EXTBIN),--ext $(EXTBIN)) > $(NK_OFF_FILE) && echo "flash offset $$(cat $(NK_OFF_FILE))"
 endef
 
-.PHONY: all clean run nkrun nkshot screenshot disasm hhk hhk-check hhkrun flashtest extrom
+.PHONY: all clean run nkrun nkshot screenshot disasm hhk hhk-check hhkrun flashtest
 
 IMG := $(BUILD)/dbt-$(GUEST)
 
@@ -172,14 +173,7 @@ $(BUILD)/$(GUEST).nk.bin: $(BUILD)/$(GUEST).bin ../tools/mkbin.py
 $(BUILD)/$(GUEST).bin: $(BUILD)/$(GUEST).elf
 	$(OBJCOPY) -O binary $< $@
 
-# --- the EXT region (tools/mkextrom.py, docs/03) ---
-# make NK_WINDOW=eact XPANDER=<unpacked cab> extrom -> $(BUILD)/EXT.bin, copied to
-# \fls0\EXT.bin for wince.hhk; EXTROM picks another manifest
-EXTROM ?= ../bsp/classpad/EXT/xpander.txt
-extrom: $(BUILD)/EXT.bin
-$(BUILD)/EXT.bin: $(EXTROM) ../tools/mkextrom.py $(LAYOUT_STAMP) | $(BUILD)
-	$(if $(EXT_FLASH),,$(error the EXT region needs NK_WINDOW=eact))
-	python3 ../tools/mkextrom.py $< $@ --base $(EXT_FLASH) --max $(EXT_FLASH_MAX)
+# --- a test EXT region for the extrom guest (tools/mkextrom.py; the real one comes from makeimg) ---
 $(BUILD)/extrom-test.bin: guest/extrom.txt guest/extrom-data.txt ../tools/mkextrom.py $(LAYOUT_STAMP) | $(BUILD)
 	$(if $(EXT_FLASH),,$(error the extrom guest needs NK_WINDOW=eact))
 	python3 ../tools/mkextrom.py $< $@ --base $(EXT_FLASH) --max $(EXT_FLASH_MAX)

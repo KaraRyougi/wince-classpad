@@ -1,5 +1,5 @@
-/* test_extrom.c - ClasspadExtRomFind (classpad_extrom.h) against regions built
- * by tools/mkextrom.py: the real thing is accepted, and every field the kernel
+/* test_extrom.c - ClasspadExtRomFind (classpad_extrom.h) against test regions
+ * built by tools/mkextrom.py (the real EXT region comes from makeimg): the real thing is accepted, and every field the kernel
  * would follow is rejected when it points outside the region.
  *   test_extrom <EXT.bin>   (a B000FF file built for CLASSPAD_EXT_ROM_PA) */
 #include <stdio.h>
@@ -23,7 +23,7 @@ int main(int argc, char **argv)
     FILE *f;
     long n;
     unsigned char *bin;
-    unsigned pos, start, toc, files, nfiles;
+    unsigned pos, start, toc, mods, files, nmods, nfiles, e32, o32;
     if (argc != 2 || !(f = fopen(argv[1], "rb"))) { fprintf(stderr, "usage: test_extrom <EXT.bin>\n"); return 2; }
     fseek(f, 0, SEEK_END); n = ftell(f); rewind(f);
     bin = malloc((size_t)n);
@@ -50,8 +50,12 @@ int main(int argc, char **argv)
     toc = find();
     CHECK("the built region is accepted", toc != 0);
     if (!toc) return 1;
-    files = toc + CLASSPAD_EXTROM_ROMHDR_BYTES;
+    nmods = rd(toc + 16);
     nfiles = rd(toc + 48);
+    mods = toc + CLASSPAD_EXTROM_ROMHDR_BYTES;
+    files = mods + nmods * CLASSPAD_EXTROM_TOC_BYTES;
+    e32 = nmods ? rd(mods + 20) : 0;
+    o32 = nmods ? rd(mods + 24) : 0;
     CHECK("pTOC at +0x44 is the ROMHDR", rd(CLASSPAD_EXT_ROM_PA + 0x44) == toc);
 
     reset(); wr(CLASSPAD_EXT_ROM_PA + 0x40, 0x43454344); CHECK("bad signature", find() == 0);
@@ -60,16 +64,25 @@ int main(int argc, char **argv)
     reset(); wr(toc + 8, CLASSPAD_EXT_ROM_PA + 0x1000);  CHECK("physfirst not the base", find() == 0);
     reset(); wr(toc + 12, CLASSPAD_EXT_ROM_PA + CLASSPAD_EXT_ROM_BYTES + 4); CHECK("physlast past the window", find() == 0);
     reset(); wr(toc + 12, toc);                          CHECK("physlast before the files", find() == 0);
-    reset(); wr(toc + 16, 1);                            CHECK("modules are refused", find() == 0);
-    reset(); wr(toc + 48, 0);                            CHECK("no files", find() == 0);
-    reset(); wr(toc + 48, CLASSPAD_EXTROM_MAX_FILES + 1); CHECK("absurd file count", find() == 0);
-    reset(); wr(files + 12, rd(files + 12) + 1);         CHECK("compressed file", find() == 0);
+    reset(); wr(toc + 16, CLASSPAD_EXTROM_MAX_ENTRIES + 1); CHECK("absurd module count", find() == 0);
+    reset(); wr(toc + 16, 0); wr(toc + 48, 0);           CHECK("no modules and no files", find() == 0);
+    reset(); wr(toc + 48, CLASSPAD_EXTROM_MAX_ENTRIES + 1); CHECK("absurd file count", find() == 0);
+    reset(); wr(files + 16, rd(files + 12) + 1);         CHECK("stored larger than the file", find() == 0);
+    if (nmods) {
+        reset(); wr(mods + 16, CLASSPAD_EXT_ROM_PA - 1);  CHECK("module name below the base", find() == 0);
+        reset(); wr(mods + 20, rd(toc + 12));             CHECK("e32 at physlast", find() == 0);
+        reset(); wr(mods + 24, o32 + 2);                  CHECK("unaligned o32", find() == 0);
+        reset(); wr(e32, rd(e32) & 0xFFFF0000u);          CHECK("module with no sections", find() == 0);
+        reset(); wr(e32, (rd(e32) & 0xFFFF0000u) | 0x4000u); CHECK("module with absurd sections", find() == 0);
+        reset(); wr(o32 + 12, rd(toc + 12) - 4);           CHECK("section data past physlast", find() == 0);
+        reset(); wr(o32 + 8, 0); wr(o32 + 12, 0);          CHECK("empty section needs no data", find() == toc);
+    }
     reset(); wr(files + 20, 0x8C000000);                 CHECK("name outside the region", find() == 0);
     reset(); wr(files + 24, rd(toc + 12) - 2);           CHECK("data running past physlast", find() == 0);
     reset(); wr(files + (nfiles - 1) * CLASSPAD_EXTROM_FILE_BYTES + 24, CLASSPAD_EXT_ROM_PA - 4);
     CHECK("last file's data below the base", find() == 0);
     reset(); CHECK("unchanged copy accepted again", find() == toc);
 
-    printf("extrom: %u files, ROMHDR %08x, %d failures\n", nfiles, toc, fails);
+    printf("extrom: %u modules, %u files, ROMHDR %08x, %d failures\n", nmods, nfiles, toc, fails);
     return fails ? 1 : 0;
 }

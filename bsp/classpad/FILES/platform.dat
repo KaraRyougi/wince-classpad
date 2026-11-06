@@ -1,6 +1,6 @@
 ; CLASSPAD platform.dat: object store setup (initobj.dat) for the BSP
 
-; Math Xpander from the EXT region (bsp/classpad/EXT, docs/03): its Start menu
-; link. The link and the program are ROM files of that region, so with no
-; EXT region flashed there is nothing to copy.
-Directory("\Windows\Programs"):-File("Math Xpander.lnk", "\Windows\Math Xpander.lnk")
+; Math Xpander from the EXT region (FILES\xpander, docs/03): its Start menu
+; link. The link and the program are in that region, so with no EXT region
+; flashed there is nothing to copy.
+Directory("\Windows\Programs"):-File("Math Xpander.lnk", "\Windows\mathxpander.lnk")

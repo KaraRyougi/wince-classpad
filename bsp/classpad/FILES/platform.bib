@@ -28,9 +28,56 @@ MODULES
 MODULES
     classpad_rotatekey.exe $(_FLATRELEASEDIR)\classpad_rotatekey.exe NK S
 
-; MFC CE 3.0 (Pocket PC, SH3) for legacy applications; with DocList.dll above.
-; A ROM file, not an XIP module, so the loader keeps the SH3 PE header (it needs
-; the kernel's SH3 loader patch, bsp\kernel). Always in: an IDE build sets no
-; BSP_LEGACY_MFC, and the 2026-11-06 image has 1.9 MB of the window free.
+; MFC CE 3.0 (Pocket PC, SH3) for legacy applications, with DocList.dll above,
+; executed in place like the rest of NK. P: romimage does not check the CPU
+; type of an SH3 module; the kernel loads ROM modules without a CPU check.
+MODULES
+   mfcce300.dll          $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\legacy-mfc\mfcce300.dll        NK  P
+
+; Math Xpander 1.0 (Saltire, Pocket PC 2000 SH3) in the EXT region (config.bib):
+; its binaries as XIP modules, help pages, keypad bitmaps and the Start menu
+; link as files. The binaries are not in the repository: stage.py copies them
+; into FILES\xpander from the unpacked cab (FILES\xpander\README.md). The
+; program is \Windows\MathXpander.exe; platform.dat puts the link in the Start
+; menu, platform.reg registers .mwb. MathKeyPad.dll (its keypad input method)
+; is in, not registered.
+MODULES
+   AlgebraicExpression.dll  $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\AlgebraicExpression.dll   EXT  P
+   CalculationPane.dll      $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\CalculationPane.dll       EXT  P
+   Common.dll               $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\Common.dll                EXT  P
+   DataSet.dll              $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\DataSet.dll               EXT  P
+   EvalAlgorithms.dll       $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\EvalAlgorithms.dll        EXT  P
+   EventServiceBroker.dll   $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\EventServiceBroker.dll    EXT  P
+   ExpressionEditor.dll     $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\ExpressionEditor.dll      EXT  P
+   ExpressionEditorUI.dll   $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\ExpressionEditorUI.dll    EXT  P
+   GeometryControl.dll      $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\GeometryControl.dll       EXT  P
+   GeometryEngine.dll       $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\GeometryEngine.dll        EXT  P
+   GeometryPane.dll         $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\GeometryPane.dll          EXT  P
+   GraphFrame.dll           $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\GraphFrame.dll            EXT  P
+   Graphics.dll             $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\Graphics.dll              EXT  P
+   GraphicsPlane.dll        $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\GraphicsPlane.dll         EXT  P
+   MathXpander.exe          $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\MathXpander.exe           EXT  P
+   MfcComponents.dll        $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\MfcComponents.dll         EXT  P
+   ndosspal.dll             $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\ndosspal.dll              EXT  P
+   NumericCAS.dll           $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\NumericCAS.dll            EXT  P
+   PlotControl.dll          $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\PlotControl.dll           EXT  P
+   Relation.dll             $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\Relation.dll              EXT  P
+   SymbolicPane.dll         $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\SymbolicPane.dll          EXT  P
+   TableFrame.dll           $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\TableFrame.dll            EXT  P
+   TablePane.dll            $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\TablePane.dll             EXT  P
+   Workbook.dll             $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\Workbook.dll              EXT  P
+   MathKeyPad.dll           $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\MathKeyPad.dll            EXT  P
 FILES
-   mfcce300.dll $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\legacy-mfc\mfcce300.dll NK S
+   geometry1.htm            $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\geometry1.htm             EXT  S
+   graph1.htm               $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\graph1.htm                EXT  S
+   math1.htm                $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\math1.htm                 EXT  S
+   math_help_contents.htm   $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\math_help_contents.htm    EXT  S
+   mathkeypad_123.2BP       $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\mathkeypad_123.2BP        EXT  S
+   mathkeypad_abc.2BP       $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\mathkeypad_abc.2BP        EXT  S
+   mathkeypad_arrow.2BP     $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\mathkeypad_arrow.2BP      EXT  S
+   table1.htm               $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\table1.htm                EXT  S
+   wookbook_line.2BP        $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\wookbook_line.2BP         EXT  S
+   workbook1.htm            $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\workbook1.htm             EXT  S
+   workbook_keyboard.2BP    $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\workbook_keyboard.2BP     EXT  S
+   workbook_keybswitch.2BP  $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\workbook_keybswitch.2BP   EXT  S
+   mathxpander.lnk          $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\mathxpander.lnk           EXT  S

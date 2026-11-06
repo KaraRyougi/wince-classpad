@@ -25,3 +25,8 @@ bsp/tests/test_timer
 /dbt/bench-integrated-normal/
 bsp/tests/test_extrom
 bsp/tests/extrom-test.bin
+
+# Math Xpander binaries: copied into the VM package by stage.py, not committed
+bsp/classpad/FILES/xpander/*
+!bsp/classpad/FILES/xpander/README.md
+!bsp/classpad/FILES/xpander/mathxpander.lnk

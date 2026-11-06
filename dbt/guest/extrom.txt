@@ -1,4 +1,6 @@
-# Test region for the extrom guest: make -C dbt NK_WINDOW=eact GUEST=extrom run
-# (tools/mkextrom.py manifest: <ROM name> <source> [flags])
+# Test region for the extrom guest and bsp/tests/test_extrom
+# (make -C dbt NK_WINDOW=eact GUEST=extrom run; tools/mkextrom.py manifest:
+# <ROM name> <source> [flags], M = a module record over the file's bytes)
+extrom.dll               extrom-data.txt   M
 extrom-data.txt          extrom-data.txt
 "Name With Spaces.lnk"   extrom-data.txt   SH

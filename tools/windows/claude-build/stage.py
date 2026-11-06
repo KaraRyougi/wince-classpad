@@ -2,15 +2,16 @@
 """stage.py - fill a claude-build package folder for the Platform Builder VM.
 
   stage.py <dest> [--platform <VM PLATFORM\\CLASSPAD>] [--xpander <unpacked cab>]
+  (--xpander defaults to ~/Downloads/Xpander_SH3/files)
 
 <dest> gets (see README.txt here):
   build.bat, README.txt, VERSION.txt
-  src\\   bsp/classpad of the committed HEAD (git archive: CRLF as checked out),
-         with FILES\\config.bib switched to the eActivity window (the VM builds
-         its NK image for 83860000, the repository default is the hole window)
+  src\\   bsp/classpad of the committed HEAD (git archive: CRLF as checked out)
+         plus Math Xpander's files in FILES\\xpander (platform.bib puts them
+         into the EXT region; they are not in the repository)
   orig\\  with --platform: the VM's current versions of every file src\\ changes
   hhk\\   wince-eact.hh3 and nkflash-eact.hh3 (make DEVICE=1 NK_WINDOW=eact hhk)
-         and, with --xpander, EXT.bin (make NK_WINDOW=eact extrom)
+EXT.bin itself is made by makeimg in the VM (build.bat), next to NK.bin.
 Nothing outside <dest> is written except the dbt/build-pkg build directory.
 Commit first: src\\ comes from HEAD, not from the working tree.
 """
@@ -20,16 +21,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 BUILD = "build-pkg"
 
-EACT = [
-    ("    NK          81000000  003E0000  RAMIMAGE    ; 3.875 MiB", "\0A"),
-    (";   NK          83860000  007A0000  RAMIMAGE    ; alternative: the eActivity area (make NK_WINDOW=eact; docs/03: needs an OS patch first)",
-     "    NK          83860000  007A0000  RAMIMAGE    ; the eActivity area (make NK_WINDOW=eact; reformatted by Casio's OS at every boot, docs/03)"),
-    ("\0A", ";   NK          81000000  003E0000  RAMIMAGE    ; 3.875 MiB"),
-    ("    ROMSTART=81000000\r\n    ROMSIZE=003E0000\r\n;   ROMSTART=83860000  ROMSIZE=007A0000           ; the eActivity-area variant (with the NK line above)",
-     ";   ROMSTART=81000000  ROMSIZE=003E0000           ; the hole window (with the NK line above)\r\n    ROMSTART=83860000\r\n    ROMSIZE=007A0000"),
-]
-
-
 def run(*cmd, **kw):
     print("+", " ".join(cmd))
     return subprocess.run(cmd, check=True, cwd=kw.get("cwd", REPO), capture_output=kw.get("capture", False))
@@ -37,7 +28,7 @@ def run(*cmd, **kw):
 
 def main(argv):
     args = argv[1:]
-    opts = {"--platform": None, "--xpander": None}
+    opts = {"--platform": None, "--xpander": os.path.expanduser("~/Downloads/Xpander_SH3/files")}
     pos = []
     while args:
         a = args.pop(0)
@@ -62,13 +53,28 @@ def main(argv):
             out = os.path.join(src, rel)
             os.makedirs(os.path.dirname(out), exist_ok=True)
             open(out, "wb").write(t.extractfile(m).read())
-    cfg = os.path.join(src, "FILES", "config.bib")
-    s = open(cfg, "rb").read().decode()
-    for a, b in EACT:
-        if a not in s:
-            sys.exit("stage: config.bib changed, update the eActivity switch (%r)" % a[:40])
-        s = s.replace(a, b, 1)
-    open(cfg, "wb").write(s.encode())
+    cfg = open(os.path.join(src, "FILES", "config.bib"), "rb").read().decode()
+    for line in ("NK          83860000  007A0000  RAMIMAGE", "EXT         80EE0000  00500000  RAMIMAGE"):
+        if line not in cfg:
+            sys.exit("stage: config.bib lacks %r (NK in the eActivity area, EXT in the hole)" % line)
+
+    # Math Xpander: the cab's Program Files\Xpander and Windows files, flat
+    xp = opts["--xpander"]
+    if not os.path.isdir(os.path.join(xp, "Program Files", "Xpander")):
+        sys.exit("stage: no Math Xpander at %s (--xpander: the unpacked cab)" % xp)
+    dst = os.path.join(src, "FILES", "xpander")
+    n = 0
+    for sub in (os.path.join("Program Files", "Xpander"), "Windows"):
+        for f in sorted(os.listdir(os.path.join(xp, sub))):
+            p = os.path.join(xp, sub, f)
+            if os.path.isfile(p) and f not in (".DS_Store", "regsvrce.exe"):
+                shutil.copy2(p, os.path.join(dst, f)); n += 1
+    bib = open(os.path.join(src, "FILES", "platform.bib"), "rb").read().decode()
+    need = [l.split()[0] for l in bib.splitlines() if "\\FILES\\xpander\\" in l and not l.lstrip().startswith(";")]
+    missing = [f for f in need if not os.path.isfile(os.path.join(dst, f))]
+    if missing:
+        sys.exit("stage: platform.bib wants %s, not in the Xpander files" % missing)
+    print("stage: %d Math Xpander files in FILES\\xpander (%d bib entries)" % (n, len(need)))
 
     if opts["--platform"]:
         n = 0
@@ -85,9 +91,6 @@ def main(argv):
     run("make", "DEVICE=1", "NK_WINDOW=eact", "BUILD=" + BUILD, "hhk", cwd=dbt)
     shutil.copy(os.path.join(dbt, BUILD, "wince.hh3"), os.path.join(hhk, "wince-eact.hh3"))
     shutil.copy(os.path.join(dbt, BUILD, "nkflash.hh3"), os.path.join(hhk, "nkflash-eact.hh3"))
-    if opts["--xpander"]:
-        run("make", "NK_WINDOW=eact", "BUILD=" + BUILD, "XPANDER=" + os.path.abspath(opts["--xpander"]), "extrom", cwd=dbt)
-        shutil.copy(os.path.join(dbt, BUILD, "EXT.bin"), os.path.join(hhk, "EXT.bin"))
 
     for f in ("build.bat", "README.txt"):
         shutil.copy(os.path.join(HERE, f), os.path.join(dest, f))

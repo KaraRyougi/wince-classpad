@@ -109,12 +109,27 @@ void dbt_main(void)
         entry = GUEST_LOAD;
     }
 
+    memset(&cfg, 0, sizeof cfg);
     cfg.cache_base = CACHE_BASE; cfg.cache_size = CACHE_SIZE;
     cfg.guest_ram_lo = GUEST_LOAD; cfg.guest_ram_hi = GUEST_RAM_HI;
     cfg.dev_lo = info.kernel_lo; cfg.dev_hi = info.kernel_hi;      /* kernel.dll reaches the CCN registers directly */
     cfg.rom_lo = info.physfirst & 0x1FFFFFFFu; cfg.rom_hi = info.physlast & 0x1FFFFFFFu;
+#ifdef EXT_FLASH
+    /* config.bib's second XIP region (EXT, docs/03): its modules run in place
+     * too, so their blocks survive whole-cache flushes like NK's. The OAL
+     * decides whether the kernel uses it; this is only about our cache. */
+    if (info.xip && nkbin_is_xip(EXT_FLASH, EXT_FLASH, EXT_FLASH + EXT_FLASH_MAX)) {
+        nkbin_info ext;
+        if (nkbin_xip(EXT_FLASH, EXT_FLASH, EXT_FLASH + EXT_FLASH_MAX, &ext) == NKBIN_OK
+            && ext.physfirst == EXT_FLASH && ext.physlast <= EXT_FLASH + EXT_FLASH_MAX) {
+            cfg.rom2_lo = ext.physfirst & 0x1FFFFFFFu; cfg.rom2_hi = ext.physlast & 0x1FFFFFFFu;
+            dbt_puts("[nk] EXT region "); dbt_puthex(ext.physfirst); dbt_puts(".."); dbt_puthex(ext.physlast);
+            dbt_puts(", "); dbt_puthex(ext.nummods); dbt_puts(" modules\n");
+        }
+    }
+#endif
 #ifdef DBT_NO_ROMKEEP
-    cfg.rom_lo = cfg.rom_hi = 0;         /* experiments: whole-cache flushes drop the ROM blocks too */
+    cfg.rom_lo = cfg.rom_hi = cfg.rom2_lo = cfg.rom2_hi = 0;   /* experiments: whole-cache flushes drop the ROM blocks too */
 #endif   /* XIP code in it never changes */
     dbt_rt_init(&cfg);
     dbt_shadow_vbr = 0;
