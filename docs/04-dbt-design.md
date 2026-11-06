@@ -607,6 +607,31 @@ Optimizations, in order of payoff per effort:
    register ("Scratch registers" above): no liveness needed, a register the
    block never touches is free for the whole block.
 
+### Runtime hot spots found with the shell image (2026-11-05)
+
+A heartbeat profile of the Standard Shell boot (casio-emu `HLE_HB=1`, 646
+samples of the PC every 50M iterations, symbolised with `sh-elf-addr2line`
+on the translator ELF) put 78 % of the boot in the translator's own C code
+and 22 % in translated guest code. Inside the C code: `memset` 22 % (the
+byte loop of rt.c, called for every `sh_insn` an instruction decode fills
+and for every translation's context and block), `switch_asid` 17 % and the
+`ldtlb` fallback 10 % (both scanned every block header, up to MAX_BLOCKS, at
+every address-space switch and every TLB refill), the translation proper
+3 %. Fixes: word loops for `memset`/`memcpy`; `g_user_idx` and `g_ic_idx`
+list the user-space blocks and the blocks with an inline cache, so an ASID
+switch and a TLB hook only visit those (appended before the block is
+published, reset by a full flush; the loops re-check `binfo` so a duplicate
+or a reused index is harmless). Measured on the hello image (NK-fix5,
+4096 blocks, 512 KiB cache, iterations at each milestone): display driver
+up 1500M -> 800M, hello window 2700M -> 1400M, tick 20 8100M -> 4050M; in
+the idle window the cost per guest second fell from 270M to 107M
+iterations (every 1 ms tick's `rte` used to pay a full block scan). All
+13 guests pass. Still open from the same profile: the shell's working set
+exceeds 4096 blocks (92 full flushes and 376 k translations in 900 s with
+the old layout, measured by the HollyHock session), which the 8192-block
+layout addresses, and the prepass/main-loop double decode is already
+avoided (`g_pre`).
+
 ### Profiling a CE boot (2026-11-03)
 
 The 1 ms TMU tick is a sampling profiler: `-DDBT_TRACE_EXC` prints every

@@ -32,8 +32,35 @@ typedef char check_size[(sizeof(dbt_gctx) == CTX_SIZE) ? 1 : -1];
 dbt_gctx dbt_ctx_rt, dbt_ctx_exc;
 
 /* freestanding helpers GCC may call */
-void *memcpy(void *d, const void *s, dbt_size_t n) { sf_u8 *a = d; const sf_u8 *b = s; while (n--) *a++ = *b++; return d; }
-void *memset(void *d, int c, dbt_size_t n) { sf_u8 *a = d; while (n--) *a++ = (sf_u8)c; return d; }
+/* Freestanding memcpy/memset. Word loops when both sides are aligned: the
+ * byte loops they replace were 22 % of a CE shell boot (every instruction
+ * decode zeroes an sh_insn, every translation its context and block). */
+void *memcpy(void *d, const void *s, dbt_size_t n)
+{
+    sf_u8 *a = d; const sf_u8 *b = s;
+    if ((((sf_u32)a | (sf_u32)b) & 3) == 0) {
+        sf_u32 *wa = (sf_u32 *)a; const sf_u32 *wb = (const sf_u32 *)b;
+        while (n >= 16) { wa[0] = wb[0]; wa[1] = wb[1]; wa[2] = wb[2]; wa[3] = wb[3]; wa += 4; wb += 4; n -= 16; }
+        while (n >= 4) { *wa++ = *wb++; n -= 4; }
+        a = (sf_u8 *)wa; b = (const sf_u8 *)wb;
+    }
+    while (n--) *a++ = *b++;
+    return d;
+}
+void *memset(void *d, int c, dbt_size_t n)
+{
+    sf_u8 *a = d;
+    sf_u32 w = (sf_u8)c; w |= w << 8; w |= w << 16;
+    while (n && ((sf_u32)a & 3)) { *a++ = (sf_u8)c; n--; }
+    {
+        sf_u32 *wa = (sf_u32 *)a;
+        while (n >= 16) { wa[0] = w; wa[1] = w; wa[2] = w; wa[3] = w; wa += 4; n -= 16; }
+        while (n >= 4) { *wa++ = w; n -= 4; }
+        a = (sf_u8 *)wa;
+    }
+    while (n--) *a++ = (sf_u8)c;
+    return d;
+}
 
 volatile sf_u32 dbt_shadow_vbr = 0;
 volatile sf_u32 dbt_shadow_md = SR_MD;
@@ -105,6 +132,17 @@ static binfo  g_binfo[MAX_BLOCKS];
 #define CHAIN_NONE 0xFFFFu
 static sf_u16 g_chain_head[HSIZE];
 static sf_u16 g_chain_next[MAX_BLOCKS];
+/* Blocks an address-space switch has to look at: user-space blocks (their
+ * hash entries leave with their ASID) and blocks with an inline cache (an
+ * IC aimed at a user-space target forgets it). Scanning all MAX_BLOCKS
+ * block headers at every switch and every ldtlb was 27 % of a CE shell
+ * boot. The lists are appended before the block is published and only
+ * reset by a full flush, so an abandoned insert can leave a duplicate or an
+ * index a later translation reuses: the loops re-check binfo and ic_off,
+ * which makes that harmless. */
+static sf_u16 g_user_idx[MAX_BLOCKS];
+static sf_u16 g_ic_idx[MAX_BLOCKS];
+static int    g_nuser, g_nic;
 static sf_u32 g_asid;
 static dbt_env   g_env;
 
@@ -275,14 +313,19 @@ static void invalidate_range(sf_u32 lo, sf_u32 hi, int user_only)
  * when their ASID returns (or for reuse through a shared physical page). */
 static void switch_asid(sf_u32 asid)
 {
-    int i;
+    int j;
     g_asid = asid;
     dbt_stat.asid_switches++;
-    for (i = 0; i < g_nblocks; i++) {
+    for (j = 0; j < g_nuser; j++) {
+        int i = g_user_idx[j];
+        if (i >= g_nblocks || g_binfo[i].dead || !g_binfo[i].user) continue;
+        if (g_binfo[i].asid != asid) hash_remove(&g_blocks[i]);
+    }
+    for (j = 0; j < g_nic; j++) {
+        int i = g_ic_idx[j];
         dbt_block *b = &g_blocks[i];
-        if (g_binfo[i].dead) continue;
-        if (g_binfo[i].user && g_binfo[i].asid != asid) hash_remove(b);
-        if (b->ic_off >= 0) {
+        if (i >= g_nblocks || g_binfo[i].dead || b->ic_off < 0) continue;
+        {
             sf_u32 g = *(volatile sf_u32 *)(b->host_base + (sf_u32)b->ic_off);
             if (g != 1 && IS_USER(g)) reset_ic(b);
         }
@@ -303,12 +346,14 @@ static void tlb_hook(void)
     sf_u32 pteh = REG_PTEH, ptel = REG_PTEL;
     sf_u32 sz = ((ptel >> 4) & 1) | ((ptel >> 6) & 2), mask = ~((1u << shift_of_sz[sz]) - 1);
     sf_u32 vpn = pteh & 0xFFFFFC00u & mask, asid = pteh & 0xFF, shared = (ptel >> 1) & 1;
-    int i;
+    int i, j;
     dbt_stat.tlb_hooks++;
     note_asid();
-    for (i = 0; i < g_nblocks; i++) {
-        dbt_block *b = &g_blocks[i];
-        if (g_binfo[i].dead || !g_binfo[i].user) continue;
+    for (j = 0; j < g_nuser; j++) {
+        dbt_block *b;
+        i = g_user_idx[j];
+        if (i >= g_nblocks || g_binfo[i].dead || !g_binfo[i].user) continue;
+        b = &g_blocks[i];
         if (b->guest_pc >= vpn + ~mask + 1 || b->guest_pc + b->guest_len <= vpn) continue;
         if (!shared && g_binfo[i].asid != asid) continue;                     /* another process's view */
         if (!(ptel & 0x100) || g_binfo[i].phys == PHYS_UNKNOWN ||
@@ -350,6 +395,7 @@ static void cache_flush_all(void)
     __asm__ volatile ("stc sr, %0" : "=r"(sr));
     __asm__ volatile ("ldc %0, sr" :: "r"(sr | 0xF0u) : "memory");
     g_nblocks = 0;
+    g_nuser = 0; g_nic = 0;
     g_cache_used = 0;
     g_arena_used = 0;
     for (i = 0; i < HSIZE; i++) { g_hash[i].gpc = 1; g_hash[i].host = 0; g_chain_head[i] = CHAIN_NONE; }
@@ -524,6 +570,8 @@ static dbt_block *translate_at(sf_u32 gpc)
          * kernel does when it reuses such a page for new code. */
         bi->phys = (bi->user || gpc >= 0xC0000000u) ? utlb_translate(gpc, g_asid) : (gpc & 0x1FFFFFFFu);
         g_chain_next[g_nblocks] = g_chain_head[hidx(gpc)];
+        if (bi->user && g_nuser < MAX_BLOCKS) g_user_idx[g_nuser++] = (sf_u16)g_nblocks;
+        if (b->ic_off >= 0 && g_nic < MAX_BLOCKS) g_ic_idx[g_nic++] = (sf_u16)g_nblocks;
     }
     /* An interrupt can land in the translator (it resumes the guest at the
      * pc being translated and this C context is abandoned), so the order
