@@ -19,8 +19,15 @@
 //  Registry (HKLM\HARDWARE\DEVICEMAP\KEYBD): "Priority256" (priority of
 //  both threads, default 145), "PollMs" (default 20), "Matrix" (0 = fx-CG100
 //  keypad, 1 = fx-CP400 keypad; read by kbd_layout.cpp).
+//
+//  SHIFT then Clear/ON (or Clear/ON with SHIFT held) suspends, as on the
+//  Casio OS: the Clear press is not delivered as a key, the scan only asks
+//  for the suspend, and the thread that ran it calls SetSystemPowerState
+//  (what Start > Suspend does) once it has left the scan lock. fx-CP400
+//  matrix only: SHIFT is casio key 81, Clear/ON key 20 (kbd_layout.cpp).
 //------------------------------------------------------------------------------
 #include <windows.h>
+#include <pm.h>
 #include <nkintr.h>
 #include <keybddbg.h>
 #include <keybdpdd.h>
@@ -57,6 +64,12 @@ static CRITICAL_SECTION g_csScan;                   // one scan at a time
 static UINT16           g_image[KEYSC_WORDS];       // last matrix image
 static volatile BOOL    g_suppressClear;
 static DWORD            g_events;                   // key events delivered
+static BOOL             g_cp400;                    // fx-CP400 matrix (registry "Matrix" = 1)
+static BOOL             g_shiftArmed;               // SHIFT pressed, no other key since
+static volatile BOOL    g_suspendRequest;           // SHIFT + Clear/ON seen by the scan
+
+#define KEYSC_SHIFT_SCAN    KEYSC_CODE_TO_SCAN(81)  // fx-CP400 SHIFT: word 0 bit 15
+#define KEYSC_CLEAR_SCAN    KEYSC_CODE_TO_SCAN(20)  // fx-CP400 Clear/ON: word 0 bit 1
 
 static DWORD RegDword(LPCTSTR name, DWORD dflt)
 {
@@ -124,6 +137,20 @@ static UINT KeyscScan(void)
             if (changed & (1 << b)) {
                 BOOL down = (now[w] & (1 << b)) != 0;
                 UINT32 sc = KEYSC_SCANCODE(w, b);
+                if (g_cp400 && down) {
+                    if (sc == KEYSC_CLEAR_SCAN && g_shiftArmed) {
+                        // SHIFT + Clear/ON: suspend. Clear stays masked
+                        // until it is released (the image keeps it up), like
+                        // the press that wakes the machine.
+                        g_shiftArmed = FALSE;
+                        g_suppressClear = TRUE;
+                        g_suspendRequest = TRUE;
+                        now[w] = (UINT16)(now[w] & ~(1 << b));
+                        RETAILMSG(1, (TEXT("CLASSPAD KEYBD: SHIFT + Clear/ON: suspend\r\n")));
+                        continue;
+                    }
+                    g_shiftArmed = (sc == KEYSC_SHIFT_SCAN);
+                }
                 g_events++;
                 if (g_events <= 40 || (g_events % 100) == 0)
                     RETAILMSG(1, (TEXT("CLASSPAD KEYBD: scan %d %s (word %d bit %d)\r\n"), sc, down ? TEXT("down") : TEXT("up"), w, b));
@@ -141,6 +168,15 @@ static UINT KeyscScan(void)
     return n;
 }
 
+// Outside the scan lock: SetSystemPowerState returns only after the resume,
+// and the power handlers run in between.
+static void SuspendIfRequested(void)
+{
+    if (!g_suspendRequest) return;
+    g_suspendRequest = FALSE;
+    SetSystemPowerState(NULL, POWER_STATE_SUSPEND, POWER_FORCE);
+}
+
 static DWORD WINAPI KeyscPoll(LPVOID arg)
 {
     DWORD pollMs = (DWORD)arg;
@@ -150,6 +186,7 @@ static DWORD WINAPI KeyscPoll(LPVOID arg)
         EnterCriticalSection(&g_csScan);
         KeyscScan();
         LeaveCriticalSection(&g_csScan);
+        SuspendIfRequested();
     }
     return 0;
 }
@@ -173,6 +210,7 @@ static DWORD WINAPI KeyscIst(LPVOID)
     if (g_dwSysIntr != SYSINTR_UNDEFINED &&
         !KernelIoControl(IOCTL_HAL_ENABLE_WAKE, &g_dwSysIntr, sizeof g_dwSysIntr, NULL, 0, NULL))
         RETAILMSG(1, (TEXT("CLASSPAD KEYBD: wake registration failed %d\r\n"), GetLastError()));
+    g_cp400 = RegDword(TEXT("Matrix"), 0) == 1;
     KeyscInit();
     KeyscScan();        // keys already held: report them, start from the live image
     g_hPoll = CreateThread(NULL, 0, KeyscPoll, (LPVOID)pollMs, 0, NULL);
@@ -198,6 +236,7 @@ static DWORD WINAPI KeyscIst(LPVOID)
         KeyscScan();
         LeaveCriticalSection(&g_csScan);
         InterruptDone(g_dwSysIntr);
+        SuspendIfRequested();
     }
     return 0;
 }

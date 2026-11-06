@@ -106,10 +106,10 @@ static UINT32 RStandbyOnce(UINT32 keySysIntr)
     MMIO_W16(KEYSC_KIUCNTREG, KEYSC_CNT_SCAN_START);
 
     // The wake-up is a level: a Clear still held from before the suspend
-    // would end it at once, so wait (bounded, 2 s) for its release. Then
+    // would end it at once, so wait (bounded, 1 s) for its release. Then
     // clear the KEYSC event flags (the scan start above sets one) so that
     // after the wake-up they mean "a key event happened while the core was
-    // off". The bound is counted on the RTC's 64 Hz counter, not OALStall:
+    // off". The bound is counted on the RTC's R64CNT (128 Hz), not OALStall:
     // from the second pass of the loop in OEMPowerOff, TMU0 has been reset
     // by R-standby (the kernel re-inits it only after OEMPowerOff returns)
     // and OALStall would spin for ever on a stopped TCNT0.

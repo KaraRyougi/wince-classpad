@@ -425,6 +425,21 @@ void ClasspadGPE::PushRows(int top, int bottom)
 // the panel into deep standby (0xB9/0xBD/0xB1, which needs a full re-init)
 // and stops a port and a timer channel, which CE does not do: it keeps the
 // Casio OS's panel set-up and only needs SLPOUT to come back.
+// Busy wait on the RTC's R64CNT (bits 6..0 count at 128 Hz): PowerHandler
+// runs with the scheduler stopped, Sleep is not available there. Bounded
+// in reads too, in case the RTC is not running.
+static void PanelWaitTicks(UINT ticks)
+{
+    volatile UCHAR *r64 = (volatile UCHAR *)0xA413FEC0;
+    UINT last = *r64 & 0x7F, now, elapsed = 0;
+    DWORD reads;
+    for (reads = 0; elapsed < ticks && reads < 4000000; reads++) {
+        now = *r64 & 0x7F;
+        elapsed += (now - last) & 0x7F;
+        last = now;
+    }
+}
+
 VOID ClasspadGPE::PowerHandler(BOOL bOff)
 {
     if (m_panel != LCD_PANEL_DCS) return;
@@ -438,9 +453,15 @@ VOID ClasspadGPE::PowerHandler(BOOL bOff)
         // 0 is what the emulator reads (no RDDISBV there), and a level this
         // low would not have been the user's: come back at full brightness
         m_brightness = level >= 0x10 ? level : LCD_BRIGHTNESS_DEFAULT;
+        // The OS's timing (ROM 0x80038acc): the backlight dims over a few
+        // frames, so DISPOFF only once it is dark (60 ms; DISPOFF right after
+        // 0x51 = 0 showed the white panel for a moment), then SLPIN 60 ms
+        // after DISPOFF. 8 ticks of R64CNT = 62.5 ms.
         LcdCommand(LCD_DCS_WRDISBV);
         LcdParam(0);
+        PanelWaitTicks(8);
         LcdCommand(LCD_DCS_DISPOFF);
+        PanelWaitTicks(8);
         LcdCommand(LCD_DCS_SLPIN);
         m_displayOn = FALSE;
     } else {
