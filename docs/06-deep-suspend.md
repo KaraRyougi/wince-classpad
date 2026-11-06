@@ -371,3 +371,24 @@ completes. No stripe at all means the wake-up never reached BAR (or the
 LCD bus is not usable at that point). Verified in casio-emu
 (`make GUEST=standby STANDBY_DIAG=1 run` with `HLE_FBDUMP`: all six
 stripes, all checks pass); off by default.
+
+### 8.2 The second reset: SPC and SSR (2026-11-06)
+
+With the SDRAM step fixed, the board still reset into the Casio OS. The
+stage diagnostic (8.1, branch claude/rstandby-diag) showed every stage up
+to the translator's C code after the wake-up passing, then the reset.
+HC_STANDBY is a hypercall: the exception path in `rt/stubs.S` returns from
+it through its RESUME exit, which reloads r0-r15, both banks, GBR, PR,
+MACH/MACL and the DSP slots from the saved context but ends with `rte` on
+the *live* SPC and SSR. Those are core registers, reset by R-standby
+(SH7724 18.4.6 (a): "If necessary, save SPC and SSR in the stack before
+executing the SLEEP instruction"). So the rte jumped to a garbage address
+with a garbage SR, and the next exception, with SR.BL set, reset the chip.
+casio-emu keeps all core registers across its R-standby, so neither
+GUEST=standby nor the CE run could see it. `dbt_standby_sleep` now saves
+SPC and SSR in the block and `_dbt_standby_resume_entry` restores them.
+
+Also fixed in the same pass: `RStandbyOnce` waited for Clear's release with
+`OALStall`, which spins on TMU0; from the second pass of the OAL's standby
+loop TMU0 has been reset by R-standby, so the wait now counts the RTC's
+R64CNT instead.
