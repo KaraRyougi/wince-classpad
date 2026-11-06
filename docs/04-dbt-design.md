@@ -1479,3 +1479,1149 @@ reporting first/last/modulo deltas. Start after runtime initialization and
 record the exact ELF symbol/layout; these are raw words, not a stable ABI.
 This permits exception and INTEVT rates over exactly the directory-load
 window without polling HC_GETSTAT or changing emulated execution.
+
+
+The reverse destination-bank owner bitmap experiment was also rejected:
+609750 ticks / 18.608093 s versus 591186 / 18.041565 with the same skin/SIP
+NK. Code modification, ASID remapping and full bank rotation tests pass,
+but the scan's sampled invalidation time rises from 1.537 s to 1.881 s.
+The experimental implementation was removed; its benchmark artifacts remain.
+
+Boundary snapshots of the integration loader's g_sample (ELF address
+0x8ccd2228, size 0x4f0) over the 18.041565-second load count 30227 vector
+0x400 TLB exceptions (1675.41/s), 3550 vector 0x600 interrupts (196.77/s),
+and zero non-hypercall vector 0x100 exceptions. All interrupt deltas are
+TMU0 INTEVT 0x400; KEYSC 0xbe0 and RTC 0x700 contribute zero in this
+window. The counter-enabled run exactly repeats 591186 load ticks.
+Uniform guest-PC attribution also repeats this time; 249036 guest samples
+are resolved against the matching new image/MAP timestamps. The largest
+individual functions are GPE EmulatedBlt_Internal (~0.611 s), KCNextThread
+(~0.440 s), NKHandleCall (~0.338 s), and xKCall (~0.334 s). These are
+block-start samples, not instruction-exact function timings.
+
+
+### Current-image My Device experiments (2026-11-06)
+
+Using the profile-review normal NK and the same exact-directory frame matcher,
+the current-source non-profile device baseline is 592278 ticks / 18.074890 s.
+Alias-local removal reaches 589548 ticks / 17.991577 s: too small a difference
+to establish a useful gain. These are modeled times, not hardware wall times.
+
+An owner-filter experiment used bit 15 of the existing destination-bank mask
+to flag every inline-cache owner (including assembly refills). Individual
+invalidation skipped owners with neither that bit nor the affected bank bit.
+ASID/remap and interior-alias/bank-recycle regressions passed. The directory
+run reached 587910 ticks / 17.941589 s, but approximate invalidate_block samples
+increased from 45314 to 46147. No causal improvement was demonstrated; the
+experimental source change was reverted and no device Loader was replaced.
+Evidence is under dbt/build-speed-profile-review/{baseline-current,alias-only,owner-filter}.
+
+The Control Panel -> System -> close Control Panel sequence was exercised
+through native stylus injection twice. System retained stale Control Panel
+client pixels; selecting Memory repainted and remained responsive. This is
+not proof of a deadlock or a measured freeze duration. The optional live-touch
+emulator patch and physical-ROM histogram mapper support further diagnosis.
+
+
+### Reclaimed launcher workspace and range-only teardown batches
+
+`DBT_BOOT_WORKSPACE_TABLES` is opt-in. The hash, block headers and physical
+mapping metadata are placed in a NOLOAD low-BSS section below 0x8C100000.
+crt0 first establishes its private high stack, then clears both BSS regions;
+the launcher never returns after takeover. Link assertions bound the low
+section below CE RAM and preserve 128 KiB for the translator stack. The
+22288-block/2880-KiB-arena/14-bank experiment has low BSS ending 0x8C0FF6C0,
+high image ending 0x8CC49BC0, stack/cache boundary 0x8CC80000, and 3.5 MiB code
+cache. CE retains 8 MiB. ASID, interior-entry/bank-recycle and TMU tests pass;
+the actual HHK takeover path also runs the ASID guest to RESULT: PASS. Both
+My Device runs match: 561702 ticks / 17.141785 modeled seconds.
+No hardware result is implied and the layout is not yet shipped.
+
+`DBT_BATCH_RANGES` requires `DBT_BATCH_INVALIDATE`. It batches only explicit
+range and whole-cache guest flushes; ordinary TLB replacements retain the
+immediate incoming-link cleanup. The isolated Control Panel -> System ->
+close Control Panel test samples ticks 4000000..7000000 and probes the Memory
+tab periodically. Both final frames show the Memory page. Approximate
+invalidate_block attribution falls from 1003751 to 38357 samples (30.632050
+vs 1.170563 modeled seconds). This measures function time within a fixed
+post-close interval, not exact input-to-paint latency. ASID/remap and interior
+alias/cache-recycle tests pass. My Device reaches 591732 ticks / 18.058228 seconds.
+Evidence: build-speed-profile-review/control-isolated-{baseline,batch}.
+
+
+`DBT_HASH_ASID_TAG` uses 12-byte hash entries with an ASID at offset 8.
+Both C and the assembly lookup stub validate the tag for user keys; kernel
+keys remain global. Switching ASID retains the hash but still clears user
+monomorphic ICs. Hash invalidation and bank reuse continue to detach entries
+by destination. ASID/remap, interior/bank and TMU regressions pass. The new
+ASID test verifies values and fewer than 16 C IC refills over 128 kernel-only
+ASID detours. First directory result: 541500 ticks / 16.525269 modeled seconds
+versus 592278 ticks / 18.074890 baseline. The combined cache/batch/tag test reaches 516930 ticks / 15.775452 seconds;
+its low workspace limits the table to 21546 blocks (14 x 1539). Combined
+ASID, interior-entry/bank-recycle and TMU regressions all pass.
+The cache-only repeat matches exactly at 561702 ticks. Cache plus range batch
+(without ASID tags) reaches 536040 ticks / 16.358643 modeled seconds.
+User clarified that the fixed emulator test, not hardware stopwatch time,
+is authoritative for the <= 5-second objective. That objective is unmet.
+
+The 8-kernel/6-user bank partition regresses the combined candidate to
+551874 ticks / 16.841858 seconds, so it remains disabled. The host sampler
+now accepts HLE_DBT_CACHE_BASE and can read block tables in reclaimed low
+RAM. Defaults retain the old layout; the benchmark records this setting.
+A synthetic host test verifies low-RAM block ownership, runtime/code and
+sleep classification without touching emulated state. Combined-load and
+Control Panel profiles are pending.
+
+### Follow-up measurements and gpSP comparison
+
+The combined cache/batch/ASID-tag profile exactly repeats 516930 ticks:
+238579 translated-code samples, 276430 runtime samples, 1922 sleep samples,
+and zero unmapped guest owners. The same Control Panel close workload reaches
+the System Memory page; invalidate_block costs approximately 1.075714 seconds
+in the fixed post-close window. Enabling the existing guarded FAST_LDC_SR
+path reduces My Device to 503826 ticks / 15.375549 seconds; combined
+regressions are pending, so it is not yet a shipping setting.
+
+DBT_SHORT_DEVICE_TEST is a new opt-in device-address classifier. It derives
+whether the effective address's top byte is FF via (top+1)>>8, then negates
+and adds one to retain the original BRAF selector. It removes two host
+instructions without changing T, the branch layout, or recovery metadata.
+Device accesses (including branch delay slots), TMU and ASID regressions pass.
+Its My Device benchmark is pending.
+
+Local gpsp-sh4-jit gint_platform.c uses two 8-KiB on-chip banks at E5007000
+and E5017000, prepares RGB565 strips and issues asynchronous DMA0 transfers
+to B4000000. Its recorded smaller-YRAM-strip experiment regressed hardware
+performance when XRAM was reserved for fastmem. The CE loader currently uses
+neither these banks nor ILRAM/SPU RAM: DSP spill registers are separate.
+Current LCD hypercalls perform synchronous native CPU writes. A proposed DMA
+experiment must preserve ClassPad DCS transactions, byte order, rotation,
+channel ownership and suspend completion. The current emulator dma.c performs
+transfers immediately; DMA timing must be audited before treating its speed
+as evidence of meeting the five-second goal.
+
+Current platform.bib and shared release ce.bib specify SHK for classpad_ddi,
+kbdmouse and k.touch.dll (with a separate SH touch.dll). Thus kernel driver
+placement already exists; it does not remove translation overhead.
+
+DBT_LCD_DMA_STRIPS now implements an opt-in native presenter using two full
+8-KiB X/Y banks. It converts little-endian guest RGB565 while the previous
+bank is in flight, uses DMA0 auto-request / source increment / fixed LCD /
+32-byte blocks without interrupts, and waits before returning to CE. It
+preserves channel/operation/module-stop state, declines a busy or error-state
+channel, and halts on a bounded wait failure rather than silently losing
+pixels. The ClassPad DCS transaction remains unchanged. Initial dcs guest
+CPU/DMA final frames are byte-identical; an additional lcd_dma guest tests
+odd pixel tails, short CPU fallback and the actual DMA launch count. Full CE
+rotation and timing validation remain pending; this path is not shipped.
+HC_GETSTAT 400 reports capability and 401 reports launched strip count.
+These IDs avoid the existing 32..58 profile buckets and 128..383 histogram.
+The combined FAST_LDC_SR TMU, ASID and interior/bank regressions all passed.
+
+The lcd_dma guest passes with exactly 36 DMA launches. Its full frame,
+51-pixel region (48 DMA + 3 CPU tail) and seven-pixel CPU fallback produce
+byte-identical CPU/DMA frames. Full CE functional run is pending. Separately,
+SHORT_DEVICE_TEST alone reaches 507648 ticks / 15.492188 seconds on the
+combined cache/batch/tag candidate; FAST_LDC_SR plus this classifier is pending.
+
+DBT_META_ALIGN4 experimentally rounds runtime metadata allocations to four
+bytes rather than eight. Compile-time assertions require imeta, spills and
+links to need at most four-byte alignment; packed auxiliary targets are
+already four-byte aligned. Bank boundaries remain eight-byte aligned. The
+purpose is to reduce per-block padding and avoid premature metadata eviction;
+ASID/interior/TMU and full load measurements are pending.
+
+The combined FAST_LDC_SR + SHORT_DEVICE_TEST candidate reaches 495090 ticks /
+15.108948 modeled seconds with exact directory-frame matching. Initial DMA
+full CE also matches the directory frame, but is slower at 506556 ticks /
+15.458862 seconds even with instantaneous DMA emulation; no speedup is claimed.
+Inspection found byte-at-a-time buffer conversion. The DMA path now prepares
+aligned pairs with four native swap instructions and one 32-bit store; its
+color/edge regression is pending. META_ALIGN4's ASID, interior/bank-recycling
+and TMU regressions all pass; its directory benchmark is running.
+
+Paired DMA conversion passes the exact CPU reference frame and the 36-strip
+edge test. Full CE four-orientation display/touch testing is running.
+
+The four-byte metadata layout reaches 493452 ticks / 15.058960 modeled
+seconds, only about 0.05 s below the eight-byte layout. The new opt-in
+HLE_DBT_SAMPLE_OPS host sampler records generated-code opcode frequencies
+without changing emulated state. tools/test_dbt_sampler.py verifies low-RAM
+block ownership, code/runtime/sleep classification and both halfword positions
+in a backing-memory word. The current fastest binary is being sampled again
+to distinguish emitted instruction costs; no new speed claim follows from
+the diagnostic alone.
+
+The paired-DMA CE rotation harness passes all four display geometries and
+physical touch positions, returning to portrait with zero failures. The
+24-instruction candidate reaches 498912 ticks and regresses versus the
+32-instruction candidate, so both shorter caps remain disabled.
+
+The FAST_LDC_SR/SHORT_DEVICE_TEST profile exactly repeats 495090 ticks.
+It records 12024 synthetic instruction-address faults during the directory
+load. DBT_EARLY_FETCH_FAULT checks unexecutable targets immediately after
+ASID synchronization in lookup_or_translate, before hash/interior/block
+searches. It uses the existing synthetic exception and saved context, with
+the same EXPEVT 0x0E0; the original translate_at guard remains as a backstop.
+API-call, register-bank, MMU and TMU regressions and a load benchmark are
+running. No speedup claim is made before those results.
+
+Opcode sampling exactly repeats 495090 ticks, with 227653 generated-code
+samples. swap.b contributes 26578 and swap.w 12839 samples (~1.20 modeled
+seconds together); shlr8/shlr16/shll2/neg/braf also remain prominent. These
+are residency samples, not execution counts. Unrecognized DSP words stay
+explicit in tools/analyze_dbt_opcodes.py rather than receiving guessed names.
+EARLY_FETCH_FAULT passes apicall, bank, MMU and TMU regressions.
+
+DBT_CONST_DEVICE_ADDRESS records values emitted by PC-relative constants
+within a block, eliding the device classifier only for a provably non-FF
+effective address. Memory definitions discard overwritten values; other
+operations and branches conservatively discard all values. Specialized blocks
+are excluded from both arbitrary interior-entry and IRQ-entry publication.
+The marker fits existing header padding. Host tests pass 185 checks (175
+without the option), including overwrite/branch invalidation and interior
+rejection. Target regressions and full CE timing are pending.
+
+EARLY_FETCH_FAULT reaches 496182 ticks / 15.142273 modeled seconds, slower
+than its 493452-tick baseline. It remains disabled despite passing regressions.
+
+CONST_DEVICE_ADDRESS target devmem, TMU, interior and ASID regressions pass.
+A new TMU loop materializes a scratch pointer inside each iteration, then
+compares 60000 read/modify/write iterations with interrupts off and on. It
+requires both actual interrupts and a rising specialized-block counter to
+avoid a vacuous pass. HC_GETSTAT 402/403 expose this opt-in capability/count.
+DMA diagnostics moved to 400/401 after finding that 57/58 overlap existing
+lookup profile fields; neither experimental ABI had been shipped.
+
+The explicit constant-address IRQ proof passes (baseline checksum, identical
+interrupted result, actual ticks and nonzero specialization count). Initial
+whole-block entry rejection reaches 500550 ticks / 15.275574 s, regressing
+the 493452-tick baseline. The follow-up marker now records the halfword offset
+after the last dependent access: both normal and IRQ interior caches may reuse
+entries at or beyond that boundary. Earlier entries remain rejected. Host
+tests pass 188 checks, including the safe suffix and unsafe access itself;
+target TMU/interior and timing tests are pending.
+
+META_ALIGN4 repeats exactly at 493452 ticks / 15.058960 seconds. The refined
+constant-address suffix-entry rule passes both the explicit TMU specialized
+loop and interior/cache-recycling regressions. DBT_ASM_FETCH_FAULT separately
+checks unexecutable targets only on an assembly lookup miss, after full guest
+context capture and interrupt masking, then uses HC_SYNTH with an internal
+flag to count the fault and synchronize ASID. Guest delivery still uses the
+existing EXPEVT/TEA/SPC path. Its API/bank/MMU/TMU and full CE tests are running.
+
+The constant-address safe-suffix variant reaches 496728 ticks (15.158936 s),
+still slower than the baseline, so constant specialization remains disabled.
+The assembly fetch-fault path passes API-call, bank, MMU and TMU regressions;
+its directory timing is pending. DBT_CODE_ALIGN4 now separately tests four-byte
+code-block padding. Literal pools require four-byte alignment; cache-bank
+boundaries and synchronization remain unchanged. The 32-byte dead bitmap is
+conservative when neighbours share a bit: it may detach additional links but
+must never miss a dead destination. ASID/interior/TMU and timing are pending.
+
+The assembly early synthetic-fetch-fault experiment passes apicall, bank,
+MMU and TMU regression guests, but the frozen My Device benchmark regresses
+to 501096 ticks (15.292236 seconds). It remains disabled. Code-alignment-4
+passes ASID isolation, interior reuse/bank recycling and TMU interrupt tests;
+its loading benchmark is still running. A current-layout 64-instruction
+block experiment is also running; earlier block-cap comparisons used a
+different configuration and are not substituted for this measurement.
+
+Code-alignment-4 also finishes at 501096 ticks (15.292236 seconds),
+matching the full directory frame. It is rejected against the 493452-tick
+metadata-alignment-4 baseline; reducing padding alone is not a gain.
+
+DBT_DECODE_TEMPLATE is an optional fixed-size decoder initialization
+experiment. All 21 decoded fields match the baseline for all 65536 opcodes
+(tools/test_decode_template.py); 175 translator checks pass. Target assembly
+uses direct halfword/byte stores instead of the freestanding memset call.
+This is not a speed claim: the frozen-image benchmark is running.
+
+Measurement audit: the 493452-tick baseline binary predates recent optional
+experiments. A current-source control with all new experiments disabled is
+now running. The two 501096-tick runs are slower than the historical best,
+but attributing the entire difference to their individual flags requires
+this additional control; neither is adopted meanwhile.
+
+The decoder-template first run matches at 489630 ticks (14.942322 seconds).
+A repeat is running, as is the current-source baseline. The 64-instruction
+run matches at 501096 ticks (15.292236 seconds). Local-alias removal with
+range-only batching passes current ASID/interior recycling regressions; its
+full CE timing is pending. The existing fast-short guest samples were
+resolved against timestamp-matching CE MAPs: kernel.dll accounts for 4.73938
+modeled seconds, led by scheduling, calls, locks and address-space handling;
+classpad_ddi contributes 0.781525 seconds but its MAP mismatch prevents
+function-level claims. Evidence: fast-short-profile/ce-functions.json.
+
+Current-source control completes at 497820 ticks (15.192261 seconds).
+The decoder-template first run saves 8190 ticks (0.249939 seconds) against
+that control. The assembly-fault, code-alignment and cap64 experiments each
+regress by 3276 ticks, so none is adopted. Optional constant-address header
+state and DMA/constant-address diagnostic switch cases are now compiled only
+when their experiments are enabled; disabled IDs retain the existing zero
+fallback. Default/template/constant-address host suites pass 175/175/188
+checks. A clean-template timing run is pending; no cleanup speedup claimed.
+
+Local-alias removal with range-only batching completes at 499458 ticks
+(15.242249 seconds), versus current-source control 497820. Even isolated
+from full TLB batching it does not improve this workload; remains disabled.
+
+Decoder-template repeat matches exactly at 489630 ticks (14.942322 s).
+DBT_DECODE_ALIGN4 optionally strengthens sh_insn alignment from 2 to 4
+without changing its 28-byte size. Exhaustive opcode comparison and 175
+translator checks pass; target disassembly shows seven word initialization
+stores instead of fourteen halfword stores. Its full CE benchmark is
+running against the clean-template build; no measured speedup claimed yet.
+
+The clean-template run completes at 485808 ticks (14.825684 seconds),
+matching the directory reference. A repeat is running. This removes only
+disabled experimental header/diagnostic code; the CE image and emulator
+clock settings remain unchanged. Display review confirms coalesced event
+notification already exists; the driver still bounds native pushes to four
+rows to allow pending guest interrupts between strips. No unmeasured driver
+change is included in this translator timing.
+
+Decoder alignment4 first run matches at 459600 ticks (14.025879 seconds), saving 26208 ticks against clean-template.
+The TMU regression passes; ASID/interior and timing repeat remain pending.
+
+Decoder alignment4 completes all target regressions: TMU interrupts, ASID
+isolation/remapping and interior entry/bank recycling, all zero guest exit
+codes. Host exhaustive decoding and 175 translator checks also pass.
+
+Clean-template repeat confirms 485808 ticks. The aligned-decoder candidate
+now also has an isolated DBT_HASH_FOLD14 comparison running: the normal
+8192-slot hash ignores guest address bits 14/15, while fold14 includes them
+at the cost of two additional rotates in the assembly lookup. ASID/interior
+regressions are running; no conflict-rate or speed improvement assumed.
+
+Aligned-decoder repeat confirms exactly 459600 ticks (14.025879 seconds).
+Fold14 ASID/interior regressions pass; timing pending. DBT_BODY_BUDGET=680
+experiments with longer bodies inside the unchanged 1-KiB output buffer.
+Overflow attempts remain unpublished and retry at half the instruction cap
+using a private environment. Early overflow guards prevent reading rejected
+literal/jump slots. Capacity tests pass 6420 attempts / 4372 bounded retries
+under ASan/UBSan; 175 translator checks pass. Default 560-byte budget remains.
+
+Fold14 completes with exact directory matching at 471612 ticks
+(14.392456 seconds), slower than the 459600-tick
+aligned-decoder baseline. Its ASID/interior regressions pass, but it is not
+adopted. Body-budget680 timing and target regressions are running.
+
+Body-budget680 passes TMU, ASID/remapping and interior/bank-recycling target
+regressions. DBT_PRUNE_LINK_BANKS is a separate experiment: after all incoming
+direct links to a fully recycled bank are detached under IRQ masking, clear
+that destination bit in each surviving owner. Future link_direct calls set
+it again. Partial-block invalidation retains its conservative mask. Current
+timing and ASID/interior target tests are pending.
+
+Body-budget680 matches the directory at 485262 ticks
+(14.809021 seconds), slower than the verified 459600-tick
+candidate. It remains disabled. Early overflow guards are retained as a
+correctness fix; this run does not isolate their individual timing effect.
+
+Pruning recycled destination-bank bits passes interior/recycling and ASID
+regressions; timing pending. DBT_DECODE_FPU_GATE rejects non-0xxx/4xxx/Fxxx
+opcode groups before the FPU subdecoder. Exhaustive 65536-opcode comparison
+across all 21 fields and 175 translator checks pass. Target build succeeds;
+timing pending. A new host-only profile of the unchanged 459600-tick binary
+is also running (decode-align4-profile).
+
+DBT_CACHE_TICK_LFU experiments with cache replacement based only on actual
+TMU0 samples landing in generated instruction/exit ranges. It reuses the
+existing bank-touch array, saturates counts, decays all counts at each bank
+selection, prefers empty banks and breaks ties in FIFO order. C lookup
+frequency does not contribute. The current bank remains excluded. It is
+mutually exclusive with C-side LRU and split kernel/user banks. Target build
+succeeds; timing and TMU/ASID/interior regressions are running.
+
+Host-only aligned-decoder profiling repeats exactly 459600 ticks with
+zero unmapped guest samples. Of 459601 samples, 208233 are generated code,
+249559 runtime and 1809 sleep. Approximate decoder time is now 0.331421 s;
+exception C remains 1.137054 s, translation 1.028473 s and invalidation
+0.720032 s. Prune-links finishes at 472158 ticks (14.409119 s), so is not
+adopted. A current-source control isolates the newer overflow guards.
+
+DBT_CONST_P4_STORE reuses constant tracking but disables the earlier normal-
+RAM specialization. Only literal-proven P4 stores other than PTEH/MMUCR
+execute directly, unswapped. Entry restrictions retain the address proof;
+unknown addresses and address-space hooks keep the helper. Capability 404
+identifies this variant; 402 remains reserved for normal-address proof.
+192 host checks pass, including PTEH/MMUCR exclusion and predecrement/disp
+effective addresses. Added devmem C-bypass and TMU interrupted-loop proof
+tests; target regressions and frozen-image timing are running.
+
+Overflow-guard current-source control completes at 485808 ticks
+(14.825684 seconds), versus historical aligned-decoder 459600. Accordingly
+prune-links (472158) and FPU gate (478710) improve this current-source
+control, although neither beats the historical best. Body680 is 485262.
+Tick-LFU passes all target regressions but regresses to 514746 ticks
+(15.708801 seconds); it is not adopted. Attribution is updated rather than
+assigning all timing changes to each flag independently.
+
+P4-store target regressions pass devmem/TMU/ASID/interior, including
+explicit proof of specialization, unswapped store values, no C helper for
+the literal-store function and interrupts during the specialized loop.
+The overflow guard is now inside emit_flush_lits, protecting all callers;
+translation checks once after flushing, before reading jump records. No
+more instructions are emitted after that check, so the final duplicate
+check was removed. ASan/UBSan passes 6118 normal-budget and 6420 extended-
+budget capacity attempts; 175 translator checks pass. Timing is pending.
+
+P4-store first timing matches at 483078 ticks
+(14.742371 seconds). This improves the 485808-tick
+overflow control by 2730 ticks, but does not beat the historical best.
+
+
+Guard cleanup completes at 484716 ticks / 14.792358 modeled seconds, exact
+reference frame. This does not beat the historical 459600-tick build.
+
+DBT_DYNAMIC_P4_STORE experiments with runtime discrimination of P4 stores:
+PTEH/MMUCR retain C hooks; other FFxxxxxx stores execute unswapped native
+instructions. The classifier saves guest T in a tracked DSP spill and closes
+all scratch ranges before the access. This avoids relying on a preceding
+literal/address proof. BODY_BUDGET=560 enables bounded retries for the larger
+emission without changing the normal block budget. Capability 405 distinguishes
+this loader. Tests verify actual helper bypass, T=0/1 preservation, normal RAM
+byte order, protected-register hooks, delay slots and predecrement, plus stores
+interrupted by TMU. Host recovery checks: 182 PASS; sanitizer capacity checks:
+6416 attempts / 4368 retries PASS. Target devmem/tmu pass; ASID/interior and
+same-image directory timing are in progress. Feature remains opt-in.
+
+Dynamic P4 target regressions now all pass: devmem, TMU, ASID switching and
+interior-entry/bank reuse. The native-store metadata check additionally verifies
+that no scratch/T recovery remains pending at the actual store. Default opcode
+sequence tests must be run without SHORT_DEVICE_TEST, because their expected
+classifier bytes intentionally describe the original classifier; target tests
+use the complete candidate flags including SHORT_DEVICE_TEST.
+
+Dynamic P4 full CE completes with exact reference frame at 484170 ticks /
+14.77569580078125 modeled seconds. Same-source guard-clean control is 484716
+/ 14.7923583984375: just 546 ticks (0.0166626 s) saved, far below the gap to
+5 seconds and slower than the historical 459600-tick best. Do not enable this
+feature in the delivered loader on this evidence. The extra generated path
+has not produced a useful end-to-end improvement despite verified helper bypass.
+
+
+DBT_BATCH_HASH_REMOVE defers whole-table alias removal inside an existing
+range-invalidation batch. The dead-host bitmap already identifies every dead
+entry; finish_invalidations walks the hash table once before guest execution
+can resume. Non-batched TLB replacement retains immediate hash removal, as do
+owners with no interior aliases. The bitmap's conservative 32-byte granularity
+can evict a live neighbour's hash entry but cannot retain a dead destination.
+Full cache reset clears pending work; bank reuse already clears dead-host bits.
+Capability 406 and scan counter 407 allow tests to prove the deferred path ran.
+Tests pass for interior entry, ASID changes and TMU. A new 16-owner/32-suffix
+case asserts exactly one cleanup scan, removal of all aliases, and execution
+of new instructions after modification; subsequent full-bank recycling also
+passes. Same-image My Device benchmark is in progress; feature remains opt-in.
+
+Batch hash removal reaches the exact reference frame at 486354 ticks /
+14.842346191 modeled seconds. Against guard-clean's 484716 ticks,
+this is 1638 ticks (0.049987793 seconds) slower. The explicit multi-owner test
+proves the scan reduction works, but it does not improve this end-to-end load;
+keep disabled. Remaining incoming-link invalidation still visits all blocks,
+including those with no IC or relevant destination bank. A transposed source
+bitmap is a candidate for reducing that scan without skipping live links; it
+has not been implemented or measured yet.
+
+
+DBT_INCOMING_BITMAP adds conservative source sets for each destination bank
+and for blocks containing an IC. Immediate and batched invalidation iterate
+only their union instead of visiting every block header. Source bits clear on
+header reuse, IC ownership is published with the block, and direct-link bits
+are set while link patching is masked. Dead owners may retain bits until reuse;
+these are safe false positives. A full cache reset clears all sets. Bank-recycle
+scanning itself retains the original implementation for this experiment.
+It adds 15 * 674 * 4 = 40440 bytes at 21546 blocks / 14 banks. Image end is
+8cc514c0, low BSS ends at 8c0ff740; linker still reserves the existing stack,
+and CE retains its 8 MiB window. Capability 408 and counter 409 prove execution.
+Target interior/aspace/TMU regressions pass. Audited interior/aspace builds
+with DBT_VERIFY_INCOMING_BITMAP compare every live IC and relevant direct-link
+bank against the bitmap before cleanup; both pass, including bank recycling.
+Same-image My Device timing is running. Feature remains opt-in.
+
+Incoming-bitmap CE measurement matches the reference frame at 510924
+ticks / 15.592163086 modeled seconds, slower than guard-clean
+by 0.799804688 seconds. Keep disabled despite passing
+correctness and complete-source audits. Reducing the candidate set did not
+outweigh the bitmap maintenance/iteration and resulting execution changes in
+this workload; no speedup is claimed. The historical best remains 459600 ticks.
+
+
+DBT_UNIFORM_STORE tracks endian-invariant register values proven by immediate
+0/-1, a copied proven register, or a byte-uniform PC-relative constant. Plain
+16/32-bit stores can emit the original instruction without swap/scratch spill.
+Overwrites clear the proof; branches/traps/helpers discard it. Device-aware
+stores retain all dispatch/hooks, and predecrement with data==base is excluded
+because decrement changes the value. Entry-dependent blocks use the existing
+const_specialized floor for both regular interior reuse and IRQ entry caching.
+The block-start path executes its proof-producing instructions normally.
+196 host checks pass, covering overwritten registers, loads, branches, device
+accesses, predecrement and suffix entry. Target interior/aspace/TMU pass. New
+explicit tests prove specialization executes, arbitrary middle entry with a
+nonuniform value retains correct little-endian bytes, and repeated zero/-1
+stores survive timer interrupts. Capability 410/counter 411 expose the feature.
+CE timing is in progress. Image end 8cc472a0, low BSS 8c0ff740; CE memory unchanged.
+
+
+DBT_UNIFORM_ENTRY_BOUNDS is a separate experiment preserving safe prefix
+entries. It tracks the original definition of each uniform register (copies
+inherit their source's definition) and allows entry at/before the earliest
+required definition, or after the last dependent store. Entries in between
+remain rejected by both normal interior lookup and IRQ entry caching. It is
+incompatible with CONST_DEVICE_ADDRESS because that feature does not record
+origins. 203 host checks pass, including entry at the definition, rejection at
+a copy/store and reuse of the safe suffix. Target interior passes; TMU is still
+running. Separate CE binary built, not yet benchmarked.
+
+Uniform-store floor-only experiment reaches the exact reference frame at
+490722 ticks / 14.975646973 modeled seconds,
+0.183288574 slower than guard-clean. Keep disabled.
+The separate prefix-bounds version also passes explicit interior-entry and
+interrupted-store target tests. Its CE measurement is now running as
+uniform-bounds (session 11408); no speedup is claimed before it completes.
+
+Uniform prefix bounds completes with exact reference frame at 487446
+ticks / 14.875671387 seconds. It improves on the floor-only
+experiment but remains 0.083312988 seconds slower than
+guard-clean, so neither uniform-store variant is enabled.
+
+DBT_CORE_BANKS changes the existing split allocator's hot-stream classifier
+from all kernel-mode PCs to just the identified kernel.dll device-aware range
+(non-user PC, same alias folding as device accesses). Four of fourteen banks
+are reserved for this core; GWES, display/filesystem DLLs and user code share
+the other ten. No guest memory, clocks or benchmark input changes. Capability
+412 and counters 413/414/415 report core translations, other translations and
+core-bank evictions. Interior/aspace/TMU regressions pass. Explicit tests show
+both streams used, cold pressure recycling the other banks without evicting
+the core, and core code surviving timer interrupts. CE timing is running as
+core-banks/session 70566. Feature remains opt-in.
+
+Core-only 4/10-bank split reaches the exact reference frame at 503280
+ticks / 15.358886719 modeled seconds, slower than guard-clean
+by 0.566528320 seconds. Keep disabled. Protecting a
+core does not automatically improve the whole workload; other translations
+lose capacity and bank switching adds work. These are hypotheses for the
+regression, not separately measured causal contributions.
+
+Rechecking historical aligned-best host opcode samples: of 208233 generated
+code samples, 36518 are swap.b/swap.w, 9914 NOP, and the hottest individual
+opcodes include DSP spill/restore (418a:10894, 018a:10461) and the device
+classifier (4119:9901, 7101:9604, 611b:4850, 4108:4840, 4129:4831).
+This points to per-access P4 classification as another generated-code cost,
+not only byte swapping. A potential T-preserving shorter classifier can use
+XOR #1 when R0 is available as the saved scratch; this is not implemented yet.
+
+
+DBT_R0_DEVICE_TEST chooses saved R0 for the short P4 classifier when the
+instruction and delay-slot restrictions leave it available. XOR #1 replaces
+NEG/ADD #1; shifts and XOR preserve guest T. The dispatch layout and restore
+in BRAF's delay slot are unchanged. Host sequence tests now cover original,
+short and R0 classifier layouts explicitly (180 checks pass). Target devmem,
+interior, ASID and TMU pass; added tests preserve live R0, an R0 indirect-call
+target, and R0/T during interrupted RAM/P4 accesses. Capability is 416.
+
+DBT_R0_DEVICE_WIDE permits R0 operands too: the original R0 is restored before
+the actual memory instruction. It still excludes R0-indexed address formation
+and delay-slot protected registers. 182 host checks and explicit R0 base/data
+RAM/P4 tests pass. Sanitizer capacity tests: 6088 attempts / 4040 retries pass.
+The wide TMU test uses R0 as the address throughout the interrupted loop.
+Capability 417 selects that test. Separate CE binary built; first candidate
+benchmark r0-device/session 96691 is running. Both features remain opt-in.
+
+R0 classifier first full CE run matches the exact reference frame at
+473250 ticks / 14.442443848 modeled seconds. This
+saves 0.349914551 seconds over guard-clean's 484716
+ticks, but remains slower than the historical aligned-best 459600 ticks.
+Repeat not yet performed; do not claim a new best or a delivered build.
+Wide R0 operand tests and explicit RAM/P4 interrupted loops pass; the TMU
+binary was built after the test switched to the R0-address loop. Wide
+interior/aspace tests and separate CE timing are now running.
+
+Wide R0's additional interior/aspace regressions also pass (session 25048).
+The exact ELF's profiling layout is blocks=8c042150, counts=8cc0dc5c,
+stat=8cc45e44, 1539 headers per bank and 32 stats words. A profile repeat can
+use these with the existing host-only opcode sampler without rebuilding the
+translator. Historical generated-code samples include 1850 stack-postincrement
+loads and 1937 stack-predecrement stores. Grouping adjacent stack operations
+may amortize address classification, but must guard region-boundary crossings,
+preserve partial-progress exception recovery, and reject unsafe middle entry.
+No grouped-stack implementation or speed claim exists yet.
+
+Wide R0 completes with the exact frame at 480348 ticks /
+14.659057617 modeled seconds. This is slower than narrow
+R0's 473250 ticks, despite broader instruction-count savings. Keep the wide
+variant disabled. A host-only profile repeat of the exact narrow binary is
+now running as r0-device-profile, with identical block/count/stat addresses
+to the wide ELF. Additional MMU tests exercise R0 postincrement loads and
+predecrement stores that incur a data TLB miss, checking retry PC, address
+adjustment and stored/loaded value; these are running as build-r0-wide-mmu.
+
+Wide-R0 MMU regression passes, including the new data-fault checks: exactly
+one miss, correct retry SPC, R0 adjusted exactly once, and correct value.
+Narrow-R0 profile repeat remains live in session 44843.
+
+Narrow R0 profile repeat exactly reproduces 473250 ticks, with zero unmapped
+owners. Samples: generated 219539, runtime 251898, sleep 1814. Counter deltas:
+18123 translations, 11 cache generations, 21366 ASID changes, 40231 C IC misses,
+34244 hash-table evictions. The leading approximate runtime costs remain
+exception handling 1.1295 s, translation 1.0226 s, invalidation 0.6942 s and
+IC stub 0.5191 s. Both generated execution and runtime work remain material.
+
+DBT_META_WORD_INIT initializes each 16-byte recovery record with four full
+word writes rather than memset plus field overwrites. Compile-time size,
+offset and alignment assertions protect the layout; explicit host endian
+packing is validated on the little-endian host and big-endian target. Uses
+a may_alias word type under GCC/Clang. Record format and recovery rules do not
+change. 180 host checks and devmem/interior/aspace/TMU pass. The combined
+narrow-R0 + metadata initializer CE benchmark is running as meta-word,
+session 29298. Feature remains opt-in pending actual end-to-end results.
+
+Metadata word initialization matches the exact directory frame at
+472704 ticks / 14.425781250 seconds, saving only
+0.016662598 seconds against the repeated narrow-R0
+control. This is not a material reduction toward five seconds and not a new
+historical best; keep opt-in. No new loader has been delivered.
+
+Re-evaluating the existing 512-entry DECODE_CACHE with aligned 28-byte decoder
+records and narrow-R0 classifier gives an exact frame at 477618 ticks
+/ 14.575744629 seconds, still slower than the 473250-tick
+control. Exhaustive decoder testing now includes repeated hits, forced hash
+collisions (opcode xor 0x204) and high-bit normalization for all 65536 opcodes
+and all 21 decoded fields. Target devmem/interior/aspace/TMU pass.
+
+DBT_DECODE_REF lets the main translation loop consume a cached record directly
+rather than copying it on every hit. The pointer is valid only until the next
+decode; a delayed branch is copied before decoding its potentially colliding
+slot. The public copy-out decoder remains available for other callers and the
+old cache implementation is unchanged when REF is off. Two explicit branch/
+legal-MAC-slot hash-collision tests pass. 184 host checks, exhaustive decoder
+checks, 6088 sanitizer capacity attempts/4040 retries, and target devmem/
+interior/aspace/TMU all pass. Turning the experiment off produces a byte-for-byte
+identical translator .bin to the narrow-R0 control (SHA256 38528dbbd52f2e63d4f90692f5fe7843fed4eccd8b08fd2c32ed0b6b94ee9587).
+Full CE decode-ref timing is running; no speedup claimed yet.
+
+
+DBT_DECODE_INTERLEAVED combines the opcode tag and 28-byte decoded record in
+one 32-byte entry, with the array aligned to 32 bytes. It requires DECODE_REF;
+the total 512-entry capacity remains 16 KiB. This replaces separate tag and
+record indexing with one power-of-two stride and places each pair in one
+32-byte cache line. Miss publication retains the private temporary and the
+zero-tag/barrier protocol. Exhaustive decoding, repeated/colliding hits, high
+bit normalization, and 184 host recovery tests pass. Target devmem/interior
+pass, aspace/TMU are running. Array address 8cc46e80, image end 8cc4ae80 and
+low BSS 8c0ff740 fit the existing layout without reducing CE RAM. Full binary
+built, waiting for the preceding decode-ref timing to finish before benchmarking.
+
+Decode-reference CE timing matches the exact directory frame at 476526 ticks /
+14.54241943359375 modeled seconds, versus 473250 / 14.44244384765625 for
+the narrow-R0 control. Removing the cache-record copy has not produced a net
+end-to-end gain; this option remains disabled. The interleaved 32-byte cache
+entry variant passes exhaustive decoding with forced collisions and all four
+target regressions (devmem, interior, aspace, TMU); its fixed-image CE timing
+is now running.
+
+DBT_FAST_LDC_SR_MD is a new disabled-by-default experiment: after the existing
+RB and ASID guards pass, update dbt_shadow_md directly while interrupts are
+masked instead of falling back solely because guest MD changes. Physical SR
+still forces MD and DSP; the existing fast-return recovery labels are intact.
+New TMU coverage alternates virtual MD, checks SR readback, and restores SR
+through the memory operand with its load tail masked. Validation is pending.
+An initial unmasked ldc.l variant halts with "exception after a committed
+privileged load" in both the candidate and unmodified fast-SR control; this is
+an existing recovery limitation, not fixed or covered by masking the new test.
+
+Interleaved decode-cache timing: 474342 ticks / 14.47576904296875 modeled seconds, exact directory frame. This remains slower than the narrow-R0 control (473250 ticks), so the option stays disabled. The SR-MD candidate passes the expanded TMU test; remaining checks are in progress.
+
+SR-MD expanded TMU passes in both candidate and default control; candidate aspace and interior regressions also pass. The hello image is built and the frozen-image end-to-end benchmark has started; no performance gain is yet established.
+
+A new 16-instruction-cap control uses the current aligned decoder, metadata
+layout and narrow R0 classifier, with SR-MD disabled. Earlier shorter-cap
+results were negative on older combinations; this measures the interaction
+with the current emitted code, without changing CE memory or timer settings.
+Expanded TMU, aspace and interior target regressions pass; the CE hello image
+is built, awaiting serial timing after the SR-MD run.
+
+SR-MD end-to-end result: 476526 ticks / 14.54241943359375 modeled seconds,
+exact directory match. This is slower than narrow-R0 (473250 ticks), despite
+the functional tests passing, so the option remains disabled. No performance
+gain is inferred from bypassing a C helper alone.
+
+DBT_REUSE_RESUME_META optionally computes the noncommitted resume PC from
+the already unpacked metadata used for the commit test. It still evaluates
+register/PR/T-dependent targets against the current exception context. The
+committed path and spill restoration are unchanged. Target regression and
+disabled-feature binary comparison are in progress; no speed gain claimed.
+
+Resume-metadata reuse passes TMU, ASID and interior-entry target regressions.
+With the option off, the original function body is preserved under the
+preprocessor and the hello binary is byte-for-byte identical to narrow-R0
+(SHA256 38528dbbd52f2e63d4f90692f5fe7843fed4eccd8b08fd2c32ed0b6b94ee9587).
+The candidate hello is built; end-to-end timing is still pending.
+
+Current narrow-R0 16-instruction cap matches the exact frame at 505464 ticks / 15.425537109375 modeled seconds, slower than the 32-instruction control (473250 ticks). Keep the 32-instruction cap.
+
+DBT_HASH_ENTRIES parameterizes the C and assembly lookup masks together,
+default 8192, power-of-two checked with a 65536 upper limit for 16-bit slot
+tracking. The 16384-entry experiment uses 18816 block headers (1344 per bank)
+to fit the existing low workspace, without borrowing CE RAM or reducing the
+3.5 MiB translation cache / 2880 KiB metadata arena. An 8192-entry control
+uses the same 18816 headers, isolating header pressure from hash capacity.
+The initial target image ends at 8cc491e0, low workspace at 8c0fa200; linker
+assertions retain the 128 KiB stack reserve. TMU passes, other target tests
+and full CE timing are pending. No speedup is assumed from collision counts.
+
+Resume-metadata reuse matches the exact frame at 476526 ticks / 14.54241943359375 seconds. It does not beat the 473250-tick control and remains disabled. Hash16k passes all target regressions; default hash parameters preserve the baseline binary exactly. Paired CE timing starts with 8192 entries / 18816 headers, followed by 16384 entries / 18816 headers.
+
+DBT_PRUNE_INDEX_REUSE experiments with splicing dead headers out of the
+existing guest-PC/page chains during bank recycling, instead of recomputing
+indices for every survivor. It preserves live-node order, removes dead nodes
+before their table slots are reused, and retains conservative user-page bits
+(false positives only). IC/direct-link invalidation is unchanged. The option
+is disabled by default and preserves the baseline binary when disabled.
+DBT_VERIFY_PRUNED_INDEX separately checks no dead nodes, duplicates/cycles or
+missing live headers, including second-page nodes. It is test-only. TMU
+passes; ASID/interior tests with and without the audit are running.
+
+Pruned-index TMU/aspace/interior regressions pass. The independent node
+audit also passes ASID/remap and repeated bank recycling in the interior
+test. CE binary is built; end-to-end timing remains pending.
+
+The 8192-entry / 18816-header control matches the exact directory frame at 479802 ticks / 14.64239501953125 seconds. The paired 16384-entry run has started; no hash-capacity conclusion yet.
+
+Coverage audit: the original aspace test had zero bank evictions; only the
+interior test exercised the structural verifier (14 evictions). The aspace
+test now keeps a user entry active throughout two table capacities of P1
+code pressure, checks its return value periodically, then replaces its
+physical mapping. Both the audited pruned-index build and default control
+are running this combined regression.
+
+The expanded user-mapping/recycling test passes in both default control
+and audited pruned-index candidate, including remapping after pressure.
+No stale/cyclic/missing-index audit failure occurred.
+
+The 16384-entry / 18816-header configuration matches at 482532 ticks / 14.7257080078125 seconds, slower than its 8192-entry same-header control (479802 ticks). Both are slower than the 21546-header baseline (473250 ticks). Keep default hash capacity; start the independent pruned-index benchmark.
+
+DBT_NO_TICK_SAMPLING measures the overhead of the always-on native tick
+classifier and exception-vector counters. It does not alter timer programming,
+IRQ delivery, IRQ-entry recovery/cache, or scheduler behavior. ABI capability
+bit 0 at HC_GETSTAT 62 is cleared; ABI signature/version and optional TMU1
+C-time profiling capability remain accurate. Default behavior remains sampled.
+Target tests and timing are pending; no performance gain is assumed.
+
+Pruned-index first timing matches at 470520 ticks / 14.359130859375 seconds,
+2730 ticks (0.08331298828125 s) below narrow-R0. A host-only sampled repeat
+will check reproducibility and runtime costs; this is not yet a selected
+shipping change. No-tick-sampling passes all target regressions and awaits
+a separate timing run with the ordinary emulator.
+
+Pruned-index host-only sampled repeat exactly matches 470520 ticks with the
+same binary. Runtime samples fall from 251898 to 249058, generated-code
+samples change 219539 to 219655, and both reports have zero unmapped owners.
+Translations increase 18123 to 18244 while cache-generation changes remain
+11; the measured 0.577% improvement is not a reduction in retranslations.
+Evidence: prune-index-profile/comparison.json. No-tick-sampling timing is
+now running independently.
+
+No-tick-sampling matches at 473796 ticks / 14.4591064453125 seconds, versus
+473250 for narrow-R0: no end-to-end gain, keep sampling enabled.
+DBT_SAME_ASID_PTEH_STORE extends the dynamic P4 store experiment: when the
+actual stored value's low byte equals the runtime ASID, PTEH can be written
+natively without C bookkeeping. Changed ASIDs and MMUCR retain C handling.
+The T bit and scratch GPRs use existing recovery spills, with a fresh native
+store commit range. Predecrement of a self-storing base adjusts the compared
+value. The optional native ASID pointer is absent from default dbt_env.
+Explicit device tests verify native bypass, T=0/1, predecrement, and changed
+ASID C bookkeeping. 187 host checks and 6310 ASan/UBSan capacity attempts
+(4262 bounded retries) pass. Target devmem/TMU/aspace pass; interior pending.
+A same-flags dynamic-store control without the PTEH extension is being built.
+
+Same-ASID PTEH interior regression also passes. A dedicated TMU loop now
+performs 20000 native same-ASID stores with T=1, requires actual IRQs, checks
+the final PTEH value and checksum, and verifies zero device-C-helper calls.
+It is running; the independent dynamic-store control CE timing has started.
+
+Dedicated same-ASID PTEH IRQ loop passes: checksum/T, final register value,
+actual interrupts and zero helper calls all verified. Default narrow-R0
+hello binary remains byte-identical with the PTEH option disabled.
+
+Added and passed a self-predecrement PTEH proof: mov.l r4,@-r4 with
+r4=PTEH+4 must compare/store ASID zero from the decremented address, preserve
+the decremented register, and avoid C. This guards against comparing the
+original low byte (4), which would needlessly select the slow path.
+
+The same-flags dynamic-P4-store control (without same-ASID PTEH bypass)
+matches at 479256 ticks / 14.625732421875 seconds. It is slower than the 473250-tick narrow-R0 baseline; the PTEH candidate must beat both comparisons to be a speed candidate.
+
+Same-ASID PTEH bypass matches at 471066 ticks / 14.37579345703125 seconds, versus 479256 for its dynamic-store control and 473250 for narrow-R0. Initial gain is not yet repeated; it does not beat pruned-index (470520) or the historical 459600-tick binary.
+
+Host-only device-store residency sampling now reads saved r[0..15] and X0
+from exact dbt_ctx_rt symbols while PC lies within the exact fallback symbol
+range. It supports plain/disp/R0-indexed stores; predecrement is deliberately
+excluded because the saved base may already have changed. Synthetic tests
+verify PTEH/MMUCR/TEA classification and no RAM writes. Timing JSON retains
+all three diagnostic addresses. A frozen-baseline validation run starts next.
+
+The pruned-index + same-ASID PTEH combination passes devmem, TMU, aspace
+and interior tests, including the native PTEH IRQ loop and user mapping
+across repeated bank recycling. Its CE binary is built; timing pending.
+
+First device-store sampler repeats baseline timing and aggregate samples
+exactly (473250 ticks), but every address sample is unknown. Inspection
+shows SAVE_CTX_RT does not populate the saved DSP slots. The address
+histogram is INVALID; it must not support any MMIO bottleneck conclusion.
+Corrected sampler reads live cpu.reg.x0, which holds the helper opcode
+through masked C execution. Synthetic tests now model that actual source.
+A real-device-access guest integration check is required before CE sampling.
+
+Live-X0 sampler integration passes against the baseline TMU guest: 472 TEA
+store residency samples, zero unknowns, all guest checks and exit PASS.
+Corrected CE baseline is now running, with an exact-473250-tick gate before
+the serial pruned-index/PTEH combination timing. The invalid original
+histogram and original emulator binary are retained for audit.
+
+Corrected device sampling exactly repeats 473250 ticks and every aggregate
+sample total. Fallback residency identifies PTEH 1875, 0xff000034 1281,
+PTEL 1230, TTB 715 samples; 7635 remain outside classified stores. These
+are residency samples, not access counts. Disassembly confirms ldtlb handling
+is inlined into fallback. Counters show 27847 TLB hooks and 22257 scan skips
+(79.9%): a guarded no-code-page ldtlb fast path is a plausible next target,
+but unclassified residency alone does not prove all of it belongs to ldtlb.
+The pruned-index/PTEH combination benchmark is now running.
+
+Pruned-index + PTEH initial timing matches at 469428 ticks / 14.3258056640625 seconds. It improves on narrow-R0 (473250), pruned-index (470520) and PTEH-only (471066), but not the historical 459600-tick binary. A host-sampled repeat is next.
+
+Pruned-index/PTEH sampled repeat exactly matches 469428 ticks, with zero
+unmapped guest owners. Approximate fallback residency falls from 12736 to
+8891 samples; generated-code residency rises, so the net gain remains only
+3822 ticks versus narrow-R0. No five-second result is claimed.
+
+DBT_PAGE_GROUP_FILTER replaces four 1-KiB bitmap probes for an aligned
+4-KiB VPN with one aligned-nibble lookup. The hash XOR only permutes the
+four low bits; the old wrapping-range result is preserved. An extracted-C
+UBSan test compares 95625216 aligned VPN/bitmap cases with the scalar
+implementation. MMU, TMU, ASID/bank recycling and interior regressions pass.
+The combined candidate is undergoing the same frozen-image directory test.
+
+Page-group first timing matches the directory frame at 467244 ticks / 14.2591552734375 seconds, versus 469428 for the same combination without it. Repeat pending; still above both the historical best and the five-second target.
+
+DBT_SPILL_START_SEARCH optionally binary-searches the monotone spill-start
+array before the reverse pending-spill scan. It excludes saves not yet
+executed while preserving inclusive restore endpoints and nested undo order.
+All append sites set start from the forward emitter position. Host tests
+compare every translated offset and output limit against the scalar scan,
+plus synthetic tables of every capacity, equal starts, overlapping and open
+ranges. ASan/UBSan: 183 checks pass. Target regressions are running; no
+performance claim until the frozen CE benchmark completes.
+
+Page-group repeat exactly matches 467244 ticks / 14.2591552734375 seconds. Spill-start search passes MMU, TMU, ASID/bank recycling and interior target regressions; its full CE timing now starts against that repeated control.
+
+DBT_INCOMING_FAST_SCAN revisits the previously rejected incoming bitmap:
+source_next uses an inline nonzero De Bruijn bit index instead of libgcc
+ctz, and visits only set destination-bank bits instead of all 14 banks for
+every word. Publication/ownership/clearing rules are unchanged. Extracted-C
+ASan/UBSan checks compare 10434808 ordered iterator results across every
+bank mask, plus all 16-bit low/high-half inputs. Audited target tests are
+running; separately built timing binaries omit DBT_VERIFY_INCOMING_BITMAP.
+A same-bitmap control will isolate this iterator change from bitmap overhead.
+
+Spill-start search matches at 473796 ticks / 14.4591064453125 seconds, slower than the 467244-tick page-group control. Keep it disabled; passing recovery correctness does not establish a speed benefit.
+
+DBT_R0_DIRECT_DEVICE_BRANCH optionally replaces R0 selector XOR/shift with
+NEG/AND-immediate. Ordinary addresses produce zero displacement directly to
+the RAM sequence; P4 produces the patched exact slow-path displacement.
+This removes the BRA-slow island (four bytes), and its executed branch for
+P4, while retaining T and the original spill/restore delay slot. Other
+scratch registers retain the old layout. The distance must fit eight bits;
+otherwise translation returns bounded overflow. Host checks validate all
+256 high-byte selector outcomes and exact path entries; 187 checks pass.
+ASan/UBSan capacity: 6380 attempts, 4332 bounded retries. Target regressions
+are running; no speed claim. The incoming-iterator paired benchmark remains
+separate and serial.
+
+R0 direct device branch passes devmem, TMU, ASID/bank recycling and interior target regressions. Default flag-off narrow-R0 binary still exactly matches SHA256 38528dbbd52f2e63d4f90692f5fe7843fed4eccd8b08fd2c32ed0b6b94ee9587. Incoming-bitmap control matches at 489630 ticks / 14.94232177734375 seconds; fast iterator timing is running.
+
+Current pruned-index/PTEH guest samples resolve against 86 timestamp-matching release MAPs. Kernel.dll accounts for 152185 samples (4.644318 modeled seconds), led by KCNextThread, xKCall and NKHandleCall; no single copy routine dominates. classpad_ddi contributes 25630 samples (0.782166 seconds) but its MAP does not match, so no driver function attribution is made. Evidence: prune-pteh-profile/ce-functions.json with NK/MAP hashes.
+
+Fast incoming iterator matches at 503826 ticks / 15.37554931640625 seconds, versus same-bitmap control 489630 and no-bitmap page-group 467244. Keep both bitmap variants disabled. Reducing iterator operations did not improve end-to-end behavior. The independent R0 direct-device-branch benchmark starts next.
+
+R0 direct device branch matches at 471066 ticks / 14.37579345703125 seconds, slower than the 467244-tick page-group control. Keep disabled. Display review confirms the timed wake also handles resumePending; removing it without a replacement wake source is invalid. Next investigation: a masked same-ASID, no-code-page LDTLB path that avoids full context save, with original C bookkeeping retained for all uncertain cases. Current bitmap uses 8192 1-KiB hash bits and supports one aligned-nibble test for 4-KiB pages; any assembly predicate must agree with the C filter and preserve counters, SR/T, return-window recovery and all mapping invalidations.
+
+DBT_FAST_LDTLB adds a masked helper-stub bypass for LDTLB with unchanged
+ASID, 4-KiB PTEL size, and an empty code-page bitmap nibble. It reuses the
+existing bitmap, not a cached physical translation. Only r0-r2 are borrowed;
+X0 temporarily carries original SR after opcode/ASID/size guards. Failed
+bitmap checks restore SR and opcode before SAVE_CTX_RT. Success executes
+LDTLB, increments native/hook/skip counters, restores SR, and uses explicitly
+registered exception-recovery windows for the three GPR restores and jump.
+Stats offsets are compile-time checked. Capability 419 / native count 420.
+Native PROFILE/HW_DIAG combinations are rejected for this experiment, since
+it does not implement their elapsed-time/PTEL diagnostic accounting. Host-only
+sampling remains possible. Default builds retain the original helper path.
+
+MMU/TMU/aspace/interior regressions pass. Corrected MMU fixture PTEL flags
+from 0x16e (1 KiB despite its comment) to 0x17e (4 KiB), then verified actual
+fast execution and forced C fallback on an already translated code page.
+A new 20000-iteration TMU loop executes 40000 LDTLBs with alternating T and
+r0/r1/r2 sentinels. Every operation takes the native path, timer interrupts
+occur, checksum/T and hook/skip counters match exactly. 1-KiB fallback also
+passes. Expanded ASID/64-KiB/1-MiB guards and frozen-image CE timing are running.
+
+Expanded native-LDTLB guard test passes 1-KiB/64-KiB/1-MiB fallback and
+changed-ASID bookkeeping. The first ASID fixture was invalid: GETSTAT/lookup
+between the raw PTEH store and LDTLB could notice the change first. A compact
+assembly write+LDTLB sequence removes that interference; counters prove C
+handling. Corrected 4-KiB MMU fixture also passes the unoptimized control.
+The aspace fixture had the same 1-KiB/comment mismatch; retain its original
+coverage and add GUEST_4K_PAGES for a separate full 4-KiB remap/recycling run.
+
+Fast-LDTLB 4-KiB aspace remapping/interior/recycling stress passes. Initial frozen-image CE timing matches at 455232 ticks / 13.892578125 seconds, versus page-group control 467244 and historical 459600. This is a 12012-tick (0.3665771484375-second) gain over the current-source control. A host-sampled repeat of the exact same binary is running; the five-second objective remains unachieved.
+
+Fast-LDTLB return-window host check extracts the real stub_window recovery block and verifies r0/r1/r2 undo, unchanged r3-r15/SR, exact next guest PC and outside-window rejection at each restore/jump boundary for T=0/1. It also checks assembly restore ordering; ASan/UBSan pass. This complements the real TMU interrupt loop, not a claim of hardware validation. Feature-off narrow-R0 rebuild remains byte-identical to its recorded SHA256.
+
+Fast-LDTLB host-sampled repeat exactly matches 455232 ticks / 13.892578125
+seconds, with 455233 total samples (216269 generated code, 237146 runtime,
+1818 sleep), zero unmapped guest owners. Counters still show 18731 new
+translations and 12 bank generations; C fallback calls are 26858 versus
+27251 total TLB hooks and 21501 no-code skips. Runtime remains distributed
+among exception reconstruction, translation, invalidation and lookup.
+
+DBT_IC_T_ONLY experiments with restoring only T in generated inline-cache
+comparisons: STS saved-SR into scratch, then SHLR puts its bit 0 into T.
+CMP/EQ is the only SR mutation in that interval; scratch is discarded. Other
+SR fields remain intact, unlike a full LDC SR write. Spill endpoints and
+instruction counts are unchanged, and default builds retain LDC SR. Host
+sequence/recovery checks and target IRQ/ASID/recycling tests are running.
+
+IC T-only restore passes 187 ASan/UBSan host checks and MMU/TMU/aspace/interior target regressions, including T across indirect calls and the expanded fast-LDTLB guard/IRQ suite. Frozen-image full CE timing starts against the repeated 455232-tick fast-LDTLB control.
+
+IC T-only restore matches at exactly 455232 ticks / 13.892578125 seconds,
+the same as the repeated full-SR-restore control. No emulator speed gain
+is established; it remains optional and is not selected for the next base.
+
+DBT_COMPACT_HEADER32 reduces the target block header from 36 to 32 bytes:
+guest length becomes a checked byte (maximum 130), packed-meta/end-reason
+share one flags byte, and host_len remains at target offset 22. Target size
+and offset assertions guard the layout; entry-dependent specialization is
+explicitly unsupported in this experiment. ASan/UBSan host suite passes
+187 checks. Build/test both 21546 headers and 23702 headers (1693 per bank)
+to separate layout effects from capacity. CE RAM and code/metadata arenas
+are unchanged. Host sampler now accepts an explicit 32/36-byte header
+stride; synthetic owner lookup tests cover a second block at each stride.
+
+Header32 same-count (21546 blocks) timing matches at 470520 ticks /
+14.359130859375 seconds, slower than the 455232-tick fast-LDTLB control.
+The 23702-block variant is still running; it must beat the original
+36-byte control, not merely the slower 32-byte same-count result.
+Host-only sampler can now dump each bank's header count/capacity and last
+code/metadata payload ends (excluding trailing alignment), using explicit
+arena base/span and 32/36-byte header stride. Synthetic fixtures verify both
+count offsets and unchanged owner attribution. It reads backing RAM only
+at exit, with no guest MMIO calls or state writes. Full timing-invariance
+validation of the newly built calcemu-bank-sample remains pending.
+
+Header32 with 23702 blocks matches at 454686 ticks / 13.87591552734375
+seconds. This saves only 546 ticks / 0.01666259765625 seconds versus the
+455232-tick original-header control; treat it as provisional until repeated.
+New sampler validation will first reproduce the original-header control,
+then repeat the larger compact-header binary with its explicit 32-byte stride.
+
+DBT_COMPACT_SPILL6 independently removes the unused spill.insn field and
+padding, reducing spill records from 8 to 6 bytes while retaining GPR/slot
+and start/end endpoints. Runtime recovery never reads insn; the retained
+legacy field only supported a host sequence assertion. Flag-off assignment
+order remains unchanged. ASan/UBSan host suite passes 187 checks; target
+MMU/TMU/address-space/cache-recycling regressions are running. This is based
+on fast-LDTLB without compact headers, keeping the experiment isolated.
+
+Spill6 completes all target MMU/TMU/aspace/interior regressions, including full interrupt recovery, and 6310 ASan/UBSan capacity attempts (4262 bounded retries). Feature-off narrow-R0 binary retains its recorded SHA256. CE timing is pending behind the serial cache-occupancy validation runs.
+
+New bank sampler exactly reproduces 455232 ticks and every aggregate/runtime-attribution sample of the prior fast-LDTLB profile; zero unmapped guest owners. End snapshot has nine banks at 1539-header capacity, three code payload ends above 261120 of 262144 bytes, one near the metadata limit and one partly filled bank. Payload ends exclude alignment; this is capacity evidence, not a direct trace of each eviction reason. Evidence: fast-ldtlb-bank-profile/banks.json. Larger-header repeat is still running.
+
+Capacity follow-up: cache15 combines compact header32/spill6 with 23700
+headers, 15 x 256-KiB code banks (base 8cc40000), and a 2624-KiB metadata
+arena. It exchanges 256 KiB of metadata reservation for one code bank,
+keeping the same physical RAM ceiling and CE's 8-MiB window. Motivation is
+the validated baseline snapshot's simultaneous header/code pressure; no
+speed claim until tests and frozen-image timing. Builds/regressions running.
+
+Larger header32 bank-sampled repeat exactly matches 454686 ticks, zero unmapped owners. Snapshot now has two header-full banks, seven near code capacity, four near metadata capacity and one partly filled bank; pressure shifted rather than disappearing. Cache15 completes 187 host checks, 6310 capacity attempts and all MMU/TMU/aspace/interior target regressions. Image end 8cc0fba0 stays below stack/cache boundary 8cc40000 with the required reserve; low BSS ends 8c0ff720, below CE RAM. Next serial timings: spill6-only and cache15 combination.
+
+Spill6-only matches the frozen directory frame at 459600 ticks /
+14.02587890625 seconds, slower than the repeated 455232-tick original-spill
+fast-LDTLB control. Do not select spill compression alone; cache15 still
+tests whether spending its space savings on another code bank helps.
+
+Paired-conversion LCD DMA is now rebuilt on the repeated fast-LDTLB base,
+without compact headers/spills. The edge guest passes with 36 DMA launches
+and a zero exit code; full CE timing is queued after cache15. This isolates
+the current conversion from the older bytewise DMA performance result.
+
+Cache15 frozen-image timing matches at 464514 ticks / 14.175842285156 seconds.
+
+DBT_IRQ_ENTRY_HASH replaces the 16-entry FIFO alias scan with a direct
+16-slot PC hash, keeping the same entry storage. Repeated insertion avoids
+metadata scanning only for the same live block, ASID and flush generation.
+Misses/collisions fall back to normal resolution; aliases remain separate
+from block-start hashes. Extracted real insertion/lookup code passes
+ASan/UBSan fixtures for ASID, generation, dead blocks, collisions, reuse,
+borrow/spill refusal and linear boundaries. Feature-off narrow-R0 binary
+is unchanged (38528dbb...). Target regressions and full timing are pending.
+
+IRQ-entry hash passes MMU, TMU, address-space and interior/bank-recycling
+regressions, including actual IRQ reuse (866 recorded alias hits in TMU).
+The hello binary is built; frozen-image timing is queued after DMA.
+
+Paired-conversion DMA on fast-LDTLB matches at 447042 ticks / 13.642639160156 seconds;
+control is 455232 ticks. Emulator DMA is instantaneous, not hardware timing.
+
+The current paired DMA result saves 8190 ticks / 0.24993896484375 seconds
+against its repeated fast-LDTLB CPU baseline. This is a provisional gain,
+not the older byte-conversion result. Exact-ELF bank-sampled repeat is
+prepared with the original 36-byte headers and 14-bank layout, to follow
+the independent IRQ-entry hash timing. No hardware DMA-speed claim.
+
+DBT_LAZY_RESUME_META skips fix-up metadata unpacking in apply_resume_state
+when the memory operation has not committed. Spill restoration and both
+resume counters remain unchanged; committed loads keep their original fix-up
+path. 320 ASan/UBSan differential cases compare actual eager/lazy bodies
+with real packed/unpacked metadata and spill scans across tail positions,
+T restoration, GPR and supported control-register fixes. Feature-off binary
+remains identical to narrow-R0. Target regressions are running.
+
+IRQ-entry hash matches at 461238 ticks / 14.075866699219 seconds against the repeated
+455232-tick fast-LDTLB control. DMA repeat follows with its exact ELF.
+
+Lazy resume metadata passes MMU/TMU/aspace/interior regressions. Its hello
+image is built and isolated timing is queued after the paired-DMA repeat.
+IRQ-entry hash regresses to 461238 ticks / 14.07586669921875 seconds versus
+455232, so it is not selected or combined into DMA.
+
+DBT_LCD_DMA_UNROLL asks GCC to unroll the aligned RGB565 conversion loop
+fourfold. Disassembly confirms four pair conversions per loop branch;
+byte swaps, volatile buffer writes, DMA state and tail handling are unchanged.
+The edge guest records 36 launches and its entire PPM is byte-identical to
+the current paired-DMA control, including odd tails and short fallback.
+The hello binary is built; full CE timing is pending.
+
+Paired-DMA bank-sampled repeat: 447042 ticks / 13.642639160156 seconds, zero unmapped
+guest samples. Initial timing was 447042 ticks. Evidence: fast-dma-bank-profile.
+
+Paired-DMA repeat is exact at 447042 ticks, with 210335 generated-code,
+234869 runtime and 1839 sleep samples; no unmapped guest owners. Control
+has 216269 generated-code, 237146 runtime and 1818 sleep samples. The
+current repeated best is 13.64263916015625 seconds, still above five.
+
+Lazy resume metadata matches at 468336 ticks / 14.292480468750 seconds against its
+455232-tick CPU control. DMA-unroll timing follows against 447042 ticks.
+
+DBT_R0_LOAD_FALLTHROUGH reorders narrow-R0 device-aware loads with inline
+P4 reads. ADD -1 / AND 6 selects the six-byte cold-load/BRA/NOP island for
+P4 or skips it for RAM. The swapped RAM sequence falls through, eliminating
+its trailing BRA/NOP. Stores, R0 operands and indexed addressing retain
+the prior path. Separate cold/hot commit metadata preserves exception
+reconstruction. All 256 top-byte selectors, 188 emission/recovery checks
+and 5968 sanitized capacity attempts (3920 bounded retries) pass. Target
+RAM/P4 interrupted loops and explicit non-R0 delay-slot/postincrement
+reads pass; remaining target checks and timing are pending.
+
+RAM-load fallthrough completes devmem/TMU/aspace/interior regressions.
+The expanded delay-slot/postincrement fixtures also pass on the unchanged
+fast-LDTLB control. Default narrow-R0 image hash remains 38528dbb... .
+Frozen-image CE timing is queued after the independent DMA-unroll run.
+
+DMA unroll matches at 463968 ticks / 14.159179687500 seconds against its repeated
+447042-tick paired-DMA control. RAM-load fallthrough timing follows.
+
+Expanded fallthrough IRQ proof passes in candidate and fast-LDTLB control:
+10,000 iterations each of RAM/P4 postincrement plus BF/S delay-slot loads,
+with checksum, updated-address and actual interrupt-count checks. Runtime
+source and measured hello images are unchanged by these test-only additions.
+DMA-unroll regresses to 463968 ticks (14.1591796875 s), so keep the repeated
+447042-tick non-unrolled DMA implementation.
+
+Fast-DMA final bank snapshot has nine 1539-header-full banks, like the
+CPU control; saved as fast-dma-bank-profile/banks.json (not an eviction
+reason trace). Test DMA plus compact-header32/23702 headers, both individually
+repeated improvements, retaining 14 code banks, 2880 KiB metadata and CE RAM.
+Combined target regressions run before timing; no additive gain assumed.
+
+RAM-load fallthrough matches at 461784 ticks / 14.092529296875 seconds against its
+455232-tick fast-LDTLB control.
+
+Load-fallthrough regresses to 461784 ticks / 14.092529296875 seconds.
+Follow-up DBT_R0_LOAD_MERGE_META shares the classifier/cold-read metadata
+only when the parent is META_INSN with the same guest offset and no prior
+commit. Otherwise retain a separate record. The hot RAM load still has its
+own byte-swap commit. This avoids one six-byte packed record for eligible
+loads; it is a capacity/lookup hypothesis, not a measured cause of regression.
+5968 sanitized capacity attempts pass; explicit range and target IRQ proofs
+are running before a new timing.
+
+DMA/header32 combination passes MMU/TMU/aspace/interior/lcd_dma target
+regressions and link-layout checks. Image end 0x8cc4ef00, low BSS end 0x8c0ff770; CE RAM
+and 128-KiB stack reserve remain intact. Serial full CE timing starts.
+Merge-meta host checks now pass 190 assertions; disabled-feature image
+remains byte-identical to narrow-R0.
+
+Load-merge completes devmem/TMU/aspace/interior target regressions, including
+the expanded conditional-slot/postincrement IRQ checks for RAM and P4.
+Visual inspection of fast-dma/final.png confirms root directory entries,
+toolbar and taskbar are fully painted, complementing the exact ROI matcher.
+
+DMA/header32 matches at 461238 ticks / 14.075866699219 seconds against the repeated
+447042-tick DMA control.
+
+Load-merge matches at 459600 ticks / 14.02587890625 seconds: faster than
+unmerged 461784 but slower than fast-LDTLB control 455232. Keep disabled.
+
+DBT_HASH_ASID_MIX separates direct user hash indices using ASID<<5; kernel
+keys and block-owner chains remain PC-only. C insertion/find/removal and
+assembly probes agree; shared-physical ASID_ANY owners clear every matching
+host-range entry. 1M C/ASM index comparisons and removal fixtures pass under
+ASan/UBSan with/without local alias removal. First target MMU/TMU passed;
+aspace values/remaps passed but its old interior-cache-hit assertion failed
+because direct-hash retention bypasses that cache. Capability 421 selects
+a zero-retranslation/unchanged-interior-hit assertion; old-mode assertion
+is retained. Full target regressions rerun before any speed claim.
+
+ASID-mix aspace now passes, including shared-owner remap, retained direct
+interior alias without retranslation, and user remapping after bank recycling.
+Unmixed control still passes its original interior-cache-hit assertion.
+Default narrow-R0 image remains identical (38528dbb...). MMU/TMU rerun pass;
+final interior regression and hello build are still in progress.
+
+ASID-mix completes all target regressions and the hello build. Frozen-image
+My Device timing starts against the repeated 455232-tick fast-LDTLB control.
+
+ASID-mixed direct hash completes at 471066 ticks / 14.37579345703125 seconds with exact directory-frame matching and exit code zero. This is slower than the 455232-tick CPU control; keep disabled. Evidence: build-speed-profile-review/asid-mix/timing.json.
+
+The optional DBT_HASH_TWO_WAY experiment retains 8192 total hash entries but probes two adjacent ways per bucket in both C and assembly. MMU, TMU, address-space and interior-entry target regressions pass. tools/test_two_way_hash.py extracts the actual C insertion, lookup and invalidation bodies (substituting only host-incompatible SR assembly) and passes ASan/UBSan with both full-scan and local alias removal: colliding PCs, ASID isolation, refresh/replacement, shared-owner removal, both-way interior aliases, range boundaries and global kernel keys. Complete CE timing is running; no speed claim yet.
+
+Two-way forced-collision target regression passes: P_A/P_S share the folded bucket, alternate 4096 times with correct values and fewer than 16 C refills, and preserve T. Default feature-off hello binary still exactly matches 38528dbb... baseline. A separate DBT_INTERIOR_RANGE_FIRST experiment rejects page-chain candidates outside their guest PC range before loading binfo or calling metadata entry validation; all original candidate checks remain. Tests and timing pending.
+
+Two-way hash completes at 457962 ticks / 13.97589111328125 seconds with exact reference matching. Slower than the 455232-tick single-way CPU control; keep disabled despite passing collision and target regressions. DBT_NATIVE_FETCH separately inlines only the normal translator fetch path on native big-endian SH: same volatile 16-bit mapped load and byte swap, same odd-address rejection, no speculative fetch. Prepass/reference-fetch callbacks are unchanged. Runtime MMU/translation recovery tests pending.
+
+Interior-range-first completes MMU/TMU/aspace/interior target regressions and its hello build. Frozen-image My Device timing starts against the 455232-tick CPU control; no clock or guest-memory changes.
+
+Native-fetch completes MMU/TMU/aspace/interior regressions and its CE hello build. New cross-page code-probe regression passes with both the native-fetch candidate and callback control: translating two mapped NOPs probes the initially unmapped next page, takes exactly one miss, preserves entry SPC/missing-page TEA, refills and returns correctly. Logs: /tmp/build-native-fetch-cross-mmu-run.log and /tmp/build-fetch-cross-control-mmu-run.log. CE timing awaits the running interior-range measurement.
+
+Native-fetch code audit: the main dbt_translate_block constprop function shrinks from 0x3ba2 to 0x3a4c bytes (342 bytes); this is code-size evidence, not a timing result. Feature-off hello remains byte-identical to narrow-R0 (38528dbbd52f2e63d4f90692f5fe7843fed4eccd8b08fd2c32ed0b6b94ee9587).
+
+Interior-range-first completes at 463968 ticks / 14.1591796875 seconds with exact frame matching. Slower than the 455232-tick CPU control; keep disabled. Native-fetch frozen-image CE timing follows as a separate experiment.
+
+Host-only allocation-pressure trace added to add_dbt_sample.py: interpreter compares the exact ELF translate_at entry PC and reads backing-RAM bank/count/code/arena offsets. At the best unified 14-bank layout it reports the same three preallocation predicates (1539 headers, 1024 code bytes reserved, 2768 scratch metadata bytes reserved). No emulated memory API, guest state write or clock change. Synthetic tests verify equality boundaries, reason bits 1/2/4, start gating, invalid bank rejection and unchanged backing RAM. Dedicated emulator builds successfully; exact-binary fast-DMA repeat is prepared, pending native-fetch timing completion.
+
+Native-fetch completes at 460146 ticks / 14.04254150390625 seconds with exact directory-frame matching, slower than 455232-tick CPU control despite smaller translator code. Keep disabled. The exact best fast-DMA binary now runs under host-only fill-pressure tracing; verify the repeated 447042-tick timing before attributing capacity evidence.
+
+Next generated-code candidate identified during audit: no-borrow direct exits execute a leading NOP before spill/load/jump/restore. Moving the padding after the jump delay slot could remove one executed instruction on unchained/far exits while retaining the five-word patch window. Not implemented: this requires updating short-link no_restore selection, saved unlink words, exact recovery boundaries and sequence tests together. Wait for allocation-pressure evidence before choosing the next candidate.
+
+DBT_EXIT_NOP_TAIL implements the no-borrow exit experiment: emit spill/literal-load/jump/restore then unreachable NOP, keeping the five-word patch window and conditional skip distances. link_direct marks no-borrow chains no_restore so a short-chain delay slot never inherits the now-first scratch save. Borrowed exits remain unchanged. Sequence expectations updated for the opt-in layout; initial 183 ASan/UBSan checks pass, target MMU/TMU/aspace/interior tests running. Explicit pending-spill boundary checks added; rerun pending. No CE speed claim.
+
+Exit-NOP-tail rerun passes 186 ASan/UBSan host checks, including save/restore delay-slot spill boundaries and unreachable padding. MMU and TMU target regressions pass. Feature-off hello rebuild completes; hash checked against the narrow-R0 baseline.
+
+Fast-DMA exact-binary fill-trace repeat matches 447042 ticks / 13.64263916015625 seconds, exact frame, exit zero. There are 13 pressure observations: first two share identical bank-5 occupancy only five ticks apart, so do not count both as completed recycling. Collapsing consecutive identical occupancy yields 12 groups: 9 header-limited, 2 code-limited, 1 metadata-limited; flush/generation delta is also 12. Most header-limited banks leave roughly 16–34 KiB of code unused. Raw and grouped evidence is in fast-dma-fill-trace/fill-pressure.json. This confirms header capacity is the most common pressure trigger, not that increasing headers necessarily improves total latency (the earlier header32+DMA combination regressed).
+
+Based on measured header pressure, DBT_HASH_HIGH_RAM tests a layout-only alternative to compact-header bitfields: retain 36-byte headers, move the existing 96-KiB tagged hash out of .lowbss, increase headers 21546 to 23702 (1693/bank), reduce metadata arena 2880 to 2720 KiB to cover relocated hash and larger side tables. Same 14 code banks, same CE memory and DMA path. Linker bounds and target regressions must pass; no speed claim.
+
+Exit-NOP-tail completes all four target regressions and CE build; callback/default host suite passes 180 checks. Feature-off binary matches 38528dbb... . Frozen-image CE timing starts.

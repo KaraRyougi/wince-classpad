@@ -61,9 +61,20 @@ typedef struct {
     signed char writes_t;      /* writes SR.T */
     sf_u16 touched;    /* GPR bitmask read or written */
     sf_u16 defs;       /* GPR bitmask written */
-} sh_insn;
+} sh_insn
+#ifdef DBT_DECODE_ALIGN4
+    __attribute__((aligned(4)))
+#endif
+;
 
 void sh4_decode(sf_u32 op, sh_insn *d);
+#ifdef DBT_DECODE_REF
+#ifndef DBT_DECODE_CACHE
+#error DBT_DECODE_REF requires DBT_DECODE_CACHE
+#endif
+/* Valid only until the next decoder call: a colliding opcode can replace it. */
+const sh_insn *sh4_decode_cached(sf_u32 op);
+#endif
 
 /* 1 if the instruction is legal in a delay slot */
 int sh4_slot_legal(const sh_insn *d);

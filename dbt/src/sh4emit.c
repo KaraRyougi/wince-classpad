@@ -42,6 +42,9 @@ int emit_lits_bytes(const emitter *e) { return e->nlits * 4 + 2; }
 int emit_flush_lits(emitter *e)
 {
     int i, start;
+    /* A failed emission may have recorded a literal at cap. Never inspect
+     * that instruction slot; callers must discard the incomplete output. */
+    if (e->overflow) return -1;
     if (e->nlits == 0) return emit_pos(e);
     if (emit_pos(e) & 2) emit16(e, OP_NOP);          /* align pool to 4 */
     start = emit_pos(e);

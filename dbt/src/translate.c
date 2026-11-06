@@ -3,6 +3,27 @@
 
 #define R(n) (1u << (n))
 #define SR_MD 0x40000000u
+#if defined(DBT_R0_LOAD_MERGE_META) && !defined(DBT_R0_LOAD_FALLTHROUGH)
+#error DBT_R0_LOAD_MERGE_META requires the load-fallthrough layout
+#endif
+#if defined(DBT_R0_LOAD_FALLTHROUGH) && (!defined(DBT_R0_DEVICE_TEST) || !defined(DBT_INLINE_DEVICE_READ) || defined(DBT_R0_DIRECT_DEVICE_BRANCH) || defined(DBT_R0_DEVICE_WIDE))
+#error DBT_R0_LOAD_FALLTHROUGH requires narrow R0 tests and inline reads without direct-branch mode
+#endif
+#if defined(DBT_R0_DIRECT_DEVICE_BRANCH) && !defined(DBT_R0_DEVICE_TEST)
+#error DBT_R0_DIRECT_DEVICE_BRANCH requires DBT_R0_DEVICE_TEST
+#endif
+#if defined(DBT_R0_DEVICE_WIDE) && !defined(DBT_R0_DEVICE_TEST)
+#error DBT_R0_DEVICE_WIDE requires DBT_R0_DEVICE_TEST
+#endif
+#if defined(DBT_R0_DEVICE_TEST) && !defined(DBT_SHORT_DEVICE_TEST)
+#error DBT_R0_DEVICE_TEST requires DBT_SHORT_DEVICE_TEST
+#endif
+#if defined(DBT_UNIFORM_ENTRY_BOUNDS) && (!defined(DBT_UNIFORM_STORE) || defined(DBT_CONST_DEVICE_ADDRESS))
+#error DBT_UNIFORM_ENTRY_BOUNDS requires uniform stores without constant-address specialization
+#endif
+#if defined(DBT_CONST_P4_STORE) && !defined(DBT_CONST_DEVICE_ADDRESS)
+#error DBT_CONST_P4_STORE requires constant-address tracking
+#endif
 
 /* literal tags */
 #define TAG_LINK(k)   (100 + (k))   /* branch literal holding the host target (patched when linked) */
@@ -35,6 +56,15 @@ typedef struct {
     /* instructions the pre-pass decoded, from the block's guest pc on
      * (g_pre: one translation at a time; an abandoned one never resumes) */
     int    pre_n;
+#ifdef DBT_UNIFORM_STORE
+    sf_u32 uniform_mask;
+#ifdef DBT_UNIFORM_ENTRY_BOUNDS
+    sf_u8 uniform_origin[16];
+#endif
+#endif
+#ifdef DBT_CONST_DEVICE_ADDRESS
+    sf_u32 known[16], known_mask;
+#endif
 } tctx;
 
 static sh_insn g_pre[DBT_MAX_INSNS * 2 + 2];
@@ -76,8 +106,13 @@ static void spill(tctx *t, int gpr, int slot)
     dbt_block *b = t->blk;
     if (b->nspills < DBT_MAX_BLOCK_SPILLS) {
         dbt_spill *s = &b->spills[b->nspills++];
+#ifndef DBT_COMPACT_SPILL6
         s->insn = (sf_u8)(t->cur - b->meta);
-        s->gpr = (sf_u8)gpr; s->slot = (sf_u8)slot; s->pad = 0;
+#endif
+        s->gpr = (sf_u8)gpr; s->slot = (sf_u8)slot;
+#ifndef DBT_COMPACT_SPILL6
+        s->pad = 0;
+#endif
         s->start = (sf_u16)emit_pos(&t->em);
         s->end = 0xFFFF;
     } else {
@@ -212,6 +247,89 @@ static void tr_mem_plain(tctx *t, const sh_insn *d);
 static void call_helper(tctx *t, sf_u32 helper, sf_u32 arg_reg, int arg_mode, sf_u32 arg_imm, sf_u32 avoid);
 static void begin_meta_kind(tctx *t, int kind, sf_u32 guest_off, sf_u32 target, sf_u32 fallthrough);
 
+#if defined(DBT_SAME_ASID_PTEH_STORE) && !defined(DBT_DYNAMIC_P4_STORE)
+#error DBT_SAME_ASID_PTEH_STORE requires DBT_DYNAMIC_P4_STORE
+#endif
+
+#ifdef DBT_DYNAMIC_P4_STORE
+static void tr_p4_store(tctx *t, const sh_insn *d)
+{
+    emitter *e = &t->em;
+    dbt_block *b = t->blk;
+    int a = pick_scratch(t, d->touched), v = pick_scratch(t, d->touched | R(a));
+    int t_index, pteh, mmucr, select_fast, selected, protected_at, restore_at;
+    int dispatch, skip, fast, done;
+#ifdef DBT_SAME_ASID_PTEH_STORE
+    int same_asid_at = -1;
+#endif
+    sf_u32 goff = t->gpc - b->guest_pc;
+    spill(t, a, SA(t)); spill(t, v, SB(t));
+    emit16(e, OP_STC_SR(v));
+    if (b->nspills >= DBT_MAX_BLOCK_SPILLS) { t->err = DBT_ERR_OVERFLOW; return; }
+    t_index = b->nspills++;
+#ifndef DBT_COMPACT_SPILL6
+    b->spills[t_index].insn = (sf_u8)(t->cur - b->meta);
+#endif
+    b->spills[t_index].gpr = DBT_SPILL_T;
+    b->spills[t_index].slot = (sf_u8)SC(t);
+#ifndef DBT_COMPACT_SPILL6
+    b->spills[t_index].pad = 0;
+#endif
+    b->spills[t_index].start = (sf_u16)emit_pos(e);
+    b->spills[t_index].end = 0xffff;
+    emit16(e, op_lds_slot(v, SC(t)));
+    emit16(e, OP_MOV_RR(d->base, a));
+    if (d->am == AM_PREDEC) emit16(e, OP_ADD_IMM(-4, a));
+    else if (d->am == AM_DISP && d->disp) emit16(e, OP_ADD_IMM(d->disp, a));
+    else if (d->am == AM_R0IDX) emit16(e, OP_ADD_RR(0, a));
+    emit_mov_lit(e, v, 0xFF000000u, TAG_NONE);
+    emit16(e, OP_CMPEQ_RR(a, v));
+    pteh = emit_pos(e); emit16(e, OP_BT(0));
+    emit_mov_lit(e, v, 0xFF000010u, TAG_NONE);
+    emit16(e, OP_CMPEQ_RR(a, v));
+    mmucr = emit_pos(e); emit16(e, OP_BT(0));
+    select_fast = emit_pos(e); emit16(e, OP_MOV_IMM(0, a));
+    selected = emit_pos(e); emit16(e, OP_BRA(0)); emit16(e, OP_NOP);
+#ifdef DBT_SAME_ASID_PTEH_STORE
+    if (t->env->current_asid_addr) {
+        same_asid_at = emit_pos(e);
+        emit16(e, OP_MOV_RR(d->data, a));
+        if (d->am == AM_PREDEC && d->data == d->base) emit16(e, OP_ADD_IMM(-4, a));
+        emit16(e, OP_EXTUB(a, a));
+        emit_mov_lit(e, v, t->env->current_asid_addr, TAG_NONE);
+        emit16(e, OP_MOVL_LOAD(v, v));
+        emit16(e, OP_CMPEQ_RR(a, v));
+        emit16(e, OP_BT((select_fast - emit_pos(e) - 4) / 2));
+    }
+#endif
+    protected_at = emit_pos(e); emit16(e, OP_MOV_IMM(0, a));
+    restore_at = emit_pos(e);
+#ifdef DBT_SAME_ASID_PTEH_STORE
+    emit_patch16(e, pteh, OP_BT(((same_asid_at >= 0 ? same_asid_at : protected_at) - pteh - 4) / 2));
+#else
+    emit_patch16(e, pteh, OP_BT((protected_at - pteh - 4) / 2));
+#endif
+    emit_patch16(e, mmucr, OP_BT((protected_at - mmucr - 4) / 2));
+    emit_patch16(e, selected, OP_BRA((restore_at - selected - 4) / 2));
+    emit16(e, op_sts_slot(SC(t), v));
+    b->spills[t_index].end = (sf_u16)emit_pos(e);
+    emit16(e, OP_LDC_SR(v));
+    restore(t, v, SB(t));
+    dispatch = emit_pos(e); emit16(e, OP_BRAF(a));
+    restore(t, a, SA(t));
+    /* All scratch registers and T are canonical before either access. */
+    call_helper(t, t->env->rt_fallback, 0, 2, d->op, d->touched);
+    skip = emit_pos(e); emit16(e, OP_BRA(0)); emit16(e, OP_NOP);
+    fast = emit_pos(e);
+    if (fast - dispatch - 4 > 127) { t->err = DBT_ERR_OVERFLOW; return; }
+    emit_patch16(e, select_fast, OP_MOV_IMM(fast - dispatch - 4, a));
+    begin_meta_kind(t, META_INSN, goff, 0, 0);
+    commit(t, FIX_NONE, 0); emit16(e, d->op);
+    done = emit_pos(e);
+    emit_patch16(e, skip, OP_BRA((done - skip - 4) / 2));
+}
+#endif
+
 /* The effective address is tested for P4 without touching T (every shift
  * used here leaves T alone): rT ends as 0 for a P4 address and 4 otherwise,
  * and `braf rT` either falls into the `bra slow` or skips it. Layout:
@@ -228,28 +346,118 @@ static void tr_mem_dev(tctx *t, const sh_insn *d)
     int own = t->bx < 0;                  /* no borrowed register: spill one */
     int rT = own ? pick_scratch(t, d->touched) : t->bx;
     int bra_slow, bra_done, slow, done;
+#ifdef DBT_R0_DIRECT_DEVICE_BRANCH
+    int direct_mask = -1, direct_branch = -1;
+#endif
     sf_u32 goff = t->gpc - t->blk->guest_pc;
     dbt_imeta parent = *t->cur;           /* a branch range when this is a delay slot */
+#ifdef DBT_R0_DEVICE_TEST
+#ifdef DBT_R0_DEVICE_WIDE
+    /* The original operands are restored in BRAF's delay slot before the
+     * actual access. Only indexed EA formation needs R0 concurrently. */
+    if (own && d->am != AM_R0IDX && !(t->slot_avoid & R(0))) rT = 0;
+#else
+    if (own && !((d->touched | t->slot_avoid) & R(0))) rT = 0;
+#endif
+#endif
     if (own) spill(t, rT, SA(t)); else cache_kill(t);
     emit16(e, OP_MOV_RR(d->base, rT));
     if (d->am == AM_PREDEC) emit16(e, OP_ADD_IMM(-4, rT));
     else if (d->am == AM_DISP && d->disp) emit16(e, OP_ADD_IMM(d->disp, rT));
     else if (d->am == AM_R0IDX) emit16(e, OP_ADD_RR(0, rT));
+#ifdef DBT_SHORT_DEVICE_TEST
+    /* ((top_byte + 1) >> 8) is 1 exactly for 0xFF. All shifts here
+     * preserve T; negation then gives -1 for P4 and zero otherwise. */
+    emit16(e, OP_SHLR16(rT));
+    emit16(e, OP_SHLR8(rT));
+    emit16(e, OP_ADD_IMM(1, rT));
+    emit16(e, OP_SHLR8(rT));
+#ifdef DBT_R0_DEVICE_TEST
+    if (rT == 0) {
+#ifdef DBT_R0_LOAD_FALLTHROUGH
+        if (own && !d->is_store) {
+            /* P4 selects the cold native load; RAM skips its three words. */
+            emit16(e, OP_ADD_IMM(-1, 0));
+            emit16(e, 0xC906u); /* and #6,r0 preserves T */
+        } else
+#endif
+#ifdef DBT_R0_DIRECT_DEVICE_BRANCH
+        /* Zero for ordinary RAM, all ones for P4. Patch AND's immediate
+         * to the slow-path distance, avoiding a separate BRA slow island. */
+        emit16(e, OP_NEG_RR(0, 0));
+        direct_mask = emit_pos(e); emit16(e, 0xC900u);
+#else
+        emit16(e, 0xCA01u); /* xor #1,r0 preserves T */
+#endif
+    }
+    else
+#endif
+    {
+        emit16(e, OP_NEG_RR(rT, rT));
+        emit16(e, OP_ADD_IMM(1, rT));
+    }
+#else
     emit16(e, OP_NOT_RR(rT, rT));         /* top byte 0xFF -> 0x00 */
     emit16(e, OP_SHLR16(rT));
     emit16(e, OP_SHLR8(rT));              /* 0 for P4, else 1..255 */
     emit16(e, OP_NEG_RR(rT, rT));         /* 0 or negative */
     emit16(e, OP_SHLR16(rT));
     emit16(e, OP_SHLR8(rT));              /* 0 or 0xFF */
-    emit16(e, OP_ADD_IMM(1, rT));         /* 1 or 0x100 */
+    emit16(e, OP_ADD_IMM(1, rT));
+#endif
+#ifndef DBT_SHORT_DEVICE_TEST
     emit16(e, OP_SHLR8(rT));              /* 0 or 1 */
+#endif
+#ifdef DBT_R0_DIRECT_DEVICE_BRANCH
+    if (direct_mask < 0)
+#endif
+#ifdef DBT_R0_LOAD_FALLTHROUGH
+    if (!(own && rT == 0 && !d->is_store))
+#endif
     emit16(e, OP_SHLL2(rT));              /* 0 (P4: fall into bra slow) or 4 (skip it) */
+#ifdef DBT_R0_DIRECT_DEVICE_BRANCH
+    direct_branch = emit_pos(e);
+#endif
     emit16(e, OP_BRAF(rT));
     if (own) restore(t, rT, SA(t)); else emit16(e, OP_NOP);   /* delay slot */
-    bra_slow = emit_pos(e); emit16(e, OP_BRA(0)); emit16(e, OP_NOP);
+#ifdef DBT_R0_LOAD_FALLTHROUGH
+    if (own && rT == 0 && !d->is_store) {
+        /* Put the rare unswapped load first, so the usual RAM load falls
+         * through without a trailing BRA/NOP. Both accesses keep their
+         * own commit range, including post-increment and delay-slot loads. */
+#ifdef DBT_R0_LOAD_MERGE_META
+        /* The classifier and cold load restart the same instruction.
+         * Share that range only while it has no earlier commit point. */
+        if (parent.kind != META_INSN || parent.guest_off != goff || parent.commit_rel != 0xFF)
+#endif
+        begin_meta_kind(t, META_INSN, goff, 0, 0);
+        commit(t, FIX_NONE, 0); emit16(e, d->op);
+        bra_done = emit_pos(e); emit16(e, OP_BRA(0)); emit16(e, OP_NOP);
+        begin_meta_kind(t, META_INSN, goff, 0, 0);
+        tr_mem_plain(t, d);
+        done = emit_pos(e);
+        emit_patch16(e, bra_done, OP_BRA((done - bra_done - 4) / 2));
+        cache_kill(t);
+        if (parent.kind != META_INSN)
+            begin_meta_kind(t, parent.kind, parent.guest_off, parent.target, parent.fallthrough);
+        return;
+    }
+#endif
+    bra_slow = emit_pos(e);
+#ifdef DBT_R0_DIRECT_DEVICE_BRANCH
+    if (direct_mask < 0)
+#endif
+    { emit16(e, OP_BRA(0)); emit16(e, OP_NOP); }
     tr_mem_plain(t, d);
     bra_done = emit_pos(e); emit16(e, OP_BRA(0)); emit16(e, OP_NOP);
     slow = emit_pos(e);
+#ifdef DBT_R0_DIRECT_DEVICE_BRANCH
+    if (direct_mask >= 0) {
+        unsigned distance = (unsigned)(slow - direct_branch - 4);
+        if (distance > 255) { t->err = DBT_ERR_OVERFLOW; return; }
+        emit_patch16(e, direct_mask, 0xC900u | distance);
+    } else
+#endif
     emit_patch16(e, bra_slow, OP_BRA((slow - (bra_slow + 4)) / 2));
     begin_meta_kind(t, META_INSN, goff, 0, 0);
 #ifdef DBT_INLINE_DEVICE_READ
@@ -260,6 +468,10 @@ static void tr_mem_dev(tctx *t, const sh_insn *d)
         commit(t, FIX_NONE, 0);
         emit16(e, d->op);
     } else
+#endif
+#ifdef DBT_DYNAMIC_P4_STORE
+    if (d->is_store) tr_p4_store(t, d);
+    else
 #endif
     call_helper(t, t->env->rt_fallback, 0, 2, d->op, d->touched);
     done = emit_pos(e);
@@ -274,13 +486,56 @@ static void tr_mem_dev(tctx *t, const sh_insn *d)
 
 static void tr_mem(tctx *t, const sh_insn *d)
 {
-    if (d->ctrl == CR_NONE && dev_candidate(t, d)) { tr_mem_dev(t, d); return; }
+    if (d->ctrl == CR_NONE && dev_candidate(t, d)) {
+#ifdef DBT_CONST_DEVICE_ADDRESS
+        if (d->base >= 0 && (t->known_mask & R(d->base)) && d->am != AM_R0IDX) {
+            sf_u32 address = t->known[d->base];
+            if (d->am == AM_PREDEC) address -= 4;
+            else if (d->am == AM_DISP) address += d->disp;
+#ifdef DBT_CONST_P4_STORE
+            /* Only PTEH and MMUCR have software side effects in dev_mem.
+             * The address proof is the same literal already emitted for
+             * this block; entry restrictions prevent bypassing that load. */
+            if (d->is_store && (address >> 24) == 0xFFu &&
+                address != 0xFF000000u && address != 0xFF000010u) {
+                t->blk->const_specialized = (sf_u8)((t->gpc - t->blk->guest_pc) / 2 + 1);
+                commit(t, FIX_NONE, 0);
+                emit16(&t->em, d->op);
+                return;
+            }
+#else
+            if ((address >> 24) != 0xFFu) {
+                t->blk->const_specialized = (sf_u8)((t->gpc - t->blk->guest_pc) / 2 + 1);
+                tr_mem_plain(t, d);
+                return;
+            }
+#endif
+        }
+#endif
+        tr_mem_dev(t, d); return;
+    }
     tr_mem_plain(t, d);
 }
 
 static void tr_mem_plain(tctx *t, const sh_insn *d)
 {
     emitter *e = &t->em;
+#ifdef DBT_UNIFORM_STORE
+    /* Byte-uniform values (e.g. zero/-1) are endian invariant. Do not bypass
+     * device dispatch or a predecrement which changes the data register. */
+    if (d->is_store && d->ctrl == CR_NONE && d->size > 1 &&
+        (t->uniform_mask & R(d->data)) && !dev_candidate(t, d) &&
+        !(d->am == AM_PREDEC && d->data == d->base)) {
+        commit(t, FIX_NONE, 0);
+        emit16(e, d->op);
+#ifdef DBT_UNIFORM_ENTRY_BOUNDS
+        if (!t->blk->const_specialized || t->uniform_origin[d->data] < t->blk->uniform_entry_start)
+            t->blk->uniform_entry_start = t->uniform_origin[d->data];
+#endif
+        t->blk->const_specialized = (sf_u8)((t->gpc - t->blk->guest_pc) / 2 + 1);
+        return;
+    }
+#endif
     if (d->ctrl != CR_NONE) {
         /* sts.l/stc.l CR,@-Rn  or  lds.l/ldc.l @Rm+,CR */
         int own = t->bx < 0;
@@ -400,6 +655,19 @@ static void tr_pcrel(tctx *t, const sh_insn *d)
         break;
     }
     emit_mov_imm(&t->em, d->pc_reg, val);
+#ifdef DBT_UNIFORM_STORE
+    t->uniform_mask &= ~R(d->pc_reg);
+    if (val == (val & 255u) * 0x01010101u) {
+        t->uniform_mask |= R(d->pc_reg);
+#ifdef DBT_UNIFORM_ENTRY_BOUNDS
+        t->uniform_origin[d->pc_reg] = (sf_u8)((t->gpc - t->blk->guest_pc) / 2);
+#endif
+    }
+#endif
+#ifdef DBT_CONST_DEVICE_ADDRESS
+    t->known[d->pc_reg] = val;
+    t->known_mask |= R(d->pc_reg);
+#endif
 }
 
 /* ------------------------------------------------------------- helper calls */
@@ -453,11 +721,21 @@ static void jump_direct(tctx *t, sf_u32 guest_target, sf_u32 avoid, int cond)
     b->links[k].cond = (sf_u8)cond;
     b->links[k].backward = (sf_u8)(guest_target <= t->gpc);
     b->nlinks++;
-    if (t->bx >= 0) exit_restore(t); else { emit16(e, OP_NOP); cache_kill(t); }
+    if (t->bx >= 0) exit_restore(t); else {
+#ifndef DBT_EXIT_NOP_TAIL
+        emit16(e, OP_NOP);
+#endif
+        cache_kill(t);
+    }
     spill(t, rT, SLOT_X0);
     emit_mov_lit(e, rT, 0, TAG_LINK(k));                     /* host target; initially the exit stub */
     emit16(e, OP_JMP(rT));
     restore(t, rT, SLOT_X0);
+#ifdef DBT_EXIT_NOP_TAIL
+    /* Keep the five-word link patch window, but do not execute its padding
+     * on the no-borrow far-exit path. Conditional skips remain unchanged. */
+    if (t->bx < 0) emit16(e, OP_NOP);
+#endif
 }
 
 /* Jump to the guest address already placed in X0. */
@@ -482,8 +760,13 @@ static void ic_save_t(tctx *t, int r)
     emit16(&t->em, OP_STC_SR(r));
     if (b->nspills < DBT_MAX_BLOCK_SPILLS) {
         dbt_spill *s = &b->spills[b->nspills++];
+#ifndef DBT_COMPACT_SPILL6
         s->insn = (sf_u8)(t->cur - b->meta);
-        s->gpr = DBT_SPILL_T; s->slot = SLOT_X1; s->pad = 0;
+#endif
+        s->gpr = DBT_SPILL_T; s->slot = SLOT_X1;
+#ifndef DBT_COMPACT_SPILL6
+        s->pad = 0;
+#endif
         s->start = (sf_u16)emit_pos(&t->em); s->end = 0xffff;
     } else t->err = DBT_ERR_OVERFLOW;
     emit16(&t->em, op_lds_slot(r, SLOT_X1));
@@ -498,7 +781,13 @@ static void ic_restore_t(tctx *t, int r, int close)
             s->end = (sf_u16)emit_pos(&t->em); break;
         }
     }
+#ifdef DBT_IC_T_ONLY
+    /* Only CMP/EQ changed SR. Shift the saved SR's low bit into T; the
+     * scratch value is dead, and all other SR bits stay untouched. */
+    emit16(&t->em, OP_SHLR(r));
+#else
     emit16(&t->em, OP_LDC_SR(r));
+#endif
 }
 
 /* Inline cache comparing guest register `reg` directly (not written between
@@ -925,6 +1214,33 @@ static void tr_insn(tctx *t, const sh_insn *d, int in_slot)
     case K_PRIV:  tr_priv(t, d); break;
     case K_BRANCH: /* handled by caller */ break;
     }
+#ifdef DBT_CONST_DEVICE_ADDRESS
+    /* Keep only constants actually materialized by PC-relative loads.
+     * Any non-memory operation conservatively drops all knowledge. */
+    if (d->kind == K_MEM) t->known_mask &= ~d->defs;
+    else if (d->kind != K_PCREL) t->known_mask = 0;
+#endif
+#ifdef DBT_UNIFORM_STORE
+    if (d->kind != K_PCREL) {
+        sf_u32 known = t->uniform_mask;
+        int n = (d->op >> 8) & 15, m = (d->op >> 4) & 15;
+        t->uniform_mask &= ~d->defs;
+        if (d->kind == K_PASS) {
+            if ((d->op & 0xf000) == 0xe000 &&
+                ((d->op & 255) == 0 || (d->op & 255) == 255)) {
+                t->uniform_mask |= R(n);
+#ifdef DBT_UNIFORM_ENTRY_BOUNDS
+                t->uniform_origin[n] = (sf_u8)((t->gpc - t->blk->guest_pc) / 2);
+#endif
+            } else if ((d->op & 0xf00f) == 0x6003 && (known & R(m))) {
+                t->uniform_mask |= R(n);
+#ifdef DBT_UNIFORM_ENTRY_BOUNDS
+                t->uniform_origin[n] = t->uniform_origin[m];
+#endif
+            }
+        } else if (d->kind != K_MEM) t->uniform_mask = 0;
+    }
+#endif
     /* the cached swap dies with its register; anything but plain code,
      * memory and pc-relative ops is a helper or trap and kills it too */
     if (t->cache_reg >= 0 && ((d->defs & R(t->cache_reg)) || (d->kind != K_PASS && d->kind != K_MEM && d->kind != K_PCREL)))
@@ -937,6 +1253,30 @@ static void begin_meta_kind(tctx *t, int kind, sf_u32 guest_off, sf_u32 target, 
     dbt_imeta *m;
     if (b->nmeta >= DBT_MAX_META - 1) { t->err = DBT_ERR_OVERFLOW; return; }
     m = &b->meta[b->nmeta++];
+#ifdef DBT_META_WORD_INIT
+    {
+        /* Write the complete recovery record once instead of clearing it
+         * and overwriting most fields. Explicit host byte order keeps the
+         * native SH build and host-side recovery tests identical. */
+        typedef sf_u32 meta_word __attribute__((__may_alias__));
+        typedef char check_meta_words[(sizeof(dbt_imeta) == 16 &&
+            __builtin_offsetof(dbt_imeta, kind) == 4 &&
+            __builtin_offsetof(dbt_imeta, target) == 8 &&
+            __builtin_offsetof(dbt_imeta, fallthrough) == 12 &&
+            __alignof__(dbt_imeta) >= 4) ? 1 : -1];
+        meta_word *w = (meta_word *)m;
+        sf_u32 host = (sf_u16)emit_pos(&t->em), guest = (sf_u16)guest_off;
+        (void)sizeof(check_meta_words);
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        w[0] = (host << 16) | guest;
+        w[1] = ((sf_u32)(sf_u8)kind << 24) | 0x00ff0000u;
+#else
+        w[0] = host | (guest << 16);
+        w[1] = (sf_u8)kind | 0x0000ff00u;
+#endif
+        w[2] = target; w[3] = fallthrough;
+    }
+#else
     memset(m, 0, sizeof *m);
     m->host_off = (sf_u16)emit_pos(&t->em);
     m->guest_off = (sf_u16)guest_off;
@@ -944,6 +1284,7 @@ static void begin_meta_kind(tctx *t, int kind, sf_u32 guest_off, sf_u32 target, 
     m->commit_rel = 0xFF;
     m->target = target;
     m->fallthrough = fallthrough;
+#endif
     t->cur = m;
 }
 
@@ -953,10 +1294,34 @@ static int fetch(tctx *t, sf_u32 gpc, sh_insn *d)
 {
     sf_u32 op, i = (gpc - t->blk->guest_pc) / 2;
     if (i < (sf_u32)t->pre_n) { *d = g_pre[i]; return 1; }          /* decoded by the pre-pass */
+#ifdef DBT_NATIVE_FETCH
+#if !defined(__sh__) || __BYTE_ORDER__ != __ORDER_BIG_ENDIAN__
+#error DBT_NATIVE_FETCH requires the native big-endian SH runtime
+#endif
+    /* Native runtime's fetch16 reads this same mapped address. Keep the
+     * alignment rejection and volatile access; MMU exceptions still reach
+     * the runtime's in-progress translation recovery. No read-ahead. */
+    if (gpc & 1) { t->err = DBT_ERR_FETCH; t->fault = gpc; return 0; }
+    op = *(volatile sf_u16 *)gpc;
+    op = ((op >> 8) | (op << 8)) & 0xffffu;
+#else
     if (t->env->fetch16(t->env->ctx, gpc, &op)) { t->err = DBT_ERR_FETCH; t->fault = gpc; return 0; }
+#endif
     sh4_decode(op, d);
     return 1;
 }
+
+#ifdef DBT_DECODE_REF
+static const sh_insn *fetch_ref(tctx *t, sf_u32 gpc)
+{
+    sf_u32 op, i = (gpc - t->blk->guest_pc) / 2;
+    if (i < (sf_u32)t->pre_n) return &g_pre[i];
+    if (t->env->fetch16(t->env->ctx, gpc, &op)) {
+        t->err = DBT_ERR_FETCH; t->fault = gpc; return 0;
+    }
+    return sh4_decode_cached(op);
+}
+#endif
 
 /* Would this instruction use the borrowed register? (stores with a free
  * data field, control-register memory forms, device-aware accesses) */
@@ -1049,19 +1414,36 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
     t.env = env; t.blk = b; t.gpc = guest_pc; t.cur = 0;
     t.err = 0; t.fault = 0; t.slot_x0 = 0; t.slot_avoid = 0;
     t.bx = -1; t.cache_reg = -1; t.cache_size = 0; t.pre_n = 0;
+#ifdef DBT_UNIFORM_STORE
+    t.uniform_mask = 0;
+#endif
+#ifdef DBT_CONST_DEVICE_ADDRESS
+    t.known_mask = 0;
+#endif
     emit_init(&t.em, buf, cap);
     b->guest_pc = guest_pc; b->host_base = host_base; b->end_reason = END_FULL; b->ic_off = -1;
     prepass(&t, guest_pc, max);
     b->borrow = t.bx;
 
     while (!ended && n < max && !t.err) {
-        sh_insn d, s;
+        sh_insn decoded, s;
+        const sh_insn *d;
         /* size budget: code + worst-case tail must stay within literal reach */
+#ifdef DBT_BODY_BUDGET
+        if (emit_pos(&t.em) > DBT_BODY_BUDGET || emit_lits_bytes(&t.em) > 160 || b->nlinks >= DBT_MAX_LINKS - 1) break;
+#else
         if (emit_pos(&t.em) > 560 || emit_lits_bytes(&t.em) > 160 || b->nlinks >= DBT_MAX_LINKS - 1) break;
+#endif
         t.gpc = gpc;
-        if (!fetch(&t, gpc, &d)) break;
+#ifdef DBT_DECODE_REF
+        d = fetch_ref(&t, gpc);
+        if (!d) break;
+#else
+        if (!fetch(&t, gpc, &decoded)) break;
+        d = &decoded;
+#endif
 #ifdef DBT_LINEAR_META
-        if (n > 0 && d.kind == K_PASS) {
+        if (n > 0 && d->kind == K_PASS) {
             dbt_imeta *prev = b->nmeta ? &b->meta[b->nmeta - 1] : 0;
             if (prev && prev->kind == META_LINEAR &&
                 prev->guest_off + emit_pos(&t.em) - prev->host_off == gpc - guest_pc)
@@ -1073,31 +1455,47 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
         if (n == 0 && env->exec_ring) trace_prologue(&t);
         if (n == 0 && t.bx >= 0) spill(&t, t.bx, SLOT_A0);        /* park the borrowed register */
         n++;
-        if (d.kind == K_BRANCH) {
+        if (d->kind == K_BRANCH) {
             const sh_insn *slot = 0;
-            if (d.has_slot) {
+            if (d->has_slot) {
+#ifdef DBT_DECODE_REF
+                /* Decoding the slot can evict the branch's cache entry. */
+                decoded = *d; d = &decoded;
+#endif
                 if (!fetch(&t, gpc + 2, &s)) break;
                 if (!sh4_slot_legal(&s)) { /* let hardware raise slot-illegal: pass both through */
-                    emit16(&t.em, d.op); emit16(&t.em, s.op);
+                    emit16(&t.em, d->op); emit16(&t.em, s.op);
                     gpc += 4; b->end_reason = END_ILLEGAL; ended = 1; break;
                 }
                 slot = &s;
             }
-            tr_branch(&t, &d, slot);
-            gpc += d.has_slot ? 4 : 2;
-            if (d.br != BR_BT && d.br != BR_BF && d.br != BR_BTS && d.br != BR_BFS) { ended = 1; b->end_reason = END_BRANCH; }
+#ifdef DBT_CONST_DEVICE_ADDRESS
+            t.known_mask = 0;
+#endif
+#ifdef DBT_UNIFORM_STORE
+            t.uniform_mask = 0;
+#endif
+            tr_branch(&t, d, slot);
+#ifdef DBT_UNIFORM_STORE
+            t.uniform_mask = 0;
+#endif
+#ifdef DBT_CONST_DEVICE_ADDRESS
+            t.known_mask = 0;
+#endif
+            gpc += d->has_slot ? 4 : 2;
+            if (d->br != BR_BT && d->br != BR_BF && d->br != BR_BTS && d->br != BR_BFS) { ended = 1; b->end_reason = END_BRANCH; }
 #ifdef DBT_BASIC_BLOCKS
-            /* Both successors are independently cached. Do not duplicate a
+            /* Both successors are independently cached-> Do not duplicate a
              * fall-through trace whenever another branch enters its middle. */
             if (!ended) break;
 #endif
             continue;
         }
-        tr_insn(&t, &d, 0);
+        tr_insn(&t, d, 0);
         gpc += 2;
-        if (d.kind == K_TRAP && (d.op & 0xFF00) == 0xC300) { ended = 1; b->end_reason = END_TRAP; }
-        else if (d.kind == K_PRIV && d.ctrl == CR_SR && !d.is_store) { ended = 1; b->end_reason = END_PRIV; }
-        else if (d.kind == K_ILLEGAL) { ended = 1; b->end_reason = END_ILLEGAL; }
+        if (d->kind == K_TRAP && (d->op & 0xFF00) == 0xC300) { ended = 1; b->end_reason = END_TRAP; }
+        else if (d->kind == K_PRIV && d->ctrl == CR_SR && !d->is_store) { ended = 1; b->end_reason = END_PRIV; }
+        else if (d->kind == K_ILLEGAL) { ended = 1; b->end_reason = END_ILLEGAL; }
     }
 
     if (t.err == DBT_ERR_FETCH || t.err == DBT_ERR_READ) {
@@ -1141,6 +1539,9 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
         emit16(&t.em, op_sts_slot(SLOT_Y0, rS));
     }
     emit_flush_lits(&t.em);
+    /* The emitter rejects failed literal sites; reject failed jump slots
+     * before inspecting them. No further instructions are emitted below. */
+    if (t.em.overflow) return DBT_ERR_OVERFLOW;
     {
         int g_off = emit_lit_offset(&t.em, TAG_IC_G), a_off = emit_lit_offset(&t.em, TAG_IC_A);
         if (g_off >= 0 && a_off >= 0) {
@@ -1162,7 +1563,6 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
         b->links[k].skip_w = b->links[k].cond ? t.em.buf[b->links[k].jump_off / 2 - 1] : 0;
     }
     b->host_len = emit_pos(&t.em);
-    if (t.em.overflow) return DBT_ERR_OVERFLOW;
     return DBT_OK;
 }
 
@@ -1234,7 +1634,22 @@ int dbt_block_pending_spills(const dbt_block *b, int idx, sf_u32 host_off, dbt_s
 {
     int i, n = 0;
     (void)idx;
-    for (i = b->nspills - 1; i >= 0 && n < max; i--) {       /* latest first, outermost last */
+#ifdef DBT_SPILL_START_SEARCH
+    /* Spills are appended in emission order. Exclude saves that have not
+     * executed, but retain the reverse order of nested active saves. */
+    {
+        int lo = 0, hi = b->nspills;
+        while (lo < hi) {
+            int mid = (lo + hi) / 2;
+            if (b->spills[mid].start < host_off) lo = mid + 1;
+            else hi = mid;
+        }
+        i = lo - 1;
+    }
+#else
+    i = b->nspills - 1;
+#endif
+    for (; i >= 0 && n < max; i--) {       /* latest first, outermost last */
         const dbt_spill *s = &b->spills[i];
         if (s->start < host_off && host_off <= s->end)
             out[n++] = *s;
@@ -1245,6 +1660,13 @@ int dbt_block_pending_spills(const dbt_block *b, int idx, sf_u32 host_off, dbt_s
 int dbt_block_entry(const dbt_block *b, sf_u32 guest_pc)
 {
     unsigned i;
+#if defined(DBT_CONST_DEVICE_ADDRESS) || defined(DBT_UNIFORM_STORE)
+    if (b->const_specialized && guest_pc < b->guest_pc + 2u * b->const_specialized
+#ifdef DBT_UNIFORM_ENTRY_BOUNDS
+        && guest_pc > b->guest_pc + 2u * b->uniform_entry_start
+#endif
+       ) return -1;
+#endif
     if (b->borrow >= 0 || guest_pc <= b->guest_pc ||
         guest_pc >= b->guest_pc + b->guest_len || (guest_pc & 1)) return -1;
     for (i = 0; i < b->nmeta; ++i) {

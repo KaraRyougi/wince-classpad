@@ -265,10 +265,13 @@ void ClasspadGPE::Dirty(int top, int bottom)
     if (bottom > m_nScreenHeightSave) bottom = m_nScreenHeightSave;
     if (top >= bottom) return;
     EnterCriticalSection(&m_cs);
+    // One wakeup per pending batch. Additional drawing widens the range
+    // already owned by the pending wakeup (or the active push thread).
+    BOOL notify = m_dirtyTop >= m_dirtyBottom;
     if (top < m_dirtyTop) m_dirtyTop = top;
     if (bottom > m_dirtyBottom) m_dirtyBottom = bottom;
     LeaveCriticalSection(&m_cs);
-    SetEvent(m_hEvent);
+    if (notify) SetEvent(m_hEvent);
 }
 
 SCODE ClasspadGPE::Line(GPELineParms *pParms, EGPEPhase phase)

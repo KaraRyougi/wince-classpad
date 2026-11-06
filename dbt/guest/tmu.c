@@ -20,6 +20,17 @@
 #define PERIOD   5000u                  /* TMU ticks between interrupts */
 
 extern char guest_vectors[];
+extern char loop_constaddr_end[];
+unsigned loop_constaddr(unsigned n);
+extern char loop_constp4_end[];
+void loop_constp4(unsigned n);
+void loop_uniform_store(unsigned n, volatile unsigned *p);
+unsigned loop_r0_device(unsigned n, volatile unsigned *p);
+extern char loop_r0_device_end[];
+unsigned loop_device_read_slots(unsigned n, volatile unsigned *p);
+extern char loop_device_read_slots_end[];
+unsigned loop_r0_operand(unsigned n, volatile unsigned *p);
+extern char loop_r0_operand_end[];
 void trap_probe(volatile unsigned *out);
 unsigned loop_tcarry(unsigned, volatile unsigned *);
 unsigned loop_trapa(unsigned, volatile unsigned *), loop_alu(unsigned, volatile unsigned *), loop_bfs(unsigned, volatile unsigned *), loop_tslot(unsigned, volatile unsigned *),
@@ -27,7 +38,11 @@ unsigned loop_trapa(unsigned, volatile unsigned *), loop_alu(unsigned, volatile 
          loop_st(unsigned, volatile unsigned *), loop_stpre(unsigned, volatile unsigned *), loop_r0idx(unsigned, volatile unsigned *),
          loop_r0disp(unsigned, volatile unsigned *), loop_rmw(unsigned, volatile unsigned *), loop_pcrel(unsigned, volatile unsigned *),
          loop_jsr(unsigned, volatile unsigned *), loop_jsrslot(unsigned, volatile unsigned *), loop_pushpop(unsigned, volatile unsigned *),
-         loop_ldcsr(unsigned, volatile unsigned *), loop_jsrtgt(unsigned, volatile unsigned *);
+         loop_ldcsr_md(unsigned, volatile unsigned *), loop_ldcsr(unsigned, volatile unsigned *), loop_jsrtgt(unsigned, volatile unsigned *);
+extern unsigned loop_same_asid_pteh(unsigned, unsigned);
+extern unsigned loop_fast_ldtlb(unsigned);
+extern void ldtlb_change_asid(unsigned);
+extern char loop_same_asid_pteh_end[];
 static int fails;
 volatile unsigned ticks, last_intevt, bad_intevt, fatal_vec;
 volatile unsigned irq_regs[18];                 /* r0-r15, spc, ssr of the interrupted code (tmu_vectors.S) */
@@ -152,6 +167,136 @@ void guest_main(void)
         check("r0-r14 and T survive trapa -> handler -> rte", bad == 0);
     }
 
+    if (hc_getstat(402)) {
+        unsigned specialized;
+        irq_disable();
+        hc_devrange((unsigned)loop_constaddr, (unsigned)loop_constaddr_end);
+        specialized = hc_getstat(403);
+        scratch[0] = 0;
+        expect = loop_constaddr(60000);
+        check("constant-address baseline", expect == 60000 && scratch[0] == 60000);
+        scratch[0] = 0;
+        before = ticks;
+        irq_enable();
+        got = loop_constaddr(60000);
+        irq_disable();
+        check("constant-address block survives interrupts", got == expect && scratch[0] == expect && ticks > before + 3);
+        check("constant-address specialization actually executed", hc_getstat(403) > specialized);
+        hc_devrange(0, 0);
+    }
+
+    if (hc_getstat(404) || hc_getstat(405)) {
+        unsigned specialized;
+        irq_disable();
+        hc_devrange((unsigned)loop_constp4, (unsigned)loop_constp4_end);
+        specialized = hc_getstat(403);
+        before = ticks;
+        irq_enable();
+        loop_constp4(60000);
+        irq_disable();
+        check("constant P4 store survives interrupts", mmio_r32(0xFF00000Cu) == 1 && ticks > before + 3);
+        if (hc_getstat(404)) check("constant P4 store specialization exercised", hc_getstat(403) > specialized);
+        hc_devrange(0, 0);
+    }
+
+    if (hc_getstat(410)) {
+        unsigned specialized = hc_getstat(411);
+        scratch[0] = 0x12345678; scratch[1] = 0x12345678;
+        before = ticks;
+        irq_enable();
+        loop_uniform_store(60000, scratch);
+        irq_disable();
+        check("uniform stores survive timer interrupts", scratch[0] == 0 && scratch[1] == 0xffffffffu && ticks > before+3);
+        check("uniform store specialization executed", hc_getstat(411) > specialized);
+    }
+
+    if (hc_getstat(412)) {
+        unsigned core_before;
+        expect = loop_alu(60000, scratch);
+        hc_devrange((unsigned)loop_alu, (unsigned)loop_trapa);
+        core_before = hc_getstat(413); before = ticks;
+        irq_enable();
+        got = loop_alu(60000, scratch);
+        irq_disable();
+        check("core stream code survives interrupts", got == expect && ticks > before+3);
+        check("core stream actually used", hc_getstat(413) > core_before);
+        hc_devrange(0,0);
+    }
+
+    if (hc_getstat(416)) {
+        unsigned (*fn)(unsigned, volatile unsigned *) = hc_getstat(417) ? loop_r0_operand : loop_r0_device;
+        hc_devrange((unsigned)fn, hc_getstat(417) ? (unsigned)loop_r0_operand_end : (unsigned)loop_r0_device_end);
+        scratch[0] = 0; before = ticks;
+        irq_enable();
+        got = fn(60000,scratch);
+        irq_disable();
+        check("R0 classifier survives RAM interrupts", got == 85 && scratch[0] == 60000 && ticks > before+3);
+        mmio_w32(0xFF00000Cu,0); before = ticks;
+        irq_enable();
+        got = fn(10000,(volatile unsigned *)0xFF00000Cu);
+        irq_disable();
+        check("R0 classifier survives P4 interrupts", got == 85 && mmio_r32(0xFF00000Cu) == 10000 && ticks > before+3);
+        hc_devrange((unsigned)loop_device_read_slots, (unsigned)loop_device_read_slots_end);
+        scratch[0] = 0x12345678u; before = ticks;
+        irq_enable();
+        got = loop_device_read_slots(10000, scratch);
+        irq_disable();
+        expect = (10000u * 0x12345678u) ^ 0x12345678u ^ ((unsigned)scratch + 4);
+        check("RAM postincrement and conditional-slot loads survive IRQs", got == expect && ticks > before+3);
+        mmio_w32(0xFF00000Cu,0x12345678u); before = ticks;
+        irq_enable();
+        got = loop_device_read_slots(10000,(volatile unsigned *)0xFF00000Cu);
+        irq_disable();
+        expect = (10000u * 0x12345678u) ^ 0x12345678u ^ 0xFF000010u;
+        check("P4 postincrement and conditional-slot loads survive IRQs", got == expect && ticks > before+3);
+        hc_devrange(0,0);
+    }
+
+    if (hc_getstat(418)) {
+        unsigned helpers, value = mmio_r32(0xFF000000u);
+        hc_devrange((unsigned)loop_same_asid_pteh, (unsigned)loop_same_asid_pteh_end);
+        helpers = hc_getstat(6); before = ticks;
+        irq_enable();
+        got = loop_same_asid_pteh(20000, value);
+        irq_disable();
+        check("same-ASID PTEH native stores survive IRQs and preserve T",
+              got == 20000 && ticks > before + 3 && mmio_r32(0xFF000000u) == value);
+        check("same-ASID PTEH IRQ loop actually bypasses C", hc_getstat(6) == helpers);
+        hc_devrange(0, 0);
+    }
+
+    if (hc_getstat(419)) {
+        unsigned old_h = mmio_r32(0xFF000000u), old_l = mmio_r32(0xFF000004u);
+        unsigned fast, hooks, skips;
+        mmio_w32(0xFF000000u, 0x12000000u | (old_h & 255));
+        mmio_w32(0xFF000004u, 0x0c30017eu); /* 4 KiB, no guest code in this VA */
+        fast = hc_getstat(420); hooks = hc_getstat(28); skips = hc_getstat(14); before = ticks;
+        irq_enable();
+        got = loop_fast_ldtlb(20000);
+        irq_disable();
+        check("fast LDTLB preserves r0-r2 and both T values across IRQs", got == 20321 && ticks > before + 3);
+        check("all 40000 no-code LDTLB operations take native path", hc_getstat(420) - fast == 40000);
+        check("fast LDTLB retains hook and skip counters", hc_getstat(28) - hooks == 40000 && hc_getstat(14) - skips == 40000);
+        mmio_w32(0xFF000004u, 0x0c30016eu); /* 1 KiB must retain C handling */
+        fast = hc_getstat(420);
+        got = loop_fast_ldtlb(1);
+        check("1 KiB LDTLB stays on C path with exact registers/T", got == 322 && hc_getstat(420) == fast);
+        mmio_w32(0xFF000004u, 0x0c3001eeu); /* 64 KiB */
+        fast = hc_getstat(420); got = loop_fast_ldtlb(1);
+        check("64 KiB LDTLB stays on C path", got == 322 && hc_getstat(420) == fast);
+        mmio_w32(0xFF000004u, 0x0c3001feu); /* 1 MiB */
+        got = loop_fast_ldtlb(1);
+        check("1 MiB LDTLB stays on C path", got == 322 && hc_getstat(420) == fast);
+        mmio_w32(0xFF000004u, 0x0c30017eu);
+        fast = hc_getstat(420); hooks = hc_getstat(3);
+        /* No hypercall/lookup between the raw PTEH write and LDTLB: those
+         * entries can themselves notice ASID changes and spoil the guard test. */
+        ldtlb_change_asid(mm_bswap32(0x12000000u | ((old_h + 1) & 255)));
+        check("changed ASID LDTLB retains C switch bookkeeping", hc_getstat(420) == fast && hc_getstat(3) == hooks + 1);
+        mmio_w32(0xFF000000u, old_h); mmio_w32(0xFF000004u, old_l);
+        __asm__ volatile ("ldtlb" ::: "memory"); /* synchronize runtime ASID */
+    }
+
     /* exception + guest handler + rte at a fixed point, no interrupts: must equal the plain loop */
     irq_disable();
     expect = loop_alu(3000, scratch);
@@ -195,6 +340,14 @@ void guest_main(void)
     check("ldc sr helper under interrupts", got == expect && ticks > before + 50);
     if (hc_getstat(63) & 1)
         check("same-bank SR fast path actually exercised", hc_getstat(31) >= 400000);
+
+    irq_disable();
+    expect = loop_ldcsr_md(20000, scratch);
+    irq_enable();
+    before = ticks;
+    got = loop_ldcsr_md(20000, scratch);
+    check("SR MD IRQ recovery and masked memory-load tail",
+          expect == 0 && got == 0 && ticks > before + 1);
 
     /* a jsr whose delay-slot store uses the target register as its swap
      * scratch: an interrupt on the scratch's restore must resume at the

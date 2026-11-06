@@ -9,6 +9,19 @@
  * undo partial register saves when an exception lands inside a stub.
  */
 #include "ctx_offsets.h"
+#ifndef DBT_HASH_ENTRIES
+#define DBT_HASH_ENTRIES 8192
+#endif
+#if defined(DBT_HASH_ASID_MIX) && !defined(DBT_HASH_ASID_TAG)
+#error DBT_HASH_ASID_MIX requires tagged hash entries
+#endif
+#if defined(DBT_HASH_TWO_WAY) && (!defined(DBT_HASH_ASID_TAG) || defined(DBT_HASH_ASID_MIX))
+#error DBT_HASH_TWO_WAY requires tagged entries without ASID mixing
+#endif
+
+#if defined(DBT_FAST_LDC_SR_MD) && !defined(DBT_FAST_LDC_SR)
+#error DBT_FAST_LDC_SR_MD requires DBT_FAST_LDC_SR
+#endif
 
 #define SLOT_A0 7
 #define SLOT_X0 8
@@ -37,10 +50,21 @@
         .align 2
 .Lvectors\sfx:      .long _dbt_vectors
 .Lsr_init\sfx:      .long 0x400010F0        /* MD | DSP | IMASK=15 */
-.Lhmask\sfx:        .long 8191              /* HSIZE - 1, must match rt.c */
+#ifdef DBT_HASH_TWO_WAY
+.Lhmask\sfx:        .long (DBT_HASH_ENTRIES - 2) /* even index, two adjacent ways */
+#else
+.Lhmask\sfx:        .long (DBT_HASH_ENTRIES - 1) /* HSIZE - 1, must match rt.c */
+#endif
 .Lhash\sfx:         .long _dbt_hash
+#ifdef DBT_HASH_ASID_TAG
+.Lhash_asid\sfx:    .long _dbt_current_asid
+#endif
 .Llookup_sr\sfx:    .long _dbt_lookup_sr
 .Limask\sfx:        .long 0x000000F0
+#ifdef DBT_ASM_FETCH_FAULT
+.Lfetch_limit\sfx: .long 0xE0000000
+.Lfetch_event\sfx: .long 0x000100E0
+#endif
 .Lctx_rt\sfx:       .long _dbt_ctx_rt
 .Lctx_rt_rend\sfx:  .long _dbt_ctx_rt + CTX_REND
 .Lctx_exc\sfx:      .long _dbt_ctx_exc
@@ -171,15 +195,73 @@ _dbt_\name:
         rotl    r2
 #endif
         xor     r2, r1                 /* same index as hidx() in rt.c */
+#ifdef DBT_HASH_ASID_MIX
+        cmp/pz  r0
+        bf      5f                     /* kernel addresses keep PC-only index */
+        mov.l   .Lhash_asidA, r2
+        mov.l   @r2, r2
+        extu.b  r2, r2
+        shll2   r2
+        shll2   r2
+        shll    r2                     /* (ASID & 255) << 5 */
+        xor     r2, r1
+5:
+#endif
         mov.l   .LhmaskA, r2
         and     r2, r1
+#ifdef DBT_HASH_ASID_TAG
+        mov     r1, r2
+        shll    r1
+        add     r2, r1
+        shll2   r1                     /* index * 12 */
+#else
         shll2   r1
         shll    r1                     /* index * 8 */
+#endif
         mov.l   .LhashA, r2
         add     r2, r1                 /* r1 = &hash[i] */
+#ifdef DBT_HASH_TWO_WAY
+        mov.l   @r1, r2
+        cmp/eq  r0, r2
+        bf      .Lsecond_way\@
+        cmp/pz  r0
+        bf      .Lways_hit\@
+        mov.l   @(8, r1), r2
+        mov.l   .Lhash_asidA, r0
+        mov.l   @r0, r0
+        cmp/eq  r0, r2
+        STSX    SLOT_X0, 0
+        bt      .Lways_hit\@
+.Lsecond_way\@:
+        add     #12, r1
         mov.l   @r1, r2
         cmp/eq  r0, r2
         bf      2f
+        cmp/pz  r0
+        bf      .Lways_hit\@
+        mov.l   @(8, r1), r2
+        mov.l   .Lhash_asidA, r0
+        mov.l   @r0, r0
+        cmp/eq  r0, r2
+        bf      2f
+        STSX    SLOT_X0, 0
+.Lways_hit\@:
+#else
+        mov.l   @r1, r2
+        cmp/eq  r0, r2
+        bf      2f
+#ifdef DBT_HASH_ASID_TAG
+        cmp/pz  r0
+        bf      4f                     /* direct kernel keys are global */
+        mov.l   @(8, r1), r2
+        mov.l   .Lhash_asidA, r0
+        mov.l   @r0, r0
+        cmp/eq  r0, r2
+        bf      2f
+        STSX    SLOT_X0, 0             /* restore guest PC for IC handling */
+4:
+#endif
+#endif /* DBT_HASH_TWO_WAY */
         mov.l   @(4, r1), r1           /* host address */
         .if \link
         STSX    SLOT_X1, 2
@@ -219,6 +301,21 @@ _dbt_\name:
         ldc     r2, sr                 /* interrupts masked from here on */
         SAVE_CTX_RT A
         STSX    SLOT_X0, 4             /* arg0 = gpc */
+#ifdef DBT_ASM_FETCH_FAULT
+        /* Context is complete and interrupts masked. Faulting API targets
+         * never need cache lookup or translation. The internal event flag
+         * asks C to account/synchronize before normal guest delivery. */
+        mov.l   .Lfetch_limitA, r0
+        cmp/hs  r0, r4
+        bt      8f
+        mov     r4, r0
+        tst     #1, r0
+        bt      9f
+8:      mov.l   .Lstack_rtA, r15
+        mov.l   .Lfetch_eventA, r5
+        trapa   #0xF8
+9:
+#endif
         .if \link | \ic
         STSX    SLOT_X1, 5             /* arg1 = link literal / inline cache address */
         .else
@@ -378,7 +475,7 @@ _dbt_rte_tramp_end:
 
 /* ------------------------------------------------------------------ */
 /* Helper stubs. In: X0 = argument (opcode / new SR), X1 = return address. */
-        .macro HELPER name, cfunc, s1, s2, s3, masked, rb=0
+        .macro HELPER name, cfunc, s1, s2, s3, masked, rb=0, tlb=0
         .global _dbt_\name
 _dbt_\name:
         LDSX    0, SLOT_Y0
@@ -389,9 +486,82 @@ _dbt_\name:
         or      r1, r2
         ldc     r2, sr
 \masked:
+#ifdef DBT_FAST_LDTLB
+        .if \tlb
+        /* SR stays in r1 until the opcode/ASID/page-size guards pass. */
+        STSX    SLOT_X0, 0
+        cmp/eq  #0x38, r0
+        bf      8f
+        mov.l   .Ltlb_ptehB, r0
+        mov.l   @r0, r0
+        extu.b  r0, r0
+        mov.l   .Ltlb_asidB, r2
+        mov.l   @r2, r2
+        cmp/eq  r2, r0
+        bf      8f
+        mov.l   .Ltlb_ptelB, r0
+        mov.l   @r0, r0
+        and     #0x90, r0
+        cmp/eq  #0x10, r0              /* 4 KiB only */
+        bf      8f
+        LDSX    1, SLOT_X0             /* opcode known: reuse X0 for SR */
+        mov.l   .Ltlb_ptehB, r0
+        mov.l   @r0, r0
+        shlr8   r0
+        shlr2   r0                    /* p = PTEH >> 10 */
+        mov     r0, r2
+        shlr8   r2
+        shlr2   r2
+        shlr2   r2
+        xor     r2, r0
+        mov.l   .Ltlb_hashmaskB, r2
+        and     r2, r0                /* aligned four-bit group */
+        mov     r0, r2
+        mov     #31, r1
+        and     r1, r2                /* nibble shift in bitmap word */
+        mov     #-5, r1
+        shld    r1, r0
+        shll2   r0
+        mov.l   .Ltlb_pagesB, r1
+        mov.l   @(r0,r1), r0
+        mov     #15, r1
+        shld    r2, r1
+        tst     r1, r0
+        bf      7f                    /* maybe code: restore exact C input */
+        ldtlb
+        mov.l   .Ltlb_countB, r2
+        mov.l   @r2, r0
+        add     #1, r0
+        mov.l   r0, @r2
+        mov.l   .Ltlb_hooksB, r2
+        mov.l   @r2, r0
+        add     #1, r0
+        mov.l   r0, @r2
+        mov.l   .Ltlb_skipsB, r2
+        mov.l   @r2, r0
+        add     #1, r0
+        mov.l   r0, @r2
+        STSX    SLOT_X0, 0
+        STSX    SLOT_X1, 1
+        ldc     r0, sr
+        .global _dbt_tlbfast_a, _dbt_tlbfast_b, _dbt_tlbfast_c, _dbt_tlbfast_end
+_dbt_tlbfast_a:
+        STSX    SLOT_Y0, 0
+_dbt_tlbfast_b:
+        STSX    SLOT_A0, 2
+_dbt_tlbfast_c:
+        jmp     @r1
+        STSX    SLOT_Y1, 1
+_dbt_tlbfast_end:
+7:      STSX    SLOT_X0, 1
+        mov     #0x38, r0
+        LDSX    0, SLOT_X0
+8:
+        .endif
+#endif
 #ifdef DBT_FAST_LDC_SR
         .if \rb
-        /* Common case: same register bank, ASID and guest privilege mode.
+        /* Common case: same register bank and ASID; by default also same MD.
          * Only r0-r2 have been borrowed; keep the original SR in r1 until
          * all guards pass, so the normal helper remains an exact fallback. */
         STSX    SLOT_X0, 0
@@ -407,6 +577,15 @@ _dbt_\name:
         extu.b  r2, r2
         cmp/eq  r0, r2
         bf      9f
+#ifdef DBT_FAST_LDC_SR_MD
+        /* IRQs are masked and RB/ASID are unchanged. Match the C helper's
+         * shadow-mode update before installing the physical SR. */
+        STSX    SLOT_X0, 0
+        mov.l   .Lfast_mdmaskB, r2
+        and     r2, r0
+        mov.l   .Lfast_mdB, r2
+        mov.l   r0, @r2
+#else
         mov.l   .Lfast_mdB, r2
         mov.l   @r2, r2
         STSX    SLOT_X0, 0
@@ -414,6 +593,7 @@ _dbt_\name:
         mov.l   .Lfast_mdmaskB, r0
         tst     r0, r2
         bf      9f
+#endif
         mov.l   .Lfast_countB, r2
         mov.l   @r2, r0
         add     #1, r0
@@ -457,7 +637,7 @@ _dbt_srfast_end:
         .endm
 
         HELPER  fpu_stub, .Lfpu_cB, _dbt_hfpu_s1, _dbt_hfpu_s2, _dbt_hfpu_s3, _dbt_hfpu_masked
-        HELPER  fallback_stub, .Lfallback_cB, _dbt_hfb_s1, _dbt_hfb_s2, _dbt_hfb_s3, _dbt_hfb_masked
+        HELPER  fallback_stub, .Lfallback_cB, _dbt_hfb_s1, _dbt_hfb_s2, _dbt_hfb_s3, _dbt_hfb_masked, 0, 1
         HELPER  ldc_sr_stub, .Lldc_sr_cB, _dbt_hsr_s1, _dbt_hsr_s2, _dbt_hsr_s3, _dbt_hsr_masked, 1
         .global _dbt_hfpu_s1, _dbt_hfpu_s2, _dbt_hfpu_s3, _dbt_hfpu_masked
         .global _dbt_hfb_s1, _dbt_hfb_s2, _dbt_hfb_s3, _dbt_hfb_masked
@@ -471,6 +651,17 @@ _dbt_srfast_end:
 .Lfast_mdmaskB:  .long 0x40000000
 .Lfast_forceB:   .long 0x40001000
 .Lfast_countB:   .long _dbt_fast_ldc_sr_calls
+#endif
+#ifdef DBT_FAST_LDTLB
+        .align 2
+.Ltlb_ptehB:     .long 0xff000000
+.Ltlb_ptelB:     .long 0xff000004
+.Ltlb_asidB:     .long _dbt_current_asid
+.Ltlb_pagesB:    .long _dbt_user_pages
+.Ltlb_hashmaskB: .long 0x1ffc
+.Ltlb_countB:    .long _dbt_fast_ldtlb_calls
+.Ltlb_hooksB:    .long _dbt_stat + 96
+.Ltlb_skipsB:    .long _dbt_stat + 104
 #endif
         POOL    B
 

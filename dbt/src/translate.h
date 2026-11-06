@@ -44,17 +44,27 @@ typedef struct {
      * (16-bit wrap), exec_ring = the ring. 0 = off. */
     sf_u32 exec_ctl, exec_ring;
     /* 1: never borrow a register (see dbt_block.borrow); for tests */
+#ifdef DBT_SAME_ASID_PTEH_STORE
+    sf_u32 current_asid_addr; /* native runtime word; never a guest address */
+#endif
     int no_borrow;
 } dbt_env;
 
 enum { DBT_SPILL_T = 16 }; /* saved SR.T, not a GPR index */
 
 typedef struct {
-    sf_u8  insn;             /* meta index the spill belongs to */
+#ifndef DBT_COMPACT_SPILL6
+    sf_u8  insn;             /* legacy diagnostic field; not used for recovery */
+#endif
     sf_u8  gpr, slot;        /* guest GPR or DBT_SPILL_T saved in DSP slot */
+#ifndef DBT_COMPACT_SPILL6
     sf_u8  pad;
+#endif
     sf_u16 start, end;       /* host byte offsets of the lds (start) and sts (end) */
 } dbt_spill;
+#ifdef DBT_COMPACT_SPILL6
+typedef char check_compact_spill[(sizeof(dbt_spill) == 6) ? 1 : -1];
+#endif
 
 /* How to compute the guest resume PC for an exception inside this range. */
 enum { META_INSN = 0,        /* guest_pc + guest_off (restart the instruction) */
@@ -110,13 +120,37 @@ typedef struct {
     dbt_imeta *meta;         /* nmeta + 1 entries, including the sentinel */
     dbt_spill *spills;
     dbt_link *links;
+#ifdef DBT_COMPACT_HEADER32
+#if defined(DBT_CONST_DEVICE_ADDRESS) || defined(DBT_UNIFORM_STORE)
+#error DBT_COMPACT_HEADER32 requires no entry-dependent specialization
+#endif
+    sf_u16 code_len, host_len; /* host_len remains at target offset 22 */
+    short ic_off;
+    sf_u8 guest_len, nmeta;
+    sf_u8 packed_meta : 1;
+    sf_u8 end_reason : 3;
+    sf_u8 reserved_flags : 4;
+    sf_u8 nspills, nlinks;
+#else
     sf_u16 guest_len, host_len, code_len;
     short ic_off;           /* inline cache pair offset, or -1 */
     sf_u8 nmeta, packed_meta, nspills, nlinks, end_reason;
+#endif
     /* A GPR untouched by the block, parked in A0 and restored at exits;
      * -1 means none. Used for byte-swapped stores and their cached value. */
     signed char borrow;
+#if defined(DBT_CONST_DEVICE_ADDRESS) || defined(DBT_UNIFORM_STORE)
+    sf_u8 const_specialized; /* halfword offset after last entry-dependent access */
+#endif
+#ifdef DBT_UNIFORM_ENTRY_BOUNDS
+    sf_u8 uniform_entry_start; /* earliest definition required by native stores */
+#endif
 } dbt_block;
+#ifdef DBT_COMPACT_HEADER32
+typedef char check_compact_guest_len[((DBT_MAX_INSNS * 2 + 2) <= 255) ? 1 : -1];
+typedef char check_compact_target_header[(sizeof(void *) != 4 || sizeof(dbt_block) == 32) ? 1 : -1];
+typedef char check_compact_host_len_offset[(sizeof(void *) != 4 || __builtin_offsetof(dbt_block, host_len) == 22) ? 1 : -1];
+#endif
 typedef char check_meta_count[(DBT_MAX_META <= 255) ? 1 : -1];
 typedef char check_spill_count[(DBT_MAX_BLOCK_SPILLS <= 255) ? 1 : -1];
 typedef char check_host_offset[(DBT_BLOCK_WORDS * 2 <= 32767) ? 1 : -1];

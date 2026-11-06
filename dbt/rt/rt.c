@@ -13,7 +13,19 @@ typedef __SIZE_TYPE__ dbt_size_t;
 void *memcpy(void *d, const void *s, dbt_size_t n);
 void *memset(void *d, int c, dbt_size_t n);
 
-#define HSIZE        8192                 /* hash entries, power of two */
+#ifndef DBT_HASH_ENTRIES
+#define DBT_HASH_ENTRIES 8192
+#endif
+#if DBT_HASH_ENTRIES < 256 || DBT_HASH_ENTRIES > 65536 || (DBT_HASH_ENTRIES & (DBT_HASH_ENTRIES - 1))
+#error DBT_HASH_ENTRIES must be a power of two between 256 and 65536
+#endif
+#define HSIZE DBT_HASH_ENTRIES
+#if defined(DBT_HASH_TWO_WAY) && (!defined(DBT_HASH_ASID_TAG) || defined(DBT_HASH_ASID_MIX))
+#error DBT_HASH_TWO_WAY requires tagged entries without ASID mixing
+#endif
+#if defined(DBT_HASH_ASID_MIX) && !defined(DBT_HASH_ASID_TAG)
+#error DBT_HASH_ASID_MIX requires tagged hash entries
+#endif
 #ifndef MAX_BLOCKS
 #define MAX_BLOCKS   14400                 /* compact block headers + a metadata arena; see docs/04 */
 #endif
@@ -74,17 +86,52 @@ volatile sf_u32 dbt_shadow_md = SR_MD;
 dbt_stats dbt_stat;
 volatile sf_u32 dbt_lookup_sr; /* saved before lookup hash/IC tests alter T */
 
-typedef struct { sf_u32 gpc; sf_u32 host; } hent;
+typedef struct {
+    sf_u32 gpc, host;
+#ifdef DBT_HASH_ASID_TAG
+    sf_u32 asid; /* user keys are valid only in their publishing address space */
+#endif
+} hent;
+#ifdef DBT_HASH_ASID_TAG
+typedef char check_tagged_hash_stride[(sizeof(hent) == 12) ? 1 : -1];
+#endif
 
-hent dbt_hash[HSIZE] __attribute__((aligned(32)));   /* read by stubs.S */
+/* Opt-in reuse of the launcher's first MiB after the no-return handoff.
+ * crt0 switches to the private translator stack before clearing this area.
+ * Do not use this layout in a launcher that expects to return to Casio OS. */
+#ifdef DBT_BOOT_WORKSPACE_TABLES
+#define BOOT_TABLE __attribute__((section(".lowbss")))
+#else
+#define BOOT_TABLE
+#endif
+
+#ifdef DBT_HASH_HIGH_RAM
+/* Optional layout trade: free boot-workspace bytes for more unchanged
+ * 36-byte headers; the hash instead consumes the upper runtime allocation. */
+#define HASH_TABLE_SECTION
+#else
+#define HASH_TABLE_SECTION BOOT_TABLE
+#endif
+hent dbt_hash[HSIZE] HASH_TABLE_SECTION __attribute__((aligned(32)));   /* read by stubs.S */
 #define g_hash dbt_hash
-static dbt_block g_blocks[MAX_BLOCKS];      /* host_base is sorted within each cache bank */
+static dbt_block g_blocks[MAX_BLOCKS] BOOT_TABLE; /* sorted within each cache bank */
 static dbt_block g_scratch;                 /* translation target; copied into g_blocks + arena on success */
 static dbt_imeta g_scratch_meta[DBT_MAX_META];
 static dbt_spill g_scratch_spills[DBT_MAX_BLOCK_SPILLS];
 static dbt_link g_scratch_links[DBT_MAX_LINKS];
 static sf_u8     g_arena[META_ARENA_BYTES] __attribute__((aligned(8)));
 static sf_u32    g_arena_used;
+#ifdef DBT_META_ALIGN4
+#define META_ALIGN_MASK 3u
+typedef char check_meta_alignment[(__alignof__(dbt_imeta) <= 4 &&
+    __alignof__(dbt_spill) <= 4 && __alignof__(dbt_link) <= 4) ? 1 : -1];
+#else
+#define META_ALIGN_MASK 7u
+#endif
+static sf_u32 arena_round(sf_u32 bytes) {
+    return (bytes + META_ALIGN_MASK) & ~META_ALIGN_MASK;
+}
+
 #define SCRATCH_ARENA_NEED (DBT_MAX_META * sizeof(dbt_imeta) + DBT_MAX_BLOCK_SPILLS * sizeof(dbt_spill) + DBT_MAX_LINKS * sizeof(dbt_link) + 16)
 static dbt_rt_config g_cfg;
 #ifndef CACHE_BANKS
@@ -103,6 +150,12 @@ static unsigned g_bank, g_bank_count[CACHE_BANKS], g_allocated, g_bank_evictions
 #if defined(DBT_INTERIOR_CACHE) || defined(DBT_HOST_OWNER_CACHE)
 static sf_u32 g_bank_generation[CACHE_BANKS];
 #endif
+#if defined(DBT_CORE_BANKS) && !defined(DBT_KERNEL_BANKS)
+#error DBT_CORE_BANKS requires DBT_KERNEL_BANKS
+#endif
+#ifdef DBT_CORE_BANKS
+static sf_u32 g_core_translates, g_other_translates, g_core_evictions;
+#endif
 #ifdef DBT_KERNEL_BANKS
 typedef char check_split_banks[(DBT_KERNEL_BANKS > 0 && DBT_KERNEL_BANKS < CACHE_BANKS) ? 1 : -1];
 static unsigned g_stream_bank[2];
@@ -112,6 +165,60 @@ static sf_u32 g_bank_touch[CACHE_BANKS], g_access_clock;
 /* Conservative destinations of patched direct links. Bits remain set until
  * the owner is replaced; false positives only cost a scan. */
 static sf_u16 g_link_banks[MAX_BLOCKS];
+#ifdef DBT_INCOMING_BITMAP
+#define SOURCE_WORDS ((MAX_BLOCKS + 31) / 32)
+/* Conservative source sets: stale bits only add work. Publish before a
+ * block/link becomes reachable; clear source ownership on header reuse. */
+static sf_u32 g_source_links[CACHE_BANKS][SOURCE_WORDS];
+static sf_u32 g_source_ic[SOURCE_WORDS];
+static sf_u32 g_source_scans;
+#ifdef DBT_INCOMING_FAST_SCAN
+/* Nonzero input only. Avoid libgcc's out-of-line bit scan on SH4. */
+static unsigned source_low_bit(sf_u32 value)
+{
+    static const sf_u8 positions[32] = {
+        0,1,28,2,29,14,24,3,30,22,20,15,25,17,4,8,
+        31,27,13,23,21,19,16,7,26,12,18,6,11,5,10,9
+    };
+    return positions[((value & (0u - value)) * 0x077cb531u) >> 27];
+}
+#endif
+typedef struct { unsigned word, base, banks; sf_u32 pending; } source_scan;
+static int source_next(source_scan *scan)
+{
+    for (;;) {
+        if (scan->pending) {
+#ifdef DBT_INCOMING_FAST_SCAN
+            unsigned bit = source_low_bit(scan->pending);
+#else
+            unsigned bit = (unsigned)__builtin_ctz(scan->pending);
+#endif
+            scan->pending &= scan->pending - 1;
+            return (int)(scan->base + bit);
+        }
+        if (scan->word >= SOURCE_WORDS) return -1;
+        {
+            unsigned bank, word = scan->word++;
+            if (!word) ++g_source_scans;
+            sf_u32 candidates = g_source_ic[word];
+#ifdef DBT_INCOMING_FAST_SCAN
+            unsigned banks = scan->banks;
+            while (banks) {
+                bank = source_low_bit(banks);
+                banks &= banks - 1;
+                candidates |= g_source_links[bank][word];
+            }
+#else
+            for (bank = 0; bank < CACHE_BANKS; ++bank)
+                if (scan->banks & (1u << bank)) candidates |= g_source_links[bank][word];
+#endif
+            scan->base = word * 32;
+            scan->pending = candidates;
+        }
+    }
+}
+#endif
+
 static sf_u32 bank_code_bytes(void);
 static unsigned bank_of_code(sf_u32 host)
 {
@@ -157,6 +264,12 @@ static int guest_pc_fetchable(sf_u32 gpc);
 static void deliver_synthetic(sf_u32 gpc, sf_u32 expevt);
 static void sample_init(const dbt_rt_config *cfg);
 static int g_window_kind, g_tail_from;      /* sampling profiler: see sample_tick */
+#ifdef DBT_LCD_DMA_STRIPS
+static sf_u32 g_lcd_dma_strips;
+#endif
+#if defined(DBT_CONST_DEVICE_ADDRESS) || defined(DBT_UNIFORM_STORE)
+static sf_u32 g_const_device_blocks;
+#endif
 static void print_stats(void);
 
 /* ------------------------------------------- address spaces and the TLB */
@@ -176,7 +289,7 @@ static void print_stats(void);
 #define PHYS_UNKNOWN 0xFFFFFFFFu
 #define ASID_ANY     0xFFFFu
 typedef struct { sf_u8 dead, user; sf_u16 asid; sf_u32 phys; } binfo;
-static binfo  g_binfo[MAX_BLOCKS];
+static binfo  g_binfo[MAX_BLOCKS] BOOT_TABLE;
 /* Every block by guest pc, chained through the fast-path hash's index: the
  * direct-mapped g_hash holds one block per slot and loses the others to
  * collisions, and finding those by scanning the block table cost a full
@@ -203,7 +316,17 @@ static int    g_nuser, g_nic; /* g_nic counts ICs filled with user targets this 
  * code. Most ldtlb calls refill DATA, for which a block scan does no work.
  * Never clear individual bits (collisions/dead blocks only cause extra scans).
  * Two pages cover even a block straddling a 1 KiB boundary. */
+#ifdef DBT_FAST_LDTLB
+#if defined(DBT_PROFILE) || defined(DBT_HW_DIAG)
+#error DBT_FAST_LDTLB timing experiment requires native profiling disabled
+#endif
+sf_u32 dbt_user_pages[256], dbt_fast_ldtlb_calls;
+#define g_user_pages dbt_user_pages
+typedef char check_tlb_hooks_offset[(__builtin_offsetof(dbt_stats, tlb_hooks) == 96) ? 1 : -1];
+typedef char check_tlb_skips_offset[(__builtin_offsetof(dbt_stats, tlb_scan_skips) == 104) ? 1 : -1];
+#else
 static sf_u32 g_user_pages[256];
+#endif
 /* Two nodes per block cover first/last 1 KiB pages. Rebuilt on bank reuse.
  * With interior-entry reuse this indexes kernel blocks too; the user-page
  * filter and TLB checks still only mark/consider user code. */
@@ -236,6 +359,17 @@ static int may_have_user_code(sf_u32 vpn, unsigned shift)
     sf_u32 end;
     if (shift > 12) return 1;       /* large pages: retain the original scan */
     end = vpn + (1u << shift);
+#ifdef DBT_PAGE_GROUP_FILTER
+    /* tlb_hook supplies a page-size-aligned VPN. For a 4 KiB page the
+     * four 1 KiB hashes occupy one aligned nibble (XOR only permutes it),
+     * so one bitmap read replaces four hash/probe iterations. */
+    if (end <= vpn) return 0; /* preserve the original wrapping-range result */
+    if (shift == 10 || shift == 12) {
+        unsigned bit = user_page_bit(vpn), bits = 1;
+        if (shift == 12) { bit &= ~3u; bits = 15; }
+        return (g_user_pages[bit >> 5] & (bits << (bit & 31))) != 0;
+    }
+#endif
     for (; vpn < end; vpn += 1024) {
         unsigned bit = user_page_bit(vpn);
         if (g_user_pages[bit >> 5] & (1u << (bit & 31))) return 1;
@@ -341,31 +475,86 @@ static inline sf_u32 hidx(sf_u32 gpc)
 #endif
 }
 
+#ifdef DBT_HASH_ASID_MIX
+static inline sf_u32 fast_hidx(sf_u32 gpc, sf_u32 asid)
+{
+    /* Block-owner chains stay PC-only. Only the direct lookup cache mixes
+     * address spaces, matching the assembly fast path. */
+    return (hidx(gpc) ^ (IS_USER(gpc) ? ((asid & 255u) << 5) : 0)) & (HSIZE - 1);
+}
+#elif defined(DBT_HASH_TWO_WAY)
+#define fast_hidx(gpc, asid) (hidx(gpc) & ~1u)
+#else
+#define fast_hidx(gpc, asid) hidx(gpc)
+#endif
+
 static void hash_insert(sf_u32 gpc, sf_u32 host)
 {
     sf_u32 sr;
-    unsigned slot = hidx(gpc);
+    unsigned slot = fast_hidx(gpc, g_asid);
     hent *e = &g_hash[slot];
     __asm__ volatile ("stc sr, %0" : "=r"(sr));
     __asm__ volatile ("ldc %0, sr" :: "r"(sr | SR_IMASK) : "memory");
+#ifdef DBT_HASH_TWO_WAY
+    if (e[0].gpc == gpc && (!IS_USER(gpc) || e[0].asid == g_asid)) {
+        /* Refresh in place; no extra writes on a repeated first-way key. */
+    } else if (e[1].gpc == gpc && (!IS_USER(gpc) || e[1].asid == g_asid)) {
+        ++e;
+    } else if (e[0].host && e[0].gpc != 1) {
+        /* Newest insertion occupies way zero; retain the previous key in
+         * way one. No replacement metadata is written by assembly hits. */
+        e[1] = e[0];
+    }
+#endif
+#ifdef DBT_HASH_ASID_TAG
+    e->asid = g_asid;
+#else
     if (IS_USER(gpc) && !g_user_hash_seen[slot]) {
         g_user_hash[g_nuser_hash++] = (sf_u16)slot;
         g_user_hash_seen[slot] = 1;
     }
+#endif
     e->host = host; e->gpc = gpc;
     __asm__ volatile ("ldc %0, sr" :: "r"(sr) : "memory");
 }
 
 static sf_u32 hash_find(sf_u32 gpc)
 {
-    const hent *e = &g_hash[hidx(gpc)];
+    const hent *e = &g_hash[fast_hidx(gpc, g_asid)];
+#ifdef DBT_HASH_TWO_WAY
+    unsigned way;
+    for (way = 0; way < 2; ++way, ++e)
+        if (e->host && e->gpc == gpc && (!IS_USER(gpc) || e->asid == g_asid)) return e->host;
+    return 0;
+#else
+#ifdef DBT_HASH_ASID_TAG
+    if (IS_USER(gpc) && e->asid != g_asid) return 0;
+#endif
     return (e->host && e->gpc == gpc) ? e->host : 0;
+#endif
 }
 
 /* Empty slots carry gpc = 1 (odd: never a pc): the asm fast path compares
  * only the gpc, so a cleared slot must not keep its old key. */
 static void hash_remove(const dbt_block *b)
 {
+#ifdef DBT_HASH_ASID_MIX
+    /* A physically shared owner can be cached under multiple ASIDs. Its
+     * original ASID no longer enumerates the possible direct-hash slots. */
+    if (g_binfo[b - g_blocks].user && g_binfo[b - g_blocks].asid == ASID_ANY) {
+        unsigned i;
+        for (i = 0; i < HSIZE; ++i) {
+            hent *a = &g_hash[i];
+            if (a->host >= b->host_base && a->host < b->host_base + b->host_len) {
+                a->gpc = 1; a->host = 0;
+#ifdef DBT_INTERIOR_HASH
+                ++g_alias_hash_removed;
+#endif
+            }
+        }
+        return;
+    }
+#endif
 #ifdef DBT_INTERIOR_HASH
     unsigned index = (unsigned)(b - g_blocks);
     if (g_alias_blocks[index >> 3] & (1u << (index & 7))) {
@@ -376,7 +565,12 @@ static void hash_remove(const dbt_block *b)
          * their possible slots instead of scanning the whole hash table.
          * Keep the destination check: a collision may now belong elsewhere. */
         for (i = 0; i < b->guest_len; i += 2) {
-            hent *a = &g_hash[hidx(b->guest_pc + i)];
+            hent *a = &g_hash[fast_hidx(b->guest_pc + i, g_binfo[index].asid)];
+#ifdef DBT_HASH_TWO_WAY
+            if (a[1].host >= lo && a[1].host < hi) {
+                a[1].gpc = 1; a[1].host = 0; ++g_alias_hash_removed;
+            }
+#endif
 #else
         for (i = 0; i < HSIZE; ++i) {
             hent *a = &g_hash[i];
@@ -388,8 +582,11 @@ static void hash_remove(const dbt_block *b)
         return;
     }
 #endif
-    hent *e = &g_hash[hidx(b->guest_pc)];
+    hent *e = &g_hash[fast_hidx(b->guest_pc, g_binfo[b - g_blocks].asid)];
     if (e->host == b->host_base) { e->gpc = 1; e->host = 0; }
+#ifdef DBT_HASH_TWO_WAY
+    if (e[1].host == b->host_base) { e[1].gpc = 1; e[1].host = 0; }
+#endif
 }
 
 /* Physical address of virtual `va` under `asid` according to the UTLB
@@ -458,12 +655,32 @@ static void unchain(dbt_block *o, int k)
     dbt_stat.unchained++;
 }
 
+#if defined(DBT_BATCH_RANGES) && !defined(DBT_BATCH_INVALIDATE)
+#error DBT_BATCH_RANGES requires DBT_BATCH_INVALIDATE
+#endif
+#if defined(DBT_BATCH_HASH_REMOVE) && (!defined(DBT_BATCH_INVALIDATE) || !defined(DBT_INTERIOR_HASH))
+#error DBT_BATCH_HASH_REMOVE requires DBT_BATCH_INVALIDATE and DBT_INTERIOR_HASH
+#endif
+#ifdef DBT_BATCH_HASH_REMOVE
+static int g_batch_hash_pending;
+static sf_u32 g_batch_hash_scans;
+#endif
 #ifdef DBT_BATCH_INVALIDATE
+#ifdef DBT_BATCH_RANGES
+/* Range/module teardown batches many removals. A single TLB replacement
+ * retains the immediate path, without a whole-cache batch completion. */
+static int g_range_batch;
+#define SHOULD_BATCH_INVALIDATION g_range_batch
+#else
+#define SHOULD_BATCH_INVALIDATION 1
+#endif
 #ifndef CACHE_SIZE
 #define CACHE_SIZE 0x00300000u
 #endif
-/* Blocks begin on 32-byte boundaries, so no live neighbour shares a bit.
- * The bitmap is cleared before a code bank is reused. */
+/* One bit conservatively covers 32 code bytes. With compact alignment a
+ * live neighbour may share a bit: detaching its incoming links is harmless,
+ * and normal lookup can refill them. Never omit a dead destination. The
+ * bitmap is cleared before a code bank is reused. */
 static sf_u8 g_dead_code[(CACHE_SIZE + 255u) / 256u];
 static unsigned g_dead_banks;
 static int is_dead_host(sf_u32 host)
@@ -471,6 +688,26 @@ static int is_dead_host(sf_u32 host)
     sf_u32 off = host - g_cfg.cache_base;
     return off < g_cfg.cache_size &&
         (g_dead_code[off >> 8] & (1u << ((off >> 5) & 7)));
+}
+#endif
+
+#ifdef DBT_VERIFY_INCOMING_BITMAP
+#ifndef DBT_INCOMING_BITMAP
+#error DBT_VERIFY_INCOMING_BITMAP requires DBT_INCOMING_BITMAP
+#endif
+static void verify_sources(unsigned banks)
+{
+    int i;
+    for (i = 0; i < g_nblocks; ++i) {
+        unsigned bank, word = (unsigned)i >> 5;
+        sf_u32 bit = 1u << (i & 31);
+        if (g_binfo[i].dead) continue;
+        if (g_blocks[i].ic_off >= 0 && !(g_source_ic[word] & bit))
+            dbt_halt("missing IC source bit");
+        for (bank = 0; bank < CACHE_BANKS; ++bank)
+            if ((banks & g_link_banks[i] & (1u << bank)) && !(g_source_links[bank][word] & bit))
+                dbt_halt("missing direct-link source bit");
+    }
 }
 #endif
 
@@ -482,29 +719,50 @@ static void invalidate_block(dbt_block *b)
     int i, k;
     sf_u32 lo = b->host_base, hi = b->host_base + (sf_u32)b->host_len;
     unsigned bank_mask = 1u << bank_of_code(lo);
+#ifdef DBT_INCOMING_BITMAP
+    source_scan scan = {0, 0, bank_mask, 0};
+#endif
     g_binfo[b - g_blocks].dead = 1;
+#ifdef DBT_BATCH_HASH_REMOVE
+    /* Aliases otherwise force a whole hash-table walk for every dead owner.
+     * Defer those walks until this range's dead destinations are all known.
+     * No guest lookup may run between marking and finish_invalidations(). */
+    if (SHOULD_BATCH_INVALIDATION &&
+        (g_alias_blocks[(b - g_blocks) >> 3] & (1u << ((b - g_blocks) & 7))))
+        g_batch_hash_pending = 1;
+    else
+#endif
     hash_remove(b);
 #ifdef DBT_BATCH_INVALIDATE
-    for (i = (int)((lo - g_cfg.cache_base) >> 5);
-         (sf_u32)i * 32 < hi - g_cfg.cache_base; ++i)
-        g_dead_code[i >> 3] |= (sf_u8)(1u << (i & 7));
-    g_dead_banks |= bank_mask;
-    (void)k;
+    if (SHOULD_BATCH_INVALIDATION) {
+        for (i = (int)((lo - g_cfg.cache_base) >> 5);
+             (sf_u32)i * 32 < hi - g_cfg.cache_base; ++i)
+            g_dead_code[i >> 3] |= (sf_u8)(1u << (i & 7));
+        g_dead_banks |= bank_mask;
+    } else
+#endif
+    {
+#ifdef DBT_INCOMING_BITMAP
+#ifdef DBT_VERIFY_INCOMING_BITMAP
+        verify_sources(bank_mask);
+#endif
+        while ((i = source_next(&scan)) >= 0) {
 #else
-    for (i = 0; i < g_nblocks; i++) {
-        dbt_block *o = &g_blocks[i];
-        if (g_binfo[i].dead) continue;
-        if (o->ic_off >= 0) {
-            sf_u32 h = *(volatile sf_u32 *)(o->host_base + (sf_u32)o->ic_off + 4);
-            if (h >= lo && h < hi) reset_ic(o);
-        }
-        if (!(g_link_banks[i] & bank_mask)) continue;
-        for (k = 0; k < o->nlinks; k++) {
-            sf_u32 v = *(volatile sf_u32 *)(o->host_base + (sf_u32)o->links[k].lit_off);
-            if (v >= lo && v < hi) unchain(o, k);
+        for (i = 0; i < g_nblocks; i++) {
+#endif
+            dbt_block *o = &g_blocks[i];
+            if (g_binfo[i].dead) continue;
+            if (o->ic_off >= 0) {
+                sf_u32 h = *(volatile sf_u32 *)(o->host_base + (sf_u32)o->ic_off + 4);
+                if (h >= lo && h < hi) reset_ic(o);
+            }
+            if (!(g_link_banks[i] & bank_mask)) continue;
+            for (k = 0; k < o->nlinks; k++) {
+                sf_u32 v = *(volatile sf_u32 *)(o->host_base + (sf_u32)o->links[k].lit_off);
+                if (v >= lo && v < hi) unchain(o, k);
+            }
         }
     }
-#endif
     dbt_stat.invalidations++;
     PROFILE_END(PROF_INVALIDATE);
 }
@@ -516,8 +774,30 @@ static void finish_invalidations(void)
 #ifdef DBT_BATCH_INVALIDATE
     PROFILE_BEGIN;
     int i, k;
+#ifdef DBT_INCOMING_BITMAP
+    source_scan scan = {0, 0, g_dead_banks, 0};
+#endif
     if (!g_dead_banks) return;
+#ifdef DBT_BATCH_HASH_REMOVE
+    if (g_batch_hash_pending) {
+        for (i = 0; i < HSIZE; ++i) {
+            hent *e = &g_hash[i];
+            if (e->host && is_dead_host(e->host)) {
+                e->gpc = 1; e->host = 0; ++g_alias_hash_removed;
+            }
+        }
+        ++g_batch_hash_scans;
+        g_batch_hash_pending = 0;
+    }
+#endif
+#ifdef DBT_INCOMING_BITMAP
+#ifdef DBT_VERIFY_INCOMING_BITMAP
+    verify_sources(g_dead_banks);
+#endif
+    while ((i = source_next(&scan)) >= 0) {
+#else
     for (i = 0; i < g_nblocks; ++i) {
+#endif
         dbt_block *b = &g_blocks[i];
         if (g_binfo[i].dead) continue;
         if (b->ic_off >= 0 && is_dead_host(*(volatile sf_u32 *)(b->host_base + b->ic_off + 4)))
@@ -536,17 +816,24 @@ static void finish_invalidations(void)
 static void invalidate_range(sf_u32 lo, sf_u32 hi, int user_only)
 {
     int i;
+#ifdef DBT_BATCH_RANGES
+    g_range_batch = 1;
+#endif
     for (i = 0; i < g_nblocks; i++) {
         dbt_block *b = &g_blocks[i];
         if (g_binfo[i].dead || (user_only && !g_binfo[i].user)) continue;
         if (b->guest_pc < hi && b->guest_pc + b->guest_len > lo) invalidate_block(b);
     }
     finish_invalidations();
+#ifdef DBT_BATCH_RANGES
+    g_range_batch = 0;
+#endif
 }
 
-/* The address space changed: user blocks of other ASIDs leave the hash, and
- * inline caches aimed at user-space targets forget them. Blocks stay for
- * when their ASID returns (or for reuse through a shared physical page). */
+/* On a switch, untagged user hash entries leave the table. Tagged entries
+ * stay but both C and assembly require the current ASID on every user hit.
+ * Monomorphic ICs still clear: their generated hit paths have no ASID tag.
+ * Blocks stay for return to an ASID or validated shared-physical reuse. */
 static void switch_asid(sf_u32 asid)
 {
     int j;
@@ -554,6 +841,7 @@ static void switch_asid(sf_u32 asid)
     if (asid == g_asid) { dbt_stat.asid_unchanged++; return; }
     g_asid = asid;
     dbt_stat.asid_switches++;
+#ifndef DBT_HASH_ASID_TAG
     for (j = 0; j < (int)g_nuser_hash; j++) {
         unsigned slot = g_user_hash[j];
         hent *e = &g_hash[slot];
@@ -561,6 +849,7 @@ static void switch_asid(sf_u32 asid)
         g_user_hash_seen[slot] = 0;
     }
     g_nuser_hash = 0;
+#endif
     for (j = 0; j < g_nic; j++) {
         unsigned index = g_ic_active[j];
         dbt_block *b = &g_blocks[index];
@@ -694,6 +983,12 @@ static sf_u32 find_interior_entry(sf_u32 gpc)
         unsigned i = node >> 1;
         dbt_block *b = &g_blocks[i];
         int off;
+#ifdef DBT_INTERIOR_RANGE_FIRST
+        /* Page chains contain unrelated blocks. Reject by guest range
+         * before fetching owner state or unpacking entry metadata. Keep
+         * dbt_block_entry's full validation for candidates in range. */
+        if (gpc <= b->guest_pc || gpc >= b->guest_pc + b->guest_len) continue;
+#endif
         if (g_binfo[i].dead || (g_binfo[i].user && g_binfo[i].asid != g_asid)) continue;
         off = dbt_block_entry(b, gpc);
         if (off >= 0) {
@@ -742,6 +1037,10 @@ static void cache_flush_all(void)
     __asm__ volatile ("stc sr, %0" : "=r"(sr));
     __asm__ volatile ("ldc %0, sr" :: "r"(sr | 0xF0u) : "memory");
     g_nblocks = 0; g_bank = 0; g_allocated = 0;
+#ifdef DBT_INCOMING_BITMAP
+    memset(g_source_links, 0, sizeof g_source_links);
+    memset(g_source_ic, 0, sizeof g_source_ic);
+#endif
 #ifdef DBT_INTERIOR_HASH
     memset(g_alias_blocks, 0, sizeof g_alias_blocks);
 #endif
@@ -757,6 +1056,9 @@ static void cache_flush_all(void)
 #endif
 #ifdef DBT_BATCH_INVALIDATE
     memset(g_dead_code, 0, sizeof g_dead_code); g_dead_banks = 0;
+#ifdef DBT_BATCH_HASH_REMOVE
+    g_batch_hash_pending = 0;
+#endif
 #endif
     memset(g_bank_count, 0, sizeof g_bank_count);
     memset(g_bank_touch, 0, sizeof g_bank_touch); g_access_clock = 0;
@@ -780,6 +1082,51 @@ static void cache_flush_all(void)
 #endif
 }
 
+#ifdef DBT_PRUNE_INDEX_REUSE
+/* Remove dead headers before their indices can be reused. Keeping live
+ * nodes in their original order preserves newest-first lookup semantics. */
+static void prune_index_chain(sf_u16 *head, sf_u16 *next, unsigned shift)
+{
+    while (*head != CHAIN_NONE) {
+        unsigned node = *head;
+        if (g_binfo[node >> shift].dead) *head = next[node];
+        else head = &next[node];
+    }
+}
+#ifdef DBT_VERIFY_PRUNED_INDEX
+/* Test-only audit: no stale node/cycle and every surviving header indexed.
+ * Two independent walks keep the verifier separate from the splice logic. */
+static void verify_pruned_index(sf_u16 *heads, unsigned count, sf_u16 *next, unsigned shift)
+{
+    sf_u8 seen[(MAX_BLOCKS * 2 + 7) / 8];
+    unsigned h, i;
+    memset(seen, 0, sizeof seen);
+    for (h = 0; h < count; ++h) {
+        unsigned node;
+        for (node = heads[h]; node != CHAIN_NONE; node = next[node]) {
+            if (node >= ((unsigned)MAX_BLOCKS << shift) || g_binfo[node >> shift].dead)
+                dbt_halt("pruned index stale node");
+            if (seen[node >> 3] & (1u << (node & 7))) dbt_halt("pruned index cycle/duplicate");
+            seen[node >> 3] |= 1u << (node & 7);
+        }
+    }
+    for (i = 0; i < (unsigned)g_nblocks; ++i) {
+        unsigned node = i << shift;
+        dbt_block *b = &g_blocks[i];
+        if (g_binfo[i].dead) continue;
+#ifndef DBT_INTERIOR_ENTRY
+        if (shift && !g_binfo[i].user) continue;
+#endif
+        if (!(seen[node >> 3] & (1u << (node & 7)))) dbt_halt("pruned index missing header");
+        if (shift && (b->guest_pc >> 10) != ((b->guest_pc + b->guest_len - 1) >> 10)) {
+            ++node;
+            if (!(seen[node >> 3] & (1u << (node & 7)))) dbt_halt("pruned index missing second page");
+        }
+    }
+}
+#endif
+#endif
+
 /* Recycle one disjoint code/metadata bank. Surviving host code never moves.
  * Incoming direct chains and ICs are detached before bytes are reused; the
  * guest-PC chains are rebuilt so a recycled table index cannot form a cycle. */
@@ -799,6 +1146,26 @@ static void cache_next_bank(void)
     unsigned first, count;
     sf_u32 oldest = 0;
     (void)oldest;
+#ifdef DBT_CACHE_TICK_LFU
+#if defined(DBT_CACHE_LRU) || defined(DBT_KERNEL_BANKS)
+#error DBT_CACHE_TICK_LFU requires the unified cache without C-lookup LRU
+#endif
+    {
+        sf_u32 least = 0xFFFFFFFFu;
+        /* Start in FIFO order to avoid a low-index preference on ties.
+         * Only actual timer samples contribute; a cold translation does
+         * not gain protection merely by missing the lookup cache. */
+        for (i = 1; i < CACHE_BANKS; ++i) {
+            unsigned candidate = (g_bank + i) % CACHE_BANKS;
+            if (!g_bank_count[candidate]) { bank = candidate; break; }
+            if (g_bank_touch[candidate] < least) {
+                least = g_bank_touch[candidate]; bank = candidate;
+            }
+        }
+        for (i = 0; i < CACHE_BANKS; ++i) g_bank_touch[i] >>= 1;
+        g_bank_touch[bank] = 0;
+    }
+#endif
 #if defined(DBT_CACHE_LRU) && !defined(DBT_KERNEL_BANKS)
     /* C lookup/refill and exception recovery sample actual code use. Protect
      * frequently reused banks instead of evicting hot kernel code by age alone. */
@@ -816,6 +1183,9 @@ static void cache_next_bank(void)
     lo = g_cfg.cache_base + bank * bank_code_bytes();
     hi = lo + bank_code_bytes();
     if (count) {
+#ifdef DBT_CORE_BANKS
+        if (bank < DBT_KERNEL_BANKS) ++g_core_evictions;
+#endif
 #if defined(DBT_INTERIOR_CACHE) || defined(DBT_HOST_OWNER_CACHE)
         ++g_bank_generation[bank];
 #endif
@@ -839,36 +1209,64 @@ static void cache_next_bank(void)
                 sf_u32 v = *(volatile sf_u32 *)(b->host_base + (sf_u32)b->links[k].lit_off);
                 if (v >= lo && v < hi) unchain(b, k);
             }
+#ifdef DBT_PRUNE_LINK_BANKS
+            /* The entire destination bank is gone, and IRQs are masked.
+             * link_direct will set this bit again if a later fill links
+             * into its replacement. Partial-block invalidation cannot do
+             * this, since other destinations in the same bank may live. */
+            g_link_banks[i] &= (sf_u16)~(1u << bank);
+#endif
         }
         g_nuser = 0; g_nuser_hash = 0;
         memset(g_user_hash_seen, 0, sizeof g_user_hash_seen);
+#ifdef DBT_PRUNE_INDEX_REUSE
+        /* User-page bits are conservative: stale bits only cause extra
+         * TLB checks, never a missed invalidation. */
+        for (i = 0; i < sizeof g_page_head / sizeof g_page_head[0]; ++i)
+            prune_index_chain(&g_page_head[i], g_page_next, 1);
+#else
         memset(g_user_pages, 0, sizeof g_user_pages);
         memset(g_page_head, 0xFF, sizeof g_page_head);
+#endif
         for (i = 0; i < HSIZE; ++i) {
             hent *e = &g_hash[i];
             if (e->host >= lo && e->host < hi) { e->gpc = 1; e->host = 0; }
+#ifndef DBT_HASH_ASID_TAG
             else if (e->host && e->gpc != 1 && IS_USER(e->gpc)) {
                 g_user_hash[g_nuser_hash++] = (sf_u16)i;
                 g_user_hash_seen[i] = 1;
             }
+#endif
+#ifdef DBT_PRUNE_INDEX_REUSE
+            prune_index_chain(&g_chain_head[i], g_chain_next, 0);
+#else
             g_chain_head[i] = CHAIN_NONE;
+#endif
         }
         for (i = 0; i < (unsigned)g_nblocks; ++i) {
             dbt_block *b = &g_blocks[i];
-            unsigned h;
+#ifdef DBT_PRUNE_INDEX_REUSE
+            (void)b;
+#endif
             if (g_binfo[i].dead) continue;
-            h = hidx(b->guest_pc);
+#ifndef DBT_PRUNE_INDEX_REUSE
+            unsigned h = hidx(b->guest_pc);
             g_chain_next[i] = g_chain_head[h]; g_chain_head[h] = (sf_u16)i;
 #ifdef DBT_INTERIOR_ENTRY
             index_user_block(i);
 #endif
+#endif
             if (g_binfo[i].user) {
                 g_user_idx[g_nuser++] = (sf_u16)i;
-#ifndef DBT_INTERIOR_ENTRY
+#if !defined(DBT_INTERIOR_ENTRY) && !defined(DBT_PRUNE_INDEX_REUSE)
                 index_user_block(i);
 #endif
             }
         }
+#if defined(DBT_PRUNE_INDEX_REUSE) && defined(DBT_VERIFY_PRUNED_INDEX)
+        verify_pruned_index(g_chain_head, HSIZE, g_chain_next, 0);
+        verify_pruned_index(g_page_head, 8192, g_page_next, 1);
+#endif
         g_allocated -= count;
         g_bank_evictions++;
         dbt_stat.flushes++; /* generation guard: callers must not patch a recycled site */
@@ -990,6 +1388,9 @@ void dbt_rt_init(const dbt_rt_config *cfg)
     g_env.rt_ldc_sr = (sf_u32)&dbt_ldc_sr_stub;
     g_env.shadow_vbr_addr = (sf_u32)&dbt_shadow_vbr;
     g_env.shadow_md_addr = (sf_u32)&dbt_shadow_md;
+#ifdef DBT_SAME_ASID_PTEH_STORE
+    g_env.current_asid_addr = (sf_u32)&dbt_current_asid;
+#endif
 #ifdef DBT_RUNTIME_MAX_INSNS
     g_env.max_insns = DBT_RUNTIME_MAX_INSNS;
 #else
@@ -1016,7 +1417,19 @@ static dbt_block *translate_at(sf_u32 gpc)
     /* Keep transient user translations from evicting the kernel working set
      * (and vice versa). Each stream retains its own active bank and cursor. */
     g_saved_code[g_bank] = g_cache_used; g_saved_arena[g_bank] = g_arena_used;
+#ifdef DBT_CORE_BANKS
+    /* Reserve the hot stream for the identified kernel image, not all
+     * kernel-mode DLLs (GWES/display/filesystem can exceed that stream). */
+    {
+        sf_u32 pc = gpc & 0x1fffffffu;
+        int core = !IS_USER(gpc) && g_env.dev_hi &&
+            pc >= (g_env.dev_lo & 0x1fffffffu) && pc < (g_env.dev_hi & 0x1fffffffu);
+        g_bank = g_stream_bank[core ? 0 : 1];
+        if (core) ++g_core_translates; else ++g_other_translates;
+    }
+#else
     g_bank = g_stream_bank[IS_USER(gpc) ? 1 : 0];
+#endif
     g_cache_used = g_saved_code[g_bank]; g_arena_used = g_saved_arena[g_bank];
 #endif
     if (!guest_pc_fetchable(gpc)) { dbt_stat.synth_exceptions++; deliver_synthetic(gpc, 0x0E0); }
@@ -1042,7 +1455,20 @@ static dbt_block *translate_at(sf_u32 gpc)
         }
     }
     g_translating = 1; g_translating_pc = gpc;
+#ifdef DBT_BODY_BUDGET
+    {
+        /* Keep failed speculative output unpublished. A private environment
+         * avoids changing the global limit if an interrupt abandons a fill. */
+        dbt_env attempt = g_env;
+        do {
+            r = dbt_translate_block(&attempt, gpc, host, (sf_u16 *)host, DBT_BLOCK_WORDS, &g_scratch, &fault);
+            if (r != DBT_ERR_OVERFLOW || attempt.max_insns <= 1) break;
+            attempt.max_insns = (attempt.max_insns + 1) / 2;
+        } while (1);
+    }
+#else
     r = dbt_translate_block(&g_env, gpc, host, (sf_u16 *)host, DBT_BLOCK_WORDS, &g_scratch, &fault);
+#endif
     g_translating = 0;
     index = g_bank * BANK_BLOCKS + g_bank_count[g_bank];
     b = &g_blocks[index];
@@ -1050,13 +1476,16 @@ static dbt_block *translate_at(sf_u32 gpc)
         /* commit: block header into the table, used metadata into the arena */
         sf_u32 nm, ns = (sf_u32)g_scratch.nspills * sizeof(dbt_spill);
         *b = g_scratch;
+#if defined(DBT_CONST_DEVICE_ADDRESS) || defined(DBT_UNIFORM_STORE)
+        if (b->const_specialized) ++g_const_device_blocks;
+#endif
         b->meta = (dbt_imeta *)(g_arena + g_arena_used);
         nm = dbt_pack_meta(b->meta, &g_scratch); b->packed_meta = 1;
-        g_arena_used += (nm + 7) & ~7u;
-        b->spills = (dbt_spill *)(g_arena + g_arena_used); memcpy(b->spills, g_scratch_spills, ns); g_arena_used += (ns + 7) & ~7u;
+        g_arena_used += arena_round(nm);
+        b->spills = (dbt_spill *)(g_arena + g_arena_used); memcpy(b->spills, g_scratch_spills, ns); g_arena_used += arena_round(ns);
         b->links = (dbt_link *)(g_arena + g_arena_used);
         memcpy(b->links, g_scratch_links, (sf_u32)b->nlinks * sizeof(dbt_link));
-        g_arena_used += ((sf_u32)b->nlinks * sizeof(dbt_link) + 7) & ~7u;
+        g_arena_used += arena_round((sf_u32)b->nlinks * sizeof(dbt_link));
         dbt_stat.arena_bytes = g_arena_used;
     }
     if (r != DBT_OK) {
@@ -1064,13 +1493,26 @@ static dbt_block *translate_at(sf_u32 gpc)
         dbt_puts(" at "); dbt_puthex(gpc); dbt_puts(" fault "); dbt_puthex(fault); dbt_puts("\n");
         dbt_halt("translation failed");
     }
+#ifdef DBT_CODE_ALIGN4
+    g_cache_used += ((sf_u32)b->host_len + 3u) & ~3u;
+#else
     g_cache_used += ((sf_u32)b->host_len + 31u) & ~31u;
+#endif
     dbt_sync_code(host, (sf_u32)b->host_len);     /* before anything can find the block: see below */
     __asm__ volatile ("stc sr, %0" : "=r"(publish_sr));
     __asm__ volatile ("ldc %0, sr" :: "r"(publish_sr | SR_IMASK) : "memory");
     {
         binfo *bi = &g_binfo[index];
         g_link_banks[index] = 0;
+#ifdef DBT_INCOMING_BITMAP
+        {
+            unsigned bank, word = index >> 5;
+            sf_u32 bit = 1u << (index & 31);
+            for (bank = 0; bank < CACHE_BANKS; ++bank) g_source_links[bank][word] &= ~bit;
+            if (b->ic_off >= 0) g_source_ic[word] |= bit;
+            else g_source_ic[word] &= ~bit;
+        }
+#endif
 #ifdef DBT_INTERIOR_HASH
         g_alias_blocks[index >> 3] &= (sf_u8)~(1u << (index & 7));
 #endif
@@ -1120,6 +1562,15 @@ static sf_u32 lookup_or_translate(sf_u32 gpc)
 {
     sf_u32 host;
     note_asid();
+#ifdef DBT_EARLY_FETCH_FAULT
+    /* CE's SH system-call targets are instruction-address faults, never
+     * code-cache candidates. Preserve the same saved guest context and
+     * synthetic vector used by translate_at, without futile cache scans. */
+    if (!guest_pc_fetchable(gpc)) {
+        dbt_stat.synth_exceptions++;
+        deliver_synthetic(gpc, 0x0E0);
+    }
+#endif
     host = hash_find(gpc);
 #ifdef DBT_INTERIOR_CACHE
     if (!host) host = find_cached_entry(gpc);
@@ -1213,6 +1664,12 @@ static void link_direct(sf_u32 link_lit, sf_u32 host)
     *(volatile sf_u32 *)link_lit = host;                 /* literal read via the operand cache: coherent */
     if (!b) return;
     g_link_banks[b - g_blocks] |= (sf_u16)(1u << bank_of_code(host));
+#ifdef DBT_INCOMING_BITMAP
+    {
+        unsigned index = (unsigned)(b - g_blocks);
+        g_source_links[bank_of_code(host)][index >> 5] |= 1u << (index & 31);
+    }
+#endif
     for (k = 0; k < b->nlinks; k++) {
         if (b->host_base + (sf_u32)b->links[k].lit_off == link_lit) {
             sf_u32 jaddr = b->host_base + (sf_u32)b->links[k].jump_off, from;
@@ -1221,7 +1678,11 @@ static void link_direct(sf_u32 link_lit, sf_u32 host)
              * register stays borrowed across iterations. Not under the
              * execution trace, whose prologue comes first. */
             int self = b->borrow >= 0 && host == b->host_base && !g_env.exec_ring;
-            int n = dbt_chain_direct((sf_u16 *)jaddr, jaddr, self ? host + 2 : host, b->links[k].cond, b->links[k].backward, self, &from);
+            int no_restore = self;
+#ifdef DBT_EXIT_NOP_TAIL
+            no_restore |= b->borrow < 0;
+#endif
+            int n = dbt_chain_direct((sf_u16 *)jaddr, jaddr, self ? host + 2 : host, b->links[k].cond, b->links[k].backward, no_restore, &from);
             if (n) { dbt_sync_code(from, (sf_u32)n); dbt_stat.chained++; }
 #ifdef DBT_TRACE_LINK
             dbt_puts("[dbt] link blk="); dbt_puthex(b->guest_pc); dbt_puts(" jump="); dbt_puthex(jaddr);
@@ -1275,6 +1736,9 @@ void dbt_invalidate(sf_u32 lo, sf_u32 hi)
 static void invalidate_all_but_rom(void)
 {
     int i, kept = 0;
+#ifdef DBT_BATCH_RANGES
+    g_range_batch = 1;
+#endif
     for (i = 0; i < g_nblocks; i++) {
         dbt_block *b = &g_blocks[i];
         sf_u32 pa;
@@ -1284,6 +1748,9 @@ static void invalidate_all_but_rom(void)
         invalidate_block(b);
     }
     finish_invalidations();
+#ifdef DBT_BATCH_RANGES
+    g_range_batch = 0;
+#endif
     dbt_stat.rom_kept += (sf_u32)kept;
 }
 
@@ -1383,6 +1850,7 @@ static void sample_init(const dbt_rt_config *cfg)
     g_sample.hist_base = lo; g_sample.hist_shift = shift;
 }
 
+#ifndef DBT_NO_TICK_SAMPLING
 static void sample_exception(const dbt_gctx *ctx)
 {
     unsigned i;
@@ -1445,6 +1913,8 @@ static void sample_tick(sf_u32 gpc, int where)
         g_sample.kother_last[g_sample.kother_idx++ % SAMPLE_KOTHER] = gpc;
     }
 }
+
+#endif /* DBT_NO_TICK_SAMPLING */
 
 /* Machine state worth a look on the device (HC_GETSTAT 80-83) */
 #define REG_CCR    (*(volatile sf_u32 *)0xFF00001Cu)
@@ -1605,11 +2075,97 @@ static void print_stats(void)
 #endif
 }
 
+#ifdef DBT_LCD_DMA_STRIPS
+/* Experimental native presenter: two whole X/Y RAM banks, like gpSP's
+ * strip presenter. No DMA IRQ is enabled. Complete before returning to CE,
+ * so its existing dirty-buffer and suspend ownership rules remain valid. */
+static void lcd_dma_wait(volatile sf_u32 *ch, volatile sf_u16 *operation)
+{
+    sf_u32 limit = 10000000u;
+    while (!(ch[3] & 2u)) {
+        if ((*operation & 6u) || !--limit) {
+            ch[3] = 0;
+            dbt_halt("LCD DMA failed");
+        }
+    }
+    ch[3] &= ~1u;                 /* disable before clearing TE */
+    ch[3] = 0;
+    dbt_lcd_sync();
+}
+
+static int lcd_dma_pixels(const sf_u8 *s, sf_u32 n, volatile sf_u16 *port)
+{
+    volatile sf_u32 *ch = (volatile sf_u32 *)0xFE008020u;
+    volatile sf_u16 *operation = (volatile sf_u16 *)0xFE008060u;
+    volatile sf_u32 *module_stop = (volatile sf_u32 *)0xA4150030u;
+    sf_u32 saved[4], saved_stop, i, bank = 0;
+    sf_u16 saved_operation;
+    int pending = 0;
+    if ((sf_u32)port != 0xB4000000u || n < 16) return 0;
+    /* Do not steal a channel or clear another owner's error flags. */
+    if ((ch[3] & 1u) || (*operation & 6u)) return 0;
+    for (i = 0; i < 4; ++i) saved[i] = ch[i];
+    saved_stop = *module_stop;
+    saved_operation = *operation;
+    *module_stop = saved_stop & ~((1u << 21) | (1u << 28)); /* DMAC0, RS */
+    dbt_lcd_sync();
+    *operation = saved_operation | 1u;
+    while (n >= 16) {
+        sf_u32 count = n > 4096 ? 4096 : (n & ~15u);
+        volatile sf_u16 *strip = (volatile sf_u16 *)(bank ? 0xE5017000u : 0xE5007000u);
+        /* The guest frame is little-endian; the native LCD bus wants a
+         * numeric RGB565 halfword. Prepare only the non-flight bank. */
+        if (!((sf_u32)s & 3u)) {
+            const sf_u32 *source = (const sf_u32 *)s;
+            volatile sf_u32 *target = (volatile sf_u32 *)strip;
+#ifdef DBT_LCD_DMA_UNROLL
+            /* Keep conversion order and the same volatile RAM writes,
+             * but amortize loop control over four pixel pairs. */
+#pragma GCC unroll 4
+#endif
+            for (i = 0; i < count / 2; ++i) {
+                sf_u32 pair = source[i];
+                /* Reverse bytes within each RGB565 halfword, retaining
+                 * pixel order. Full bswap followed by swap.w is four
+                 * native instructions, independent of compiler idioms. */
+                __asm__ volatile ("swap.b %0,%0\n\tswap.w %0,%0\n\t"
+                    "swap.b %0,%0\n\tswap.w %0,%0" : "+r"(pair));
+                target[i] = pair;
+            }
+        } else {
+            for (i = 0; i < count; ++i)
+                strip[i] = (sf_u16)(s[i*2] | ((sf_u16)s[i*2+1] << 8));
+        }
+        dbt_lcd_sync();
+        if (pending) lcd_dma_wait(ch, operation);
+        ch[0] = (sf_u32)strip;     /* on-chip addresses stay untranslated */
+        ch[1] = (sf_u32)port & 0x1FFFFFFFu;
+        ch[2] = count / 16;
+        ch[3] = 0x00101400u;      /* 32B, source++, fixed LCD, auto request */
+        ch[3] = 0x00101401u;      /* DE, no interrupt */
+        ++g_lcd_dma_strips;
+        pending = 1; bank ^= 1;
+        s += count * 2; n -= count;
+    }
+    if (pending) lcd_dma_wait(ch, operation);
+    for (; n; --n, s += 2) *port = (sf_u16)(s[0] | ((sf_u16)s[1] << 8));
+    dbt_lcd_sync();
+    for (i = 0; i < 4; ++i) ch[i] = saved[i];
+    *operation = saved_operation;
+    *module_stop = saved_stop;
+    dbt_lcd_sync();
+    return 1;
+}
+#endif
+
 /* HC_LCD_BLIT / HC_LCD_PUSH: n little-endian 16-bit pixels from guest memory to the panel's data port */
 static void lcd_pixels(const sf_u8 *s, sf_u32 n, volatile sf_u16 *port)
 {
     PROFILE_BEGIN;
     dbt_stat.lcd_pixels += n;
+#ifdef DBT_LCD_DMA_STRIPS
+    if (lcd_dma_pixels(s, n, port)) { PROFILE_END(PROF_LCD); return; }
+#endif
     if (((sf_u32)s & 3) == 0) {
         const sf_u32 *w = (const sf_u32 *)s;
         for (; n >= 2; n -= 2) {
@@ -1728,6 +2284,82 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
         case 27: v = dbt_stat.lookups_c; break;
         case 28: v = dbt_stat.tlb_hooks; break;
         case 29: v = g_bank_evictions; break;
+#ifdef DBT_HASH_ASID_MIX
+        case 421: v = 1; break;
+#endif
+#ifdef DBT_HASH_TWO_WAY
+        case 422: v = 1; break;
+#endif
+        // Capability handshake: legacy loaders return zero for unknown IDs.
+#ifdef DBT_CONST_DEVICE_ADDRESS
+        case 402:
+#ifndef DBT_CONST_P4_STORE
+            v = 1;
+#endif
+            break;
+        case 403:
+            v = g_const_device_blocks;
+            break;
+#ifdef DBT_CONST_P4_STORE
+        case 404: v = 1; break;
+#endif
+#endif
+#ifdef DBT_FAST_LDTLB
+        case 419: v = 1; break;
+        case 420: v = dbt_fast_ldtlb_calls; break;
+#endif
+#ifdef DBT_SAME_ASID_PTEH_STORE
+        case 418: v = 1; break;
+#endif
+#ifdef DBT_R0_DEVICE_WIDE
+        case 417: v = 1; break;
+#endif
+#ifdef DBT_R0_DEVICE_TEST
+        case 416: v = 1; break;
+#endif
+#ifdef DBT_CORE_BANKS
+        case 412: v = 1; break;
+        case 413: v = g_core_translates; break;
+        case 414: v = g_other_translates; break;
+        case 415: v = g_core_evictions; break;
+#endif
+#ifdef DBT_UNIFORM_STORE
+        case 410: v = 1; break;
+        case 411: v = g_const_device_blocks; break;
+#endif
+#ifdef DBT_INCOMING_BITMAP
+        case 408: v = 1; break;
+        case 409: v = g_source_scans; break;
+#endif
+#ifdef DBT_BATCH_HASH_REMOVE
+        case 406: v = 1; break;
+        case 407: v = g_batch_hash_scans; break;
+#endif
+#ifdef DBT_DYNAMIC_P4_STORE
+        case 405: v = 1; break;
+#endif
+#ifdef DBT_LCD_DMA_STRIPS
+        case 400:
+            v = 1;
+            break;
+        case 401:
+            v = g_lcd_dma_strips;
+            break;
+#endif
+        case 59:
+#ifdef DBT_HASH_ASID_TAG
+            v = 1;
+#endif
+            break;
+        case 60: v = 0x44425453u; break; /* DBTS */
+        case 61: v = 1; break;         /* statistics ABI version */
+        case 62:
+#ifndef DBT_NO_TICK_SAMPLING
+            v = 1u;
+#endif
+            v |= profile_stat(11) ? 2u : 0u;
+            break;
+
         default: v = ctx->r[4] >= 64 ? sample_stat(ctx->r[4]) : profile_stat(ctx->r[4]); break;
         }
         ctx->r[0] = v;
@@ -1752,11 +2384,16 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
 
 /* Guest resume pc for an exception at host offset `off` inside block b. */
 /* Guest pc at the start of meta range idx (idx may be the sentinel). */
+#ifdef DBT_REUSE_RESUME_META
+static sf_u32 meta_decoded_pc(const dbt_block *b, const dbt_imeta *m, const dbt_gctx *ctx)
+{
+#else
 static sf_u32 meta_start_pc(const dbt_block *b, int idx, const dbt_gctx *ctx)
 {
     dbt_imeta meta;
     const dbt_imeta *m = &meta;
     dbt_get_meta(b, idx, &meta);
+#endif
     switch (m->kind) {
     case META_INSN: case META_LINEAR: return b->guest_pc + m->guest_off;
     case META_TARGET_CONST: return m->target;
@@ -1769,6 +2406,15 @@ static sf_u32 meta_start_pc(const dbt_block *b, int idx, const dbt_gctx *ctx)
         dbt_halt("exception while a guest rte is pending");
     }
 }
+
+#ifdef DBT_REUSE_RESUME_META
+static sf_u32 meta_start_pc(const dbt_block *b, int idx, const dbt_gctx *ctx)
+{
+    dbt_imeta meta;
+    dbt_get_meta(b, idx, &meta);
+    return meta_decoded_pc(b, &meta, ctx);
+}
+#endif
 
 /* Guest pc to resume at for an exception at host offset `off` of block b
  * (off < code_len). *committed is set when the range's memory operation has
@@ -1795,7 +2441,13 @@ static sf_u32 resume_pc(const dbt_block *b, sf_u32 off, const dbt_gctx *ctx, int
         *committed = 1;
         return meta_start_pc(b, j, ctx);
     }
+#ifdef DBT_REUSE_RESUME_META
+    /* The metadata just used for the commit test is still valid. Context
+     * register and T-dependent targets must still be evaluated each time. */
+    return meta_decoded_pc(b, m, ctx) +
+#else
     return meta_start_pc(b, idx, ctx) +
+#endif
         (m->kind == META_LINEAR ? off - m->host_off : 0);
 }
 
@@ -1804,13 +2456,38 @@ static sf_u32 resume_pc(const dbt_block *b, sf_u32 off, const dbt_gctx *ctx, int
  * borrowed register or pending scratch save. Never publish these aliases
  * in the normal hash, whose invalidation keys are block starts. */
 static struct { sf_u32 gpc, host, asid, generation, index; } g_irq_entry[16];
+#ifdef DBT_IRQ_ENTRY_HASH
+static unsigned irq_entry_slot(sf_u32 gpc)
+{
+    return ((gpc >> 1) ^ (gpc >> 9)) & 15;
+}
+#else
 static unsigned g_irq_entry_next;
+#endif
 static void remember_irq_entry(dbt_block *b, sf_u32 gpc)
 {
     unsigned i, index;
+#if defined(DBT_CONST_DEVICE_ADDRESS) || defined(DBT_UNIFORM_STORE)
+    if (b && b->const_specialized && gpc < b->guest_pc + 2u * b->const_specialized
+#ifdef DBT_UNIFORM_ENTRY_BOUNDS
+        && gpc > b->guest_pc + 2u * b->uniform_entry_start
+#endif
+       ) return;
+#endif
     if (!b || b->borrow >= 0 || gpc <= b->guest_pc || gpc >= b->guest_pc + b->guest_len) return;
     index = (unsigned)(b - g_blocks);
     if (g_binfo[index].dead) return;
+#ifdef DBT_IRQ_ENTRY_HASH
+    /* Reuse only an entry from this still-live block and address space.
+     * Collisions merely replace aliases; they never publish a block-start
+     * hash entry or bypass the spill-free boundary checks below. */
+    {
+        unsigned slot = irq_entry_slot(gpc);
+        if (g_irq_entry[slot].host && g_irq_entry[slot].gpc == gpc &&
+            g_irq_entry[slot].index == index && g_irq_entry[slot].asid == g_asid &&
+            g_irq_entry[slot].generation == dbt_stat.flushes) return;
+    }
+#endif
     for (i = 0; i < b->nmeta; ++i) {
         dbt_imeta m; sf_u32 off;
         dbt_spill spill;
@@ -1824,7 +2501,11 @@ static void remember_irq_entry(dbt_block *b, sf_u32 gpc)
         } else continue;
         if (dbt_block_pending_spills(b, (int)i, off, &spill, 1)) return;
         {
+#ifdef DBT_IRQ_ENTRY_HASH
+            unsigned slot = irq_entry_slot(gpc);
+#else
             unsigned slot = g_irq_entry_next++ & 15;
+#endif
             g_irq_entry[slot].gpc = gpc; g_irq_entry[slot].host = b->host_base + off;
             g_irq_entry[slot].asid = g_asid; g_irq_entry[slot].generation = dbt_stat.flushes;
             g_irq_entry[slot].index = index;
@@ -1834,9 +2515,14 @@ static void remember_irq_entry(dbt_block *b, sf_u32 gpc)
 }
 static sf_u32 find_irq_entry(sf_u32 gpc)
 {
+#ifdef DBT_IRQ_ENTRY_HASH
+    {
+        unsigned slot = irq_entry_slot(gpc);
+#else
     unsigned n;
     for (n = 0; n < 16; ++n) {
         unsigned slot = (g_irq_entry_next - 1 - n) & 15;
+#endif
         if (g_irq_entry[slot].host && g_irq_entry[slot].gpc == gpc &&
             g_irq_entry[slot].asid == g_asid && g_irq_entry[slot].generation == dbt_stat.flushes &&
             !g_binfo[g_irq_entry[slot].index].dead) {
@@ -1862,7 +2548,13 @@ static void apply_resume_state(const dbt_block *b, int idx, sf_u32 off, int comm
 {
     dbt_imeta meta;
     const dbt_imeta *m = &meta;
+#ifdef DBT_LAZY_RESUME_META
+    /* Restarting an instruction only undoes spills. Its fix-up metadata
+     * is needed solely after the memory operation has committed. */
+    if (committed) dbt_get_meta(b, idx, &meta);
+#else
     dbt_get_meta(b, idx, &meta);
+#endif
     dbt_spill sp[8];
     int n, i, fix = committed ? m->fix_kind : FIX_NONE;
     sf_u32 v = 0, k = 0;
@@ -2001,6 +2693,18 @@ static int stub_window(dbt_gctx *ctx, sf_u32 *guest_pc)
         *guest_pc = guest_pc_of_host(target, ctx);
         return 1;
     }
+#ifdef DBT_FAST_LDTLB
+    /* LDTLB is committed; SR and return target are live, GPR restores pending. */
+    if (IN(spc, dbt_tlbfast_a, dbt_tlbfast_end)) {
+        sf_u32 target = ctx->r[1];
+        g_window_kind = 2;
+        if (!AFTER(spc, dbt_tlbfast_a)) UNDO(ctx, 0, SLOT_Y0);
+        if (!AFTER(spc, dbt_tlbfast_b)) UNDO(ctx, 2, SLOT_A0);
+        UNDO(ctx, 1, SLOT_Y1);
+        *guest_pc = guest_pc_of_host(target, ctx);
+        return 1;
+    }
+#endif
 #ifdef DBT_FAST_LDC_SR
     /* Same-bank SR helper fast return: the new SR is already live. */
     if (IN(spc, dbt_srfast_a, dbt_srfast_end)) {
@@ -2132,6 +2836,14 @@ static int exc_c_body(dbt_gctx *ctx)
             /* the translator asks for an exception at guest pc r4 with EXPEVT r5
              * (stub context: the guest registers are in dbt_ctx_rt) */
             sf_u32 expevt = ctx->r[5];
+#ifdef DBT_ASM_FETCH_FAULT
+            if (expevt & 0x10000u) {
+                if (g_exc_depth) dbt_halt("guest exception handler not fetchable");
+                ++dbt_stat.synth_exceptions;
+                note_asid();
+                expevt &= 0xFFFFu;
+            }
+#endif
             guest_pc = ctx->r[4];
             take_stub_context(ctx);
             REG_EXPEVT = expevt;
@@ -2142,7 +2854,9 @@ static int exc_c_body(dbt_gctx *ctx)
         }
         if (nr >= 0xF0) return hypercall(ctx, nr);
     }
+#ifndef DBT_NO_TICK_SAMPLING
     sample_exception(ctx);
+#endif
 
     if (stub_window(ctx, &guest_pc)) {
         where = 3;
@@ -2215,7 +2929,17 @@ static int exc_c_body(dbt_gctx *ctx)
     }
 
 deliver:
-    if (ctx->vec_off == 0x600 && ctx->intevt == 0x400) sample_tick(guest_pc, where);
+    if (ctx->vec_off == 0x600 && ctx->intevt == 0x400) {
+#ifdef DBT_CACHE_TICK_LFU
+        if (where == 1 || where == 2) {
+            unsigned bank = bank_of_code(b->host_base);
+            if (g_bank_touch[bank] != 0xFFFFFFFFu) ++g_bank_touch[bank];
+        }
+#endif
+#ifndef DBT_NO_TICK_SAMPLING
+        sample_tick(guest_pc, where);
+#endif
+    }
 #ifdef DBT_IRQ_ENTRY_CACHE
     if (ctx->vec_off == 0x600) remember_irq_entry(b, guest_pc);
 #endif

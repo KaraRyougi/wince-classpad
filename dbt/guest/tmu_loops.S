@@ -361,3 +361,176 @@ _loop_treader:
         movt    r0
         rts
         nop
+
+/* Materialize a normal-memory address inside every loop iteration. The
+ * first load can omit the device classifier only after that literal load. */
+        .align 2
+        .global _loop_constaddr, _loop_constaddr_end
+_loop_constaddr:
+1:      mov.l .Lconstscratch,r1
+        mov.l @r1,r0
+        add #1,r0
+        mov.l r0,@r1
+        dt r4
+        bf 1b
+        rts
+        nop
+        .align 2
+.Lconstscratch: .long _scratch
+_loop_constaddr_end:
+
+/* Literal-address native P4 store, including interrupt restart/commit paths. */
+        .align 2
+        .global _loop_constp4, _loop_constp4_end
+_loop_constp4:
+1:      mov.l .Lconstp4tea,r1
+        mov.l r4,@r1
+        dt r4
+        bf 1b
+        rts
+        nop
+        .align 2
+.Lconstp4tea: .long 0xFF00000C
+_loop_constp4_end:
+
+        .align 2
+        .global _loop_uniform_store
+_loop_uniform_store:
+1:      mov     #0,r1
+        mov.l   r1,@r5
+        mov     #-1,r2
+        mov.l   r2,@(4,r5)
+        dt      r4
+        bf      1b
+        rts
+        nop
+
+        .align 2
+        .global _loop_r0_device
+        .global _loop_r0_device_end
+_loop_r0_device:
+        mov     #85,r0
+1:      mov.l   @r5,r2
+        add     #1,r2
+        mov.l   r2,@r5
+        dt      r4
+        bf      1b
+        rts
+        nop
+_loop_r0_device_end:
+
+        .align 2
+        .global _loop_device_read_slots
+        .global _loop_device_read_slots_end
+_loop_device_read_slots:
+        mov     #0,r1
+1:      mov     r5,r6
+        mov.l   @r6+,r2
+        add     r2,r1
+        dt      r4
+        bf/s    1b
+        mov.l   @r5,r3
+        xor     r3,r1
+        xor     r6,r1
+        rts
+        mov     r1,r0
+_loop_device_read_slots_end:
+
+        .align 2
+        .global _loop_r0_operand
+        .global _loop_r0_operand_end
+_loop_r0_operand:
+        mov     r5,r0
+1:      mov.l   @r0,r2
+        add     #1,r2
+        mov.l   r2,@r0
+        dt      r4
+        bf      1b
+        mov     #85,r0
+        rts
+        nop
+_loop_r0_operand_end:
+
+/* Both SR operand forms change virtual MD without changing RB or ASID.
+ * Every readback must reflect the new guest mode, including across IRQs. */
+        .global _loop_ldcsr_md
+_loop_ldcsr_md:
+        stc     sr, r3
+        mov     #1, r2
+        shll16  r2
+        shll8   r2
+        shll2   r2
+        shll2   r2
+        shll2   r2
+        mov     r3, r1
+        xor     r2, r1
+        mov     #0, r6
+1:      ldc     r1, sr
+        stc     sr, r0
+        xor     r1, r0
+        or      r0, r6
+        /* The existing translator requires the privileged memory-load
+         * tail to be masked. Re-enable IRQs via the restored SR. */
+        mov     r1, r0
+        or      #0xf0, r0
+        ldc     r0, sr
+        mov.l   r3, @-r15
+        ldc.l   @r15+, sr
+        stc     sr, r0
+        xor     r3, r0
+        or      r0, r6
+        dt      r4
+        bf      1b
+        rts
+        mov     r6, r0
+
+        .align 2
+        .global _loop_same_asid_pteh, _loop_same_asid_pteh_end
+_loop_same_asid_pteh:
+        mov.l   2f, r1
+        mov     #0, r0
+1:      sett
+        mov.l   r5, @r1
+        movt    r2
+        add     r2, r0
+        dt      r4
+        bf      1b
+        rts
+        nop
+        .align 2
+2:      .long 0xff000000
+_loop_same_asid_pteh_end:
+
+        .align 2
+        .global _loop_fast_ldtlb
+_loop_fast_ldtlb:
+        mov     #0x5a, r0
+        mov     #0x6b, r1
+        mov     #0x7c, r2
+        mov     #0, r6
+1:      sett
+        ldtlb
+        movt    r3
+        add     r3, r6
+        clrt
+        ldtlb
+        movt    r3
+        add     r3, r6
+        dt      r4
+        bf      1b
+        add     r0, r6
+        add     r1, r6
+        add     r2, r6
+        rts
+        mov     r6, r0
+
+        .align 2
+        .global _ldtlb_change_asid
+_ldtlb_change_asid:
+        mov.l   1f, r1
+        mov.l   r4, @r1                 /* caller pre-swaps raw MMIO value */
+        ldtlb
+        rts
+        nop
+        .align 2
+1:      .long 0xff000000

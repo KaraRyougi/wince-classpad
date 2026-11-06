@@ -26,6 +26,10 @@
 extern char guest_vectors[];
 volatile unsigned fault_pr;
 static int fails;
+#ifndef MAX_BLOCKS
+#define MAX_BLOCKS 4096
+#endif
+static unsigned short recycle_pressure[MAX_BLOCKS * 8];
 typedef unsigned (*fn_t)(void);
 extern unsigned call_user_with_t(fn_t f, unsigned t);
 __asm__(".text\n.align 2\n.global _call_user_with_t\n_call_user_with_t:\n"
@@ -48,10 +52,15 @@ unsigned guest_fault(unsigned vec, unsigned spc, unsigned expevt, unsigned tea)
     return 0;
 }
 
+#ifdef GUEST_4K_PAGES
+#define TEST_PAGE_FLAGS 0x17Cu /* 4 KiB */
+#else
+#define TEST_PAGE_FLAGS 0x16Cu /* 1 KiB; preserve the original fixture */
+#endif
 static void tlb_map(unsigned v, unsigned p, unsigned asid, int shared)
 {
     mmio_w32(PTEH, (v & 0xFFFFFC00u) | asid);
-    mmio_w32(PTEL, (p & 0x1FFFFC00u) | 0x16Cu | (shared ? 2u : 0u));    /* V | PR=11 | C | D, 4 KiB */
+    mmio_w32(PTEL, (p & 0x1FFFFC00u) | TEST_PAGE_FLAGS | (shared ? 2u : 0u)); /* V | PR=11 | C | D */
     __asm__ volatile ("ldtlb" ::: "memory");
 }
 
@@ -65,6 +74,16 @@ static unsigned __attribute__((noinline)) alternate_user_targets(unsigned count)
     unsigned i, sum = 0;
     for (i = 0; i < count; ++i)
         sum += ((fn_t)(V_CODE + ((i & 1) ? 0x20 : 0)))();
+    return sum;
+}
+
+/* P_A and P_S are 0x4000 apart within one 64-KiB region: their
+ * folded hash indices collide. Exercise both assembly ways at one call site. */
+static unsigned __attribute__((noinline)) alternate_colliding_targets(unsigned count)
+{
+    unsigned i, sum = 0;
+    for (i = 0; i < count; ++i)
+        sum += ((fn_t)((i & 1) ? P_S : P_A))();
     return sum;
 }
 
@@ -92,6 +111,18 @@ void guest_main(void)
     put_ret(P_A, 1); put_ret(P_B, 2); put_ret(P_C1, 3); put_ret(P_C2, 4); put_ret(P_S, 9);
     { volatile unsigned short *c = (volatile unsigned short *)P_X; c[0] = 0xA7FE; c[1] = 0x0009; }   /* bra +0xFFC ; nop */
     hc_flush(P_A, 0x6000);
+
+    if (hc_getstat(422)) {
+        unsigned before;
+        check("two-way collision targets warmed", alternate_colliding_targets(16) == 80);
+        before = hc_getstat(4);
+        r = alternate_colliding_targets(4096);
+        n2 = hc_getstat(4) - before;
+        check("two-way colliding targets return correct values", r == 20480);
+        check("two-way colliding targets bypass C refill", n2 < 16);
+        check("two-way first target preserves T", call_user_with_t((fn_t)P_A, 1) == 1);
+        check("two-way second target preserves T", call_user_with_t((fn_t)P_S, 0) == 0);
+    }
 
     mmio_w32(MMUCR, 0x4); mmio_w32(MMUCR, 0x1);          /* flush, AT=1 */
 
@@ -142,6 +173,24 @@ void guest_main(void)
         if (r != 3 || n != 0 || n2 != 0) break;
       }
       check("64 ASID round trips reuse code without stale ICs", i == 64);
+    }
+
+    /* A kernel-only detour must not discard tagged user hash entries.
+     * The IC itself still clears on switch, forcing the asm hash path. */
+    if (hc_getstat(59)) {
+        unsigned i, before, misses, total = 0;
+        for (i = 0; i < 16; ++i) {
+            set_asid_pv(0); set_asid_pv(2);
+            call_counted((fn_t)V_CODE, &n);
+        }
+        before = hc_getstat(4);
+        for (i = 0; i < 128; ++i) {
+            set_asid_pv(0); set_asid_pv(2);
+            total += call_counted((fn_t)V_CODE, &n);
+        }
+        misses = hc_getstat(4) - before;
+        check("tagged hash preserves user result across kernel detours", total == 256);
+        check("tagged hash avoids repeated C refills after kernel detours", misses < 16);
     }
 
     /* 2. a shared page (SH=1) keeps one translation across ASIDs */
@@ -226,10 +275,46 @@ void guest_main(void)
         mmio_w32(MMUCR, 1); tlb_map(V_CODE, P_A, 1, 0);
         r = call_counted((fn_t)(V_CODE + 2), &n);
         check("interior target returns to its original ASID", r == 11);
-        if (hc_getstat(19)) check("cached interior entry reused after ASID return", hc_getstat(20) > cache_hits);
+        if (hc_getstat(19)) {
+            if (hc_getstat(422)) {
+                check("two-way hash retains translated interior code", n == 0);
+            } else if (hc_getstat(421)) {
+                /* The ASID-mixed direct hash retains this alias, so it
+                 * need not fall through to the separate interior cache. */
+                check("mixed hash retains interior entry without retranslation", n == 0 && hc_getstat(20) == cache_hits);
+            } else check("cached interior entry reused after ASID return", hc_getstat(20) > cache_hits);
+        }
         mmio_w32(MMUCR, 1); tlb_map(V_CODE, P_B, 1, 0);
         r = call_counted((fn_t)(V_CODE + 2), &n);
         check("remap invalidates cached user interior target", r == 13);
+    }
+
+    /* Keep a mapped user entry active while every code bank is recycled,
+     * then replace that mapping. This exercises page-index maintenance,
+     * not just P1 code reclamation. */
+    if (hc_getstat(19)) {
+        unsigned i, total = 0, expected = 0, generations, user_ok = 1;
+        volatile unsigned short *a = (volatile unsigned short *)P_A;
+        volatile unsigned short *b = (volatile unsigned short *)P_B;
+        a[0] = 0xe00b; b[0] = 0xe00d;
+        a[1] = b[1] = 0x000b; a[2] = b[2] = 0x0009;
+        hc_flush(0, 0);
+        mmio_w32(MMUCR, 1); tlb_map(V_CODE, P_B, 1, 0);
+        for (i = 0; i < MAX_BLOCKS * 2; ++i) {
+            recycle_pressure[i*4] = 0xe000 | (i & 127);
+            recycle_pressure[i*4+1] = 0x000b;
+            recycle_pressure[i*4+2] = recycle_pressure[i*4+3] = 0x0009;
+        }
+        hc_flush((unsigned)recycle_pressure, sizeof recycle_pressure);
+        generations = hc_getstat(7);
+        for (i = 0; i < MAX_BLOCKS * 2; ++i) {
+            total += ((fn_t)&recycle_pressure[i*4])(); expected += i & 127;
+            if (!(i & 255) && ((fn_t)V_CODE)() != 13) user_ok = 0;
+        }
+        check("user mapping survives repeated bank recycling",
+              user_ok && total == expected && hc_getstat(7) - generations >= 12);
+        mmio_w32(MMUCR, 1); tlb_map(V_CODE, P_A, 1, 0);
+        check("user remap after bank recycling resolves new code", ((fn_t)V_CODE)() == 11);
     }
 
     mmio_w32(MMUCR, 0x4);

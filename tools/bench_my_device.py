@@ -51,9 +51,11 @@ def main():
     result = dict(inputs=inputs, tap_tick=a.tap_tick, flash_offset=a.flash_offset,
                   host_sample_start=os.environ.get('HLE_DBT_SAMPLE'),
                   host_sample_layout={k: os.environ[k] for k in (
-                      'HLE_DBT_SAMPLE_BLOCKS', 'HLE_DBT_SAMPLE_COUNTS',
-                      'HLE_DBT_SAMPLE_PER_BANK', 'HLE_DBT_COUNTER_BASE',
-                      'HLE_DBT_COUNTER_WORDS') if k in os.environ},
+                      'HLE_DBT_DEVICE_CTX', 'HLE_DBT_DEVICE_LO', 'HLE_DBT_DEVICE_HI',
+                      'HLE_DBT_SAMPLE_OPS', 'HLE_DBT_CACHE_BASE', 'HLE_DBT_SAMPLE_BLOCKS', 'HLE_DBT_SAMPLE_COUNTS',
+                      'HLE_DBT_SAMPLE_PER_BANK', 'HLE_DBT_SAMPLE_HEADER_BYTES', 'HLE_DBT_ARENA_BASE', 'HLE_DBT_ARENA_BANK_BYTES', 'HLE_DBT_COUNTER_BASE',
+                      'HLE_DBT_COUNTER_WORDS', 'HLE_DBT_TRACE_ENTRY', 'HLE_DBT_TRACE_BANK',
+                      'HLE_DBT_TRACE_CODE', 'HLE_DBT_TRACE_ARENA', 'HLE_DBT_TRACE_SCRATCH') if k in os.environ},
                   events=events, returncode=proc.returncode,
                   total_wall_seconds=time.monotonic()-start)
     loaded = next((e for e in events if '[BENCH loaded]' in e['message']), None)

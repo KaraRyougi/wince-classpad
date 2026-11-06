@@ -31,7 +31,8 @@ void emit_patch16(emitter *e, int byte_off, sf_u32 op);
 int  emit_mov_lit(emitter *e, int rn, sf_u32 value, int tag);
 /* mov #imm,Rn when it fits, else a literal (tag -1) */
 void emit_mov_imm(emitter *e, int rn, sf_u32 value);
-/* Place the literal pool here (aligned); returns byte offset of pool start.
+/* Place the literal pool here (aligned); returns byte offset of pool start,
+ * or -1 if emission had already failed. Always check overflow afterwards.
  * Call only at a point not reached by fall-through (after a jump). */
 int  emit_flush_lits(emitter *e);
 /* Byte offset of the literal with the given tag, valid after flushing. -1 if none. */
@@ -58,6 +59,7 @@ int  emit_lits_bytes(const emitter *e);
 #define OP_SHLR8(n)        (0x4019u | ((n) << 8))
 #define OP_SHLR16(n)       (0x4029u | ((n) << 8))
 #define OP_SHLL2(n)        (0x4008u | ((n) << 8))
+#define OP_EXTUB(m,n)      (0x600Cu | ((n) << 8) | ((m) << 4))
 #define OP_EXTUW(m,n)      (0x600Du | ((n) << 8) | ((m) << 4))
 #define OP_BRAF(n)         (0x0023u | ((n) << 8))
 #define OP_SHLR(n)         (0x4001u | ((n) << 8))

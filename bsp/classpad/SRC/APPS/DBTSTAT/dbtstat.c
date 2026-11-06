@@ -31,6 +31,7 @@
 static DWORD g_now[NSTAT], g_prev[NSTAT], g_first[NSTAT];
 static DWORD g_tickNow, g_tickPrev, g_tickFirst;
 static int   g_page, g_polls;
+static BOOL  g_capture, g_frozen;
 static HFONT g_font;
 
 static void Snapshot(void)
@@ -99,6 +100,12 @@ static void Build(PAGE *p)
     // Prefer the independent TMU1 clock for rates in profiling builds.
     if (prof && el) ms = (DWORD)(((ULONGLONG)el * 1000) / TMU1_HZ);
     p->line = 0;
+    if (g_now[60] != 0x44425453 || g_now[61] != 1) {
+        Add(p, TEXT("Loader stats ABI unavailable"));
+        Add(p, TEXT("Use CE Profile ABI1 Loader."));
+        Add(p, TEXT("Zero fields are NOT hardware readings."));
+        return;
+    }
     if (g_page == 1) { HotPage(p, DF, DF(HC_STAT_SAMPLES), TEXT("hot since start:")); return; }
     if (g_page == 2) { HotPage(p, D, samples, TEXT("hot last interval:")); return; }
 
@@ -150,7 +157,7 @@ static void Build(PAGE *p)
         }
         Add(p, TEXT("%s"), line);
     }
-    Add(p, TEXT("tap: next page   top-right: close"));
+    Add(p, g_frozen ? TEXT("30s result: tap page; EXE/bottom: repeat") : TEXT("tap page; EXE/bottom: capture 30s"));
 }
 
 static void Paint(HWND hWnd)
@@ -176,6 +183,18 @@ static void Paint(HWND hWnd)
     EndPaint(hWnd, &ps);
 }
 
+static void StartCapture(HWND w)
+{
+    if (g_capture || g_now[60] != 0x44425453 || g_now[61] != 1) return;
+    Snapshot();
+    g_capture = TRUE; g_frozen = FALSE;
+    KillTimer(w, 1);
+    if (!SetTimer(w, 1, 30000, NULL)) {
+        g_capture = FALSE; SetTimer(w, 1, POLL_MS, NULL); return;
+    }
+    ShowWindow(w, SW_HIDE);
+}
+
 static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
@@ -184,15 +203,25 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         SetTimer(hWnd, 1, POLL_MS, NULL);
         return 0;
     case WM_TIMER:
+        if (g_frozen) return 0;
         Snapshot();
+        if (g_capture) {
+            g_capture = FALSE; g_frozen = TRUE; g_page = 0;
+            KillTimer(hWnd, 1);
+            ShowWindow(hWnd, SW_SHOW); SetForegroundWindow(hWnd);
+        }
         InvalidateRect(hWnd, NULL, FALSE);
         return 0;
     case WM_PAINT:
         Paint(hWnd);
         return 0;
+    case WM_KEYDOWN:
+        if (wParam == VK_RETURN) { StartCapture(hWnd); return 0; }
+        break;
     case WM_LBUTTONDOWN: {
         RECT rc; GetClientRect(hWnd, &rc);
         if ((short)HIWORD(lParam) < LINE_H + 2 && (short)LOWORD(lParam) > rc.right - 24) { DestroyWindow(hWnd); return 0; }
+        if ((short)HIWORD(lParam) >= (LINES - 2) * LINE_H) { StartCapture(hWnd); return 0; }
         g_page = (g_page + 1) % 3;
         InvalidateRect(hWnd, NULL, FALSE);
         return 0;
@@ -223,7 +252,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPWSTR lpCmdLine, int n
     hWnd = CreateWindowEx(WS_EX_TOPMOST, TEXT("ClasspadDbtStat"), TEXT("DBT"), WS_VISIBLE | WS_POPUP,
                           0, 0, w, h, NULL, NULL, hInstance, NULL);
     if (!hWnd) { RETAILMSG(1, (TEXT("CLASSPAD DBTSTAT: CreateWindow failed %d\r\n"), GetLastError())); return 1; }
-    ShowWindow(hWnd, SW_SHOW); UpdateWindow(hWnd);
+    ShowWindow(hWnd, SW_SHOW); SetForegroundWindow(hWnd); UpdateWindow(hWnd);
     while (GetMessage(&m, NULL, 0, 0)) { TranslateMessage(&m); DispatchMessage(&m); }
     DeleteObject(g_font);
     return 0;

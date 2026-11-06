@@ -16,10 +16,18 @@
 #define P_CODE  0x8C300000u            /* physical pages, through P1 */
 #define P_DATA  0x8C301000u
 #define P_LAZY  0x8C302000u
-#define PTEL_FLAGS 0x16Eu              /* V | PR=11 | C | D | SH, 4 KiB */
+#define PTEL_FLAGS 0x17Eu              /* V | PR=11 | C | D | SH, 4 KiB */
 
 extern char guest_vectors[];
 volatile unsigned fault_pr;
+extern unsigned r0_fault_load(unsigned, volatile unsigned *), r0_fault_store(unsigned, unsigned);
+extern char r0_fault_load_site[], r0_fault_store_site[], r0_fault_end[];
+__asm__(".text\n.align 2\n.global _r0_fault_load\n.global _r0_fault_store\n"
+        ".global _r0_fault_load_site\n.global _r0_fault_store_site\n.global _r0_fault_end\n"
+        "_r0_fault_load:\n mov r4,r0\n_r0_fault_load_site:\n mov.l @r0+,r1\n"
+        "mov.l r1,@r5\n rts\n nop\n"
+        "_r0_fault_store:\n mov r4,r0\n_r0_fault_store_site:\n mov.l r5,@-r0\n"
+        "rts\n nop\n_r0_fault_end:\n");
 static int fails;
 static volatile unsigned faults, misses, last_vec, last_expevt, last_tea, last_spc;
 
@@ -88,6 +96,14 @@ void guest_main(void)
     r = ((fn2_t)V_CODE)(2, 3, (const unsigned *)V_DATA);     /* code and data through the TLB */
     check("call through a TLB-mapped code page", r == 105 && faults == 0);
     check("data load through a TLB-mapped page", r == 105);
+    if (hc_getstat(419)) {
+        unsigned fast = hc_getstat(420);
+        check("4 KiB no-code LDTLB fast path executed", fast > 0);
+        tlb_map(V_CODE, P_CODE);
+        check("translated code page keeps LDTLB bookkeeping", hc_getstat(420) == fast);
+        check("code page remains callable after guarded refill", ((fn2_t)V_CODE)(2, 3, (const unsigned *)V_DATA) == 105);
+    }
+
 
     *(volatile unsigned *)V_DATA = 1000;                     /* data store through the TLB */
     check("data store through the TLB lands in the physical page", *(volatile unsigned *)P_DATA == 1000);
@@ -101,6 +117,21 @@ void guest_main(void)
 
     r = ((fn0_t)V_LAZY)();
     check("mapped page runs without a new fault", r == 7 && faults == 1);
+
+    /* Translation starts in a mapped page and probes into the next,
+     * initially unmapped page. Retry must preserve the original entry. */
+    {
+        unsigned m0 = misses, f0 = faults;
+        volatile unsigned short *tail = (volatile unsigned short *)(P_DATA + 0xffc);
+        tail[0] = 0x0009; tail[1] = 0x0009;
+        mmio_w32(MMUCR, mmio_r32(MMUCR) | 4);
+        hc_flush(V_DATA + 0xffc, 10);
+        tlb_map(V_DATA, P_DATA);
+        r = ((fn0_t)(V_DATA + 0xffc))();
+        check("cross-page code probe refills and retries", r == 7 && misses == m0 + 1 && faults == f0 + 1);
+        check("cross-page probe preserves entry SPC and missing-page TEA",
+              last_spc == V_DATA + 0xffc && last_tea == V_LAZY && last_expevt == 0x040);
+    }
 
     /* rte into a mapped page that is neither in the TLB nor translated,
      * with BL=1 at the rte (the kernel's thread dispatch does this): the
@@ -128,6 +159,21 @@ void guest_main(void)
         hc_puts(" sr "); hc_puthex(sr_after); hc_puts(" translations+"); hc_puthex(hc_getstat(0) - tr0); hc_putc('\n');
         check("rte with BL=1 into untranslated mapped code: miss handled after the rte",
               r0v == 7 && misses == m0 + 1 && faults == f0 + 1 && (sr_after & 0x10000000u) == 0);
+    }
+
+    if (hc_getstat(416)) {
+        volatile unsigned value = 0;
+        unsigned original = *(volatile unsigned *)P_LAZY, m0, address;
+        hc_devrange((unsigned)r0_fault_load, (unsigned)r0_fault_end);
+        mmio_w32(MMUCR, mmio_r32(MMUCR) | 4);
+        m0 = misses;
+        address = r0_fault_load(V_LAZY, &value);
+        check("R0 postincrement TLB miss retries exactly once", address == V_LAZY+4 && value == original && misses == m0+1 && last_spc == (unsigned)r0_fault_load_site);
+        mmio_w32(MMUCR, mmio_r32(MMUCR) | 4);
+        m0 = misses;
+        address = r0_fault_store(V_LAZY+4, 0x12345678u);
+        check("R0 predecrement TLB miss retries exactly once", address == V_LAZY && *(volatile unsigned *)P_LAZY == 0x12345678u && misses == m0+1 && last_spc == (unsigned)r0_fault_store_site);
+        hc_devrange(0,0);
     }
 
     mmio_w32(MMUCR, 0x4);                                    /* MMU off again, flush */

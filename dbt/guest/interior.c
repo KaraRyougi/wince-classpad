@@ -4,6 +4,12 @@ extern unsigned entry_start(void), entry_middle(void), entry_late(void);
 __asm__(".align 2\n.global _entry_start\n.global _entry_middle\n.global _entry_late\n"
         "_entry_start:\n mov #1,r0\n_entry_middle:\n mov #2,r1\n"
         "_entry_late:\n mov #7,r0\n rts\n nop\n");
+extern void uniform_start(volatile unsigned *p), uniform_alternate(volatile unsigned *p, unsigned v);
+__asm__(".align 2\n.global _uniform_start\n.global _uniform_alternate\n"
+        "_uniform_start:\n mov #0,r0\n"
+        "1:\n mov.l r0,@r4\n rts\n nop\n"
+        "_uniform_alternate:\n mov r5,r0\n mov.l 2f,r1\n jmp @r1\n nop\n"
+        ".align 2\n2: .long 1b\n");
 static int fails;
 #ifndef MAX_BLOCKS
 #define MAX_BLOCKS 4096
@@ -18,8 +24,10 @@ static void check(const char *name, int ok)
 }
 void guest_main(void)
 {
-    unsigned before, result, removed;
+    unsigned before, result, removed, hash_batches, source_scans;
+    if (hc_getstat(412)) hc_devrange((unsigned)entry_start, (unsigned)entry_start+10);
     check("initial block executes", entry_start() == 7);
+    if (hc_getstat(412)) check("both core and other streams allocated", hc_getstat(413) && hc_getstat(414));
     before = hc_getstat(17);
     result = suffix();
     check("interior entry produces correct value", result == 7);
@@ -28,11 +36,52 @@ void guest_main(void)
     check("second interior entry produces correct value", late_suffix() == 7);
     check("second interior entry actually reused", hc_getstat(17) > before);
     removed = hc_getstat(22);
+    hash_batches = hc_getstat(407);
+    source_scans = hc_getstat(409);
     *(volatile unsigned short *)(unsigned)entry_late = 0xe009;
     hc_flush((unsigned)entry_start, 10);
     check("invalidation detaches cached interior target", suffix() == 9);
     check("invalidation detaches second interior target", late_suffix() == 9);
+    if (hc_getstat(408)) check("incoming bitmap cleanup actually ran", hc_getstat(409) > source_scans);
+    if (hc_getstat(406)) check("deferred alias cleanup actually ran", hc_getstat(407) > hash_batches);
     if (hc_getstat(21)) check("invalidation removes published hash aliases", hc_getstat(22) >= removed + 2);
+    if (hc_getstat(406)) {
+        unsigned i, sum = 0, reuse = hc_getstat(17);
+        for (i = 0; i < 16; ++i) {
+            pressure[i*8] = 0xe000;
+            pressure[i*8+1] = 0xe101;
+            pressure[i*8+2] = 0xe007;
+            pressure[i*8+3] = 0x000b;
+            pressure[i*8+4] = 0x0009;
+        }
+        hc_flush((unsigned)pressure, 16*16);
+        for (i = 0; i < 16; ++i) {
+            sum += ((unsigned (*)(void))&pressure[i*8])();
+            sum += ((unsigned (*)(void))&pressure[i*8+1])();
+            sum += ((unsigned (*)(void))&pressure[i*8+2])();
+        }
+        check("multiple owners publish interior entries", sum == 16*21 && hc_getstat(17) >= reuse+32);
+        for (i = 0; i < 16; ++i) pressure[i*8+2] = 0xe00b;
+        hash_batches = hc_getstat(407);
+        removed = hc_getstat(22);
+        hc_flush((unsigned)pressure, 16*16);
+        check("one hash scan cleans multiple dead owners", hc_getstat(407) == hash_batches+1);
+        check("batch removes all published owner aliases", hc_getstat(22) >= removed+32);
+        sum = 0;
+        for (i = 0; i < 16; ++i) {
+            sum += ((unsigned (*)(void))&pressure[i*8+1])();
+            sum += ((unsigned (*)(void))&pressure[i*8+2])();
+        }
+        check("all invalidated suffixes execute new code", sum == 16*22);
+    }
+    if (hc_getstat(410)) {
+        volatile unsigned word = 0xFFFFFFFFu;
+        unsigned specialized = hc_getstat(411);
+        uniform_start(&word);
+        check("uniform store actually specialized", word == 0 && hc_getstat(411) > specialized);
+        uniform_alternate(&word, 0x12345678u);
+        check("middle entry does not inherit uniform proof", word == 0x12345678u && *(volatile unsigned char *)&word == 0x78);
+    }
     if (hc_getstat(19)) {
         unsigned i, total = 0, expected = 0, generations;
         unsigned alias = (unsigned)entry_middle;
@@ -54,6 +103,7 @@ void guest_main(void)
         check("cache pressure executes correct code", total == expected);
         check("all banks have been recycled", hc_getstat(7) - generations >= 12);
         check("interior target survives owner-bank recycling", suffix() == 9);
+        if (hc_getstat(412)) check("cold pressure leaves core bank intact", hc_getstat(415) == 0);
     }
     hc_exit(fails ? 1 : 0);
 }

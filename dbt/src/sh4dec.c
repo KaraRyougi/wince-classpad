@@ -41,12 +41,29 @@ void sh4_decode(sf_u32 op, sh_insn *d)
 #endif
 {
     int n = (op >> 8) & 0xF, m = (op >> 4) & 0xF;
+#ifdef DBT_DECODE_TEMPLATE
+    /* Fixed-size assignment lets the target compiler emit direct stores,
+     * avoiding the freestanding memset loop on every decoded opcode. */
+    static const sh_insn empty = {
+        .kind = K_PASS, .ctrl = CR_NONE, .data = -1, .base = -1,
+        .br_reg = -1
+    };
+    *d = empty;
+    d->op = op & 0xFFFFu; op &= 0xFFFFu;
+#else
     memset(d, 0, sizeof *d);
     d->op = op & 0xFFFFu; op &= 0xFFFFu;
     d->ctrl = CR_NONE; d->data = -1; d->base = -1; d->br_reg = -1;
     d->kind = K_PASS;
+#endif
 
+#ifdef DBT_DECODE_FPU_GATE
+    /* Only 0xxx/4xxx control transfers and Fxxx arithmetic can be FPU
+     * instructions. Most memory/ALU opcodes need none of the subdecoding. */
+    if (((op & 0xB000u) == 0 || (op >> 12) == 15) && fpuemu_is_fpu_op(op)) {
+#else
     if (fpuemu_is_fpu_op(op)) {
+#endif
         d->kind = K_FPU;
         /* GPR operands of FPU instructions: lds/sts and fmov address registers */
         switch (op >> 12) {
@@ -236,8 +253,52 @@ int sh4_slot_legal(const sh_insn *d)
 #ifdef DBT_DECODE_CACHE
 /* Decode results depend only on the opcode, never on PC or address space.
  * A zero tag keeps an interrupted/abandoned fill invisible. */
+#ifdef DBT_DECODE_INTERLEAVED
+#ifndef DBT_DECODE_REF
+#error DBT_DECODE_INTERLEAVED requires DBT_DECODE_REF
+#endif
+typedef struct { volatile sf_u32 tag; sh_insn decoded; } decode_entry;
+typedef char check_decode_entry[(sizeof(decode_entry) == 32) ? 1 : -1];
+static decode_entry decode_entries[512] __attribute__((aligned(32)));
+#else
 static sh_insn decode_cache[512];
 static volatile sf_u32 decode_tags[512];
+#endif
+#ifdef DBT_DECODE_REF
+const sh_insn *sh4_decode_cached(sf_u32 op)
+{
+    unsigned slot;
+    sh_insn decoded;
+    op &= 0xffffu;
+    slot = (op ^ (op >> 7)) & 511u;
+#ifdef DBT_DECODE_INTERLEAVED
+    {
+        decode_entry *entry = &decode_entries[slot];
+        if (entry->tag == op + 1) return &entry->decoded;
+        decode_uncached(op, &decoded);
+        entry->tag = 0;
+        __asm__ volatile ("" ::: "memory");
+        entry->decoded = decoded;
+        __asm__ volatile ("" ::: "memory");
+        entry->tag = op + 1;
+        return &entry->decoded;
+    }
+#else
+    if (decode_tags[slot] == op + 1) return &decode_cache[slot];
+    decode_uncached(op, &decoded);
+    decode_tags[slot] = 0;
+    __asm__ volatile ("" ::: "memory");
+    decode_cache[slot] = decoded;
+    __asm__ volatile ("" ::: "memory");
+    decode_tags[slot] = op + 1;
+    return &decode_cache[slot];
+#endif
+}
+void sh4_decode(sf_u32 op, sh_insn *d)
+{
+    *d = *sh4_decode_cached(op);
+}
+#else
 void sh4_decode(sf_u32 op, sh_insn *d)
 {
     unsigned slot;
@@ -251,4 +312,5 @@ void sh4_decode(sf_u32 op, sh_insn *d)
     __asm__ volatile ("" ::: "memory");
     decode_tags[slot] = op + 1;
 }
+#endif
 #endif

@@ -48,6 +48,16 @@ def main():
             for name, count in buckets.most_common(30)
         ],
     }
+    device = [(int(address, 16), int(count)) for address, count in
+              re.findall(r'\[DBTDEVICE sample\] ([0-9a-f]+) (\d+)', log)]
+    device_other = re.search(r'\[DBTDEVICE other\] (\d+)', log)
+    if device_other:
+        result['device_store_residency'] = {
+            'note': 'Sampled residency inside fallback, not exact access counts; predecrement excluded',
+            'addresses': [dict(address=hex(address), samples=count)
+                          for address, count in sorted(device, key=lambda item: -item[1])],
+            'other_samples': int(device_other[1]),
+        }
     guest = Counter()
     for address, count in re.findall(r'\[DBTSAMPLE guest\] ([0-9a-f]+) (\d+)', log):
         guest[int(address, 16)] += int(count)

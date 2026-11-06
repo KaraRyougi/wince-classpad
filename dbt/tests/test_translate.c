@@ -38,6 +38,11 @@ static dbt_block blk;
 static dbt_imeta blk_meta[DBT_MAX_META];
 static dbt_spill blk_spills[DBT_MAX_BLOCK_SPILLS];
 #define HBASE 0x8CC00000u
+#ifdef DBT_IC_T_ONLY
+#define IC_T_RESTORE(r) OP_SHLR(r)
+#else
+#define IC_T_RESTORE(r) OP_LDC_SR(r)
+#endif
 
 static int failures = 0, checks = 0;
 
@@ -68,6 +73,25 @@ static void check_packed_metadata(void)
     for (i = 0; i < (unsigned)blk.host_len; ++i)
         if (dbt_block_find(&packed, i) != dbt_block_find(&blk, i)) ok = 0;
     if (storage[sizeof(storage)/sizeof(storage[0])-1] != 0xA55A1234u) ok = 0;
+#ifdef DBT_SPILL_START_SEARCH
+    /* Compare every interrupt offset with the original full reverse scan,
+     * including bounded output and nested spills of the same register. */
+    for (i = 1; i < blk.nspills; ++i)
+        if (blk.spills[i-1].start > blk.spills[i].start) ok = 0;
+    for (i = 0; i <= (unsigned)blk.host_len + 2; ++i) {
+        int limit;
+        for (limit = 0; limit <= 8; ++limit) {
+            dbt_spill found[8]; int j, n = 0;
+            int got = dbt_block_pending_spills(&blk, 0, i, found, limit);
+            for (j = blk.nspills - 1; j >= 0 && n < limit; --j)
+                if (blk.spills[j].start < i && i <= blk.spills[j].end) {
+                    if (n >= got || memcmp(&found[n], &blk.spills[j], sizeof(dbt_spill))) ok = 0;
+                    ++n;
+                }
+            if (got != n) ok = 0;
+        }
+    }
+#endif
     checks++;
     if (!ok) { failures++; printf("FAIL packed metadata and exception range lookup\n"); }
 }
@@ -133,6 +157,9 @@ static sf_u32 lit_of_movl(int at)
 int main(void)
 {
     memset(&env, 0, sizeof env);
+#ifdef DBT_SAME_ASID_PTEH_STORE
+    env.current_asid_addr = 0x8CF01008;
+#endif
     env.fetch16 = fetch16; env.read16le = read16le; env.read32le = read32le;
     env.rt_lookup_link = 0x8CF00000; env.rt_lookup = 0x8CF00100; env.rt_rte = 0x8CF00200; env.rt_lookup_ic = 0x8CF00600;
     env.rt_fpu = 0x8CF00300; env.rt_fallback = 0x8CF00400; env.rt_ldc_sr = 0x8CF00500;
@@ -169,10 +196,20 @@ int main(void)
       expect("alu meta", blk.nmeta == 3 && blk.meta[1].host_off == 2 && blk.meta[2].guest_off == 4 && blk.meta[3].host_off == 6 && blk.meta[3].guest_off == 6);
 #endif
       /* fall-through: nop (no borrowed register) ; lds r1,x0 ; mov.l lit,r1 ; jmp @r1 ; sts x0,r1 */
+#ifdef DBT_EXIT_NOP_TAIL
+      expect("alu tail", hbuf[3] == LDS_X0(1) && (hbuf[4] & 0xFF00) == 0xD100 && hbuf[5] == OP_JMP(1) && hbuf[6] == STS_X0(1) && hbuf[7] == OP_NOP);
+#else
       expect("alu tail", hbuf[3] == OP_NOP && hbuf[4] == LDS_X0(1) && (hbuf[5] & 0xFF00) == 0xD100 && hbuf[6] == OP_JMP(1) && hbuf[7] == STS_X0(1));
+#endif
       expect("alu link", blk.nlinks == 1 && blk.links[0].guest_target == GBASE + 6);
       /* the link literal initially points at the exit stub, which loads the guest target */
-      { sf_u32 stub = lit_of_movl(10); int so = stub - HBASE;
+      { sf_u32 stub = lit_of_movl(blk.links[0].jump_off +
+#ifdef DBT_EXIT_NOP_TAIL
+          2
+#else
+          4
+#endif
+        ); int so = stub - HBASE;
         expect("alu stub addr", so == blk.code_len);
         expect("alu stub code", hbuf[so / 2] == LDS_Y0(1) && hbuf[so / 2 + 2] == LDS_X0(1) && hbuf[so / 2 + 4] == LDS_X1(1) && hbuf[so / 2 + 6] == OP_JMP(1) && hbuf[so / 2 + 7] == STS_Y0(1));
         expect("alu stub target", lit_of_movl(so + 2) == GBASE + 6);
@@ -198,7 +235,11 @@ int main(void)
       translate(ops, 3, 3);
       expect_seq("stores", 0, exp, 18);
       /* spill bookkeeping for the first store: lds at 0, sts at 6 */
-      expect("spill rec", blk.nspills == 4 && blk.spills[0].insn == 0 && blk.spills[0].gpr == 1 && blk.spills[0].start == 0 && blk.spills[0].end == 6);
+      expect("spill rec", blk.nspills == 4 &&
+#ifndef DBT_COMPACT_SPILL6
+             blk.spills[0].insn == 0 &&
+#endif
+             blk.spills[0].gpr == 1 && blk.spills[0].start == 0 && blk.spills[0].end == 6);
       { dbt_spill sp[4];
         expect("pending@store", dbt_block_pending_spills(&blk, 0, 4, sp, 4) == 1 && sp[0].slot == SLOT_X0);
         expect("pending@lds", dbt_block_pending_spills(&blk, 0, 0, sp, 4) == 0);
@@ -243,11 +284,25 @@ int main(void)
 
     /* 8. bra with a slot: bra +8 ; nop   -> nop ; direct jump (nop, lds r1,x0 ...) to GBASE+4+8 */
     { sf_u32 ops[] = { 0xA004, 0x0009 };
+#ifdef DBT_EXIT_NOP_TAIL
+      sf_u32 exp[] = { 0x0009, LDS_X0(1) };
+#else
       sf_u32 exp[] = { 0x0009, OP_NOP, LDS_X0(1) };
+#endif
       translate(ops, 2, 4);
-      expect_seq("bra", 0, exp, 3);
+      expect_seq("bra", 0, exp, sizeof exp / sizeof exp[0]);
       expect("bra link", blk.nlinks == 1 && blk.links[0].guest_target == GBASE + 12 && blk.end_reason == END_BRANCH && blk.guest_len == 4);
       expect("bra meta", blk.nmeta == 2 && blk.meta[1].kind == META_TARGET_CONST && blk.meta[1].target == GBASE + 12 && blk.meta[1].host_off == 2 && blk.meta[2].guest_off == 4);
+#ifdef DBT_EXIT_NOP_TAIL
+      {
+        dbt_spill pending[2]; unsigned off = blk.links[0].jump_off;
+        expect("exit spill begins after save", dbt_block_pending_spills(&blk, 1, off, pending, 2) == 0 &&
+               dbt_block_pending_spills(&blk, 1, off+2, pending, 2) == 1 && pending[0].slot == SLOT_X0);
+        expect("exit spill covers restore delay slot", dbt_block_pending_spills(&blk, 1, off+6, pending, 2) == 1 &&
+               dbt_block_pending_spills(&blk, 1, off+8, pending, 2) == 0);
+        expect("exit trailing padding", hbuf[off/2+4] == OP_NOP);
+      }
+#endif
     }
 
     /* 9. bsr: PR = GBASE+4, slot executes after PR write */
@@ -255,6 +310,10 @@ int main(void)
       sf_u32 exp[] = { LDS_Y0(3), 0xD300 /* mov.l lit,r3 (disp patched) */, OP_LDS_PR(3), STS_Y0(3), 0x6213, OP_NOP, LDS_X0(1) };
       translate(ops, 2, 4);
       exp[1] = hbuf[1];   /* displacement is pool-dependent; check the literal instead */
+#ifdef DBT_EXIT_NOP_TAIL
+      exp[5] = LDS_X0(1); exp[6] = hbuf[6];
+      expect("bsr exit literal", (hbuf[6] & 0xff00) == 0xd100);
+#endif
       expect_seq("bsr", 0, exp, 7);
       expect("bsr pr", lit_of_movl(2) == GBASE + 4);
     }
@@ -262,8 +321,8 @@ int main(void)
     /* 10. PR inline cache saves T in X1 and restores it on both paths. */
     { sf_u32 ops[] = { 0x000B, 0x0009 };
       sf_u32 exp[] = { 0x0009, LDS_Y0(1), OP_STS_PR(1), op_lds_slot(2, SLOT_Y1), OP_STC_SR(2), LDS_X1(2), 0,
-                       OP_CMPEQ_RR(1, 2), OP_BF(5), op_sts_slot(SLOT_X1,2), OP_LDC_SR(2), STS_Y0(1), 0,
-                       OP_JMP(2), op_sts_slot(SLOT_Y1,2), op_sts_slot(SLOT_X1,2), OP_LDC_SR(2),
+                       OP_CMPEQ_RR(1, 2), OP_BF(5), op_sts_slot(SLOT_X1,2), IC_T_RESTORE(2), STS_Y0(1), 0,
+                       OP_JMP(2), op_sts_slot(SLOT_Y1,2), op_sts_slot(SLOT_X1,2), IC_T_RESTORE(2),
                        op_sts_slot(SLOT_Y1,2), LDS_X0(1), 0, LDS_X1(1), 0, OP_JMP(1), STS_Y0(1) };
       translate(ops, 2, 4);
       exp[6] = hbuf[6]; exp[12] = hbuf[12]; exp[19] = hbuf[19]; exp[21] = hbuf[21];
@@ -289,8 +348,8 @@ int main(void)
       /* lds r1,y0; mov.l ret,r1; lds r1,pr; nop; mov.l g,r1; cmp/eq r4,r1; bf +2; mov.l h,r1; jmp @r1; sts y0,r1;
        * miss: lds r4,x0; mov.l a,r1; lds r1,x1; mov.l lookup_ic,r1; jmp @r1; sts y0,r1 */
       sf_u32 exp[] = { LDS_Y0(1), 0, OP_LDS_PR(1), 0x0009, OP_STC_SR(1), LDS_X1(1), 0,
-                       OP_CMPEQ_RR(4,1), OP_BF(4), op_sts_slot(SLOT_X1,1), OP_LDC_SR(1), 0, OP_JMP(1), STS_Y0(1),
-                       op_sts_slot(SLOT_X1,1), OP_LDC_SR(1), LDS_X0(4), 0, LDS_X1(1), 0, OP_JMP(1), STS_Y0(1) };
+                       OP_CMPEQ_RR(4,1), OP_BF(4), op_sts_slot(SLOT_X1,1), IC_T_RESTORE(1), 0, OP_JMP(1), STS_Y0(1),
+                       op_sts_slot(SLOT_X1,1), IC_T_RESTORE(1), LDS_X0(4), 0, LDS_X1(1), 0, OP_JMP(1), STS_Y0(1) };
       translate(ops, 2, 4);
       exp[1] = hbuf[1]; exp[6] = hbuf[6]; exp[11] = hbuf[11]; exp[17] = hbuf[17]; exp[19] = hbuf[19];
       expect_seq("jsr preserves T on hit and miss", 0, exp, 22);
@@ -304,7 +363,7 @@ int main(void)
       translate(ops, 2, 4);
       /* X1 holds saved SR until the miss tail replaces it with the IC address. */
       expect("jmp fast", hbuf[0] == 0x0009 && hbuf[1] == LDS_Y0(1) && hbuf[5] == OP_CMPEQ_RR(3,1) && hbuf[6] == OP_BF(4)
-             && hbuf[8] == OP_LDC_SR(1) && hbuf[10] == OP_JMP(1) && hbuf[11] == STS_Y0(1) && hbuf[14] == LDS_X0(3)
+             && hbuf[8] == IC_T_RESTORE(1) && hbuf[10] == OP_JMP(1) && hbuf[11] == STS_Y0(1) && hbuf[14] == LDS_X0(3)
              && hbuf[16] == LDS_X1(1) && hbuf[18] == OP_JMP(1) && hbuf[19] == STS_Y0(1)
              && blk.meta[1].kind == META_TARGET_REG && blk.meta[1].fix_reg == 3);
     }
@@ -313,9 +372,19 @@ int main(void)
     { sf_u32 ops[] = { 0x8902, 0x7101 /* add #1,r1 */ };
       sf_u32 exp[] = { OP_BF(4), OP_NOP, LDS_X0(1), 0, OP_JMP(1), STS_X0(1), 0x7101 };
       translate(ops, 2, 2);
+#ifdef DBT_EXIT_NOP_TAIL
+      exp[1] = LDS_X0(1); exp[2] = hbuf[2]; exp[3] = OP_JMP(1);
+      exp[4] = STS_X0(1); exp[5] = OP_NOP;
+      expect("bt exit literal", (hbuf[2] & 0xff00) == 0xd100);
+#else
       exp[3] = hbuf[3];
+#endif
 #ifdef DBT_BASIC_BLOCKS
+#ifdef DBT_EXIT_NOP_TAIL
+      exp[6] = LDS_X0(1);
+#else
       exp[6] = OP_NOP;
+#endif
       expect_seq("bt", 0, exp, 7);
       expect("bt successors have independent entries", blk.guest_len == 2 && blk.nlinks == 2 &&
              blk.links[0].guest_target == GBASE + 8 && blk.links[1].guest_target == GBASE + 2);
@@ -331,6 +400,10 @@ int main(void)
                        OP_SHLR(4), op_sts_slot(SLOT_Y1, 4), STS_Y0(3), OP_BRA(8), OP_NOP,
                        OP_SHLR(4), op_sts_slot(SLOT_Y1, 4), STS_Y0(3), OP_NOP, LDS_X0(1) };
       translate(ops, 2, 4);
+#ifdef DBT_EXIT_NOP_TAIL
+      exp[15] = LDS_X0(1); exp[16] = hbuf[16];
+      expect("bt/s exit literal", (hbuf[16] & 0xff00) == 0xd100);
+#endif
       expect_seq("bt/s T", 0, exp, 17);
       /* bf(4) from offset 12 lands on offset 12+4+8 = 24 = taken path */
       expect("bt/s bf target", 12 + 4 + 4 * 2 == 24 && hbuf[12] == OP_SHLR(4));
@@ -371,7 +444,11 @@ int main(void)
     /* 17. trapa ends the block and is followed by a jump to the next pc */
     { sf_u32 ops[] = { 0xC3F1, 0x0009 };
       translate(ops, 2, 4);
+#ifdef DBT_EXIT_NOP_TAIL
+      expect("trapa", hbuf[0] == 0xC3F1 && hbuf[1] == LDS_X0(1) && blk.end_reason == END_TRAP && blk.nlinks == 1 && blk.links[0].guest_target == GBASE + 2);
+#else
       expect("trapa", hbuf[0] == 0xC3F1 && hbuf[1] == OP_NOP && hbuf[2] == LDS_X0(1) && blk.end_reason == END_TRAP && blk.nlinks == 1 && blk.links[0].guest_target == GBASE + 2);
+#endif
       expect("trapa sentinel", blk.nmeta == 1 && blk.meta[1].host_off == 2 && blk.meta[1].guest_off == 2 && dbt_block_find(&blk, 4) == 1 && dbt_block_find(&blk, 0) == 0);
     }
 
@@ -525,8 +602,13 @@ int main(void)
     { sf_u32 ops[] = { 0xA000 };
       translate(ops, 1, 1);
       expect("stub_off", blk.nlinks == 1 && blk.links[0].stub_off == blk.code_len);
+#ifdef DBT_EXIT_NOP_TAIL
+      expect("link words", blk.links[0].w0 == LDS_X0(1) && (blk.links[0].w1 & 0xFF00) == 0xD100
+             && blk.links[0].w2 == OP_JMP(1) && blk.links[0].skip_w == 0);
+#else
       expect("link words", blk.links[0].w0 == OP_NOP && blk.links[0].w1 == LDS_X0(1)
              && blk.links[0].w2 == hbuf[blk.links[0].jump_off / 2 + 2] && (blk.links[0].w2 & 0xF000) == 0xD000 && blk.links[0].skip_w == 0);
+#endif
     }
 
     /* device-aware blocks: a 32-bit load tests its address for P4 without
@@ -534,29 +616,73 @@ int main(void)
     {
         static const sf_u32 ops[] = { 0x5211 };                      /* mov.l @(4,r1),r2 */
         static const sf_u32 exp[] = {
-            0x438A,                     /* lds r3,x0 (scratch) */
-            0x6313, 0x7304,             /* mov r1,r3 ; add #4,r3 : effective address */
-            0x6337, 0x4329, 0x4319,     /* not ; shlr16 ; shlr8 : 0 for 0xFF.. */
-            0x633B, 0x4329, 0x4319,     /* neg ; shlr16 ; shlr8 : 0 or 0xFF */
-            0x7301, 0x4319, 0x4308,     /* add #1 ; shlr8 ; shll2 : 0 or 4 */
-            0x0323, 0x038A,             /* braf r3 ; sts x0,r3 */
-            0xA000 | 0,                 /* bra slow (patched) */
-            0x0009,
-            0x5211, 0x6228, 0x6229, 0x6228,   /* fast: the swapped load */
+#if defined(DBT_R0_LOAD_FALLTHROUGH)
+            0x408a,0x6013,0x7004,0x4029,0x4019,0x7001,0x4019,0x70ff,0xc906,0x0023,0x008a
+#elif defined(DBT_R0_DIRECT_DEVICE_BRANCH) && defined(DBT_R0_DEVICE_TEST)
+            0x408a,0x6013,0x7004,0x4029,0x4019,0x7001,0x4019,0x600b,0xc90c,0x0023,0x008a
+#elif defined(DBT_R0_DEVICE_TEST)
+            0x408a,0x6013,0x7004,0x4029,0x4019,0x7001,0x4019,0xca01,0x4008,0x0023,0x008a
+#elif defined(DBT_SHORT_DEVICE_TEST)
+            0x438a,0x6313,0x7304,0x4329,0x4319,0x7301,0x4319,0x633b,0x7301,0x4308,0x0323,0x038a
+#else
+            0x438a,0x6313,0x7304,0x6337,0x4329,0x4319,0x633b,0x4329,0x4319,0x7301,0x4319,0x4308,0x0323,0x038a
+#endif
         };
+        static const sf_u32 fast[] = {0x5211,0x6228,0x6229,0x6228};
+        const int prefix = sizeof exp / sizeof exp[0];
         env.dev_lo = GBASE; env.dev_hi = GBASE + 0x1000;
         expect("dev load translates", translate(ops, 1, 0) == DBT_OK);
-        expect_seq("dev load test sequence", 0, exp, 14);
-        expect_seq("dev load fast path", 16, exp + 16, 4);
-        expect("dev bra slow skips the fast path", (hbuf[14] & 0xF000) == 0xA000 && (hbuf[14] & 0xFFF) == 6);   /* over 4 fast words + bra/nop */
+        expect_seq("dev load test sequence", 0, exp, prefix);
+#if defined(DBT_R0_LOAD_FALLTHROUGH)
+        expect_seq("fallthrough dev load fast path", prefix+3, fast, 4);
         {
-            const int slow_word = 22;
+            unsigned top; int correct = 1;
+            for (top = 0; top < 256; ++top) {
+                unsigned distance = (((top + 1) >> 8) - 1u) & 6u;
+                if (distance != (top == 255 ? 0u : 6u)) correct = 0;
+            }
+            expect("fallthrough selector covers every top byte", correct);
+        }
+        expect("cold load skips RAM conversion", (hbuf[prefix+1] & 0xFFFF) == 0xA004);
+#ifdef DBT_R0_LOAD_MERGE_META
+        expect("cold load shares the uncommitted classifier range",
+               dbt_block_find(&blk, prefix*2) == 0 && blk.meta[0].commit_rel == prefix*2);
+        {
+            int hot = dbt_block_find(&blk, (prefix+3)*2);
+            expect("RAM load keeps an independent byte-swap commit",
+                   hot > 0 && blk.meta[hot].host_off == (prefix+3)*2 &&
+                   blk.meta[hot].commit_rel == 0 && blk.meta[hot].fix_kind == FIX_SWAP32);
+        }
+#endif
+#elif defined(DBT_R0_DIRECT_DEVICE_BRANCH) && defined(DBT_R0_DEVICE_TEST)
+        expect_seq("direct dev load fast path", prefix, fast, 4);
+        {
+            unsigned top; int correct = 1;
+            for (top = 0; top < 256; ++top) {
+                unsigned distance = (0u - ((top + 1) >> 8)) & (hbuf[8] & 255);
+                if ((unsigned)(prefix * 2) + distance != (unsigned)((top == 255 ? prefix + 6 : prefix) * 2)) correct = 0;
+            }
+            expect("direct BRAF selects exact fast/slow entry for every top byte", correct);
+        }
+#else
+        expect_seq("dev load fast path", prefix+2, fast, 4);
+        expect("dev bra slow skips the fast path", (hbuf[prefix] & 0xF000) == 0xA000 && (hbuf[prefix] & 0xFFF) == 6);   /* over 4 fast words + bra/nop */
+#endif
+        {
+#if defined(DBT_R0_LOAD_FALLTHROUGH)
+            const int slow_word = prefix;
+#elif defined(DBT_R0_DIRECT_DEVICE_BRANCH) && defined(DBT_R0_DEVICE_TEST)
+            const int slow_word = prefix+6;
+#else
+            const int slow_word = prefix+8;
+#endif
             int w, found = 0;
             for (w = slow_word; w < 40 && w < blk.code_len / 2; w++)
                 if ((hbuf[w] & 0xF000) == 0xD000 && lit_of_movl(2 * w) == env.rt_fallback) found = 1;
 #ifdef DBT_INLINE_DEVICE_READ
             expect("device read is native and has a commit point", !found && hbuf[slow_word] == ops[0] &&
-                   blk.meta[dbt_block_find(&blk, slow_word * 2)].commit_rel == 0);
+                   blk.meta[dbt_block_find(&blk, slow_word * 2)].host_off +
+                   blk.meta[dbt_block_find(&blk, slow_word * 2)].commit_rel == slow_word * 2);
 #else
             expect("dev slow path calls the fallback helper", found);
 #endif
@@ -678,8 +804,13 @@ int main(void)
     { sf_u32 ops[] = { 0x5211 };                                   /* mov.l @(4,r1),r2 */
       env.dev_lo = GBASE; env.dev_hi = GBASE + 0x1000;
       translate(ops, 1, 0);
+#ifdef DBT_SHORT_DEVICE_TEST
+      const int dispatch = 10;
+#else
+      const int dispatch = 12;
+#endif
       expect("borrow dev", blk.borrow == 3 && hbuf[0] == LDS_A0(3) && hbuf[1] == OP_MOV_RR(1,3) && hbuf[2] == OP_ADD_IMM(4,3)
-             && hbuf[12] == OP_BRAF(3) && hbuf[13] == OP_NOP && (hbuf[14] & 0xF000) == 0xA000 && hbuf[16] == 0x5211);
+             && hbuf[dispatch] == OP_BRAF(3) && hbuf[dispatch+1] == OP_NOP && (hbuf[dispatch+2] & 0xF000) == 0xA000 && hbuf[dispatch+4] == 0x5211);
       env.dev_lo = env.dev_hi = 0;
     }
 
@@ -754,6 +885,202 @@ int main(void)
       }
     }
 
+#if defined(DBT_CONST_DEVICE_ADDRESS) && !defined(DBT_CONST_P4_STORE)
+    {
+      sf_u32 ops[] = {0xd101, 0x6212, 0x000b, 0x0009, 0x1000, 0x8c00};
+      unsigned short_length;
+      env.no_borrow = 1; env.dev_lo = GBASE; env.dev_hi = GBASE + 0x1000;
+      expect("known normal address translates", translate(ops, 6, 4) == DBT_OK);
+      short_length = blk.host_len;
+      expect("known address marks entry-dependent block", blk.const_specialized == 2);
+      expect("specialized block rejects arbitrary interior entry", dbt_block_entry(&blk, GBASE + 2) < 0);
+      ops[4] = 0x000c; ops[5] = 0xff00;
+      translate(ops, 6, 4);
+      expect("known P4 retains device dispatch", !blk.const_specialized && blk.host_len > short_length);
+      {
+        sf_u32 overwritten[] = {0xd102, 0xe100, 0x6212, 0x000b, 0x0009, 0x0009, 0x1000, 0x8c00};
+        translate(overwritten, 8, 5);
+        expect("register overwrite drops address proof", !blk.const_specialized);
+      }
+      {
+        sf_u32 branch[] = {0xd102, 0x8900, 0x6212, 0x000b, 0x0009, 0x0009, 0x1000, 0x8c00};
+        translate(branch, 8, 5);
+        expect("branch drops address proof", !blk.const_specialized);
+      }
+      {
+        sf_u32 later[] = {0xd102, 0x6212, 0xe007, 0x000b, 0x0009, 0x0009, 0x1000, 0x8c00};
+        translate(later, 8, 5);
+        expect("entry after final specialized access remains reusable", dbt_block_entry(&blk, GBASE + 4) >= 0);
+        expect("entry at specialized access still rejected", dbt_block_entry(&blk, GBASE + 2) < 0);
+      }
+      env.dev_lo = env.dev_hi = 0;
+    }
+#endif
+
+#ifdef DBT_CONST_P4_STORE
+    {
+      sf_u32 ops[] = {0xd101, 0x2122, 0x000b, 0x0009, 0x0004, 0xff00};
+      env.no_borrow = 1; env.dev_lo = GBASE; env.dev_hi = GBASE + 0x1000;
+      expect("constant PTEL store translates", translate(ops, 6, 4) == DBT_OK);
+      expect("PTEL store is specialized", blk.const_specialized == 2);
+      expect("cannot enter before address proof", dbt_block_entry(&blk, GBASE + 2) < 0);
+      expect("safe suffix remains reusable", dbt_block_entry(&blk, GBASE + 4) >= 0);
+      ops[4] = 0;
+      expect("PTEH store keeps hooks", translate(ops, 6, 4) == DBT_OK && !blk.const_specialized);
+      ops[4] = 0x10;
+      expect("MMUCR store keeps hooks", translate(ops, 6, 4) == DBT_OK && !blk.const_specialized);
+      ops[4] = 0; ops[5] = 0x8c10;
+      expect("ordinary RAM retains normal dispatch", translate(ops, 6, 4) == DBT_OK && !blk.const_specialized);
+      ops[1] = 0x2126; ops[4] = 8; ops[5] = 0xff00;
+      expect("predecrement to PTEL specializes", translate(ops, 6, 4) == DBT_OK && blk.const_specialized);
+      ops[4] = 4;
+      expect("predecrement to PTEH keeps hooks", translate(ops, 6, 4) == DBT_OK && !blk.const_specialized);
+      ops[1] = 0x1121; ops[4] = 0;
+      expect("displacement to PTEL specializes", translate(ops, 6, 4) == DBT_OK && blk.const_specialized);
+      env.dev_lo = env.dev_hi = 0;
+    }
+#endif
+
+#ifdef DBT_DYNAMIC_P4_STORE
+    {
+      sf_u32 ops[] = {0x2122};
+      unsigned i, j; int seen_t = 0, seen_native = 0;
+      env.no_borrow = 1; env.dev_lo = GBASE; env.dev_hi = GBASE + 0x1000;
+      expect("dynamic P4 store translates", translate(ops, 1, 1) == DBT_OK);
+      for (i = 0; i < blk.nspills; ++i) if (blk.spills[i].gpr == DBT_SPILL_T) {
+        dbt_spill pending[8]; int found = 0;
+        int n = dbt_block_pending_spills(&blk, 0, blk.spills[i].start + 2, pending, 8);
+        for (j = 0; j < (unsigned)n; ++j) if (pending[j].gpr == DBT_SPILL_T) found = 1;
+        expect("interrupted P4 classifier recovers guest T", found);
+        expect("P4 classifier T recovery range closes", blk.spills[i].end != 0xffff);
+        ++seen_t;
+      }
+      for (i = 0; i < blk.nmeta; ++i) {
+        dbt_imeta *m = &blk.meta[i];
+        if (m->commit_rel != 0xff && hbuf[(m->host_off + m->commit_rel) / 2] == 0x2122) {
+          dbt_spill pending[8];
+          expect("native P4 store has canonical registers", dbt_block_pending_spills(&blk, i, m->host_off + m->commit_rel, pending, 8) == 0);
+          ++seen_native;
+        }
+      }
+      expect("dynamic classifier has one T save", seen_t == 1);
+      expect("dynamic path contains committed native store", seen_native == 1);
+      env.dev_lo = env.dev_hi = 0;
+    }
+#endif
+
+#ifdef DBT_UNIFORM_STORE
+    {
+      sf_u32 ops[] = {0xe200, 0x2122, 0xe307, 0x000b, 0x0009};
+      unsigned short_len;
+      env.no_borrow = 1; env.dev_lo = env.dev_hi = 0;
+      expect("zero store translates", translate(ops, 5, 5) == DBT_OK);
+      short_len = blk.host_len;
+      expect("zero store emitted natively", hbuf[0] == 0xe200 && hbuf[1] == 0x2122);
+      expect("zero store proof blocks middle entry", blk.const_specialized == 2 && dbt_block_entry(&blk, GBASE+2) < 0);
+      expect("suffix after zero store remains reusable", dbt_block_entry(&blk, GBASE+4) >= 0);
+      ops[0] = 0xe2ff;
+      expect("minus one store specializes", translate(ops, 5, 5) == DBT_OK && blk.const_specialized == 2);
+      ops[0] = 0xe201;
+      expect("nonuniform immediate keeps swaps", translate(ops, 5, 5) == DBT_OK && !blk.const_specialized && blk.host_len > short_len);
+      ops[0] = 0xe200; ops[1] = 0x2226;
+      expect("predecrement changes uniform data", translate(ops, 5, 5) == DBT_OK && !blk.const_specialized);
+      {
+        sf_u32 copy[] = {0xe200, 0x6323, 0x2132, 0x000b, 0x0009};
+        expect("register copy propagates uniform proof", translate(copy,5,5)==DBT_OK && blk.const_specialized==3);
+        copy[1] = 0x7201; copy[2] = 0x2122;
+        expect("overwrite destroys uniform proof", translate(copy,5,5)==DBT_OK && !blk.const_specialized);
+        copy[1] = 0x6212;
+        expect("memory load destroys uniform proof", translate(copy,5,5)==DBT_OK && !blk.const_specialized);
+        copy[1] = 0x8900;
+        expect("branch destroys uniform proof", translate(copy,5,5)==DBT_OK && !blk.const_specialized);
+      }
+      ops[1] = 0x2122; env.dev_lo = GBASE; env.dev_hi = GBASE+0x1000;
+      expect("uniform store preserves device dispatch", translate(ops,5,5)==DBT_OK && !blk.const_specialized);
+      env.dev_lo = env.dev_hi = 0;
+    }
+#endif
+
+#ifdef DBT_UNIFORM_ENTRY_BOUNDS
+    {
+      sf_u32 ops[] = {0xe107,0xe200,0x6323,0x2432,0x000b,0x0009};
+      env.no_borrow=1; env.dev_lo=env.dev_hi=0;
+      expect("bounded uniform proof translates", translate(ops,6,6)==DBT_OK);
+      expect("proof begins at original definition", blk.uniform_entry_start==1 && blk.const_specialized==4);
+      expect("entry executing the definition is reusable", dbt_block_entry(&blk,GBASE+2)>=0);
+      expect("copied proof cannot start at copy", dbt_block_entry(&blk,GBASE+4)<0);
+      expect("copied proof cannot start at store", dbt_block_entry(&blk,GBASE+6)<0);
+      expect("entry after all dependent stores is reusable", dbt_block_entry(&blk,GBASE+8)>=0);
+    }
+#endif
+
+#ifdef DBT_R0_DEVICE_TEST
+    {
+      unsigned top; int all = 1;
+      for (top = 0; top < 256; ++top) {
+        unsigned selector = (((top + 1) >> 8) ^ 1) << 2;
+        if (selector != (top == 255 ? 0u : 4u)) all = 0;
+      }
+      expect("R0 selector covers all address top bytes", all);
+      {
+        sf_u32 ops[] = {0x6012};
+        env.no_borrow=1;env.dev_lo=GBASE;env.dev_hi=GBASE+0x1000;
+#ifdef DBT_R0_DEVICE_WIDE
+        expect("R0 destination uses restored scratch", translate(ops,1,1)==DBT_OK && hbuf[0]==0x408a);
+        ops[0]=0x6202;
+        expect("R0 base uses restored scratch", translate(ops,1,1)==DBT_OK && hbuf[0]==0x408a);
+#else
+        expect("R0 destination keeps alternate scratch", translate(ops,1,1)==DBT_OK && hbuf[0]!=0x408a);
+#endif
+        ops[0]=0x021e;
+        expect("R0 indexed address keeps alternate scratch", translate(ops,1,1)==DBT_OK && hbuf[0]!=0x408a);
+        env.dev_lo=env.dev_hi=0;
+      }
+    }
+#endif
+
+#ifdef DBT_DECODE_REF
+    {
+      sf_u32 ops[] = {0x000b,0x020f}; /* RTS and legal MAC.L slot collide */
+      env.no_borrow=1;env.dev_lo=env.dev_hi=0;
+      expect("decoder collision retains branch across slot", translate(ops,2,2)==DBT_OK && blk.end_reason==END_BRANCH && blk.guest_len==4);
+      ops[0]=0x410b;ops[1]=0x430f; /* JSR @r1 and MAC.W not writing r1 */
+      expect("decoder collision retains indirect call across slot", translate(ops,2,2)==DBT_OK && blk.end_reason==END_BRANCH && blk.guest_len==4);
+    }
+#endif
+
+#ifdef DBT_SPILL_START_SEARCH
+    {
+        dbt_spill records[DBT_MAX_BLOCK_SPILLS], found[8];
+        dbt_block synthetic;
+        unsigned count, off, seed = 1; int ok = 1;
+        memset(&synthetic, 0, sizeof(synthetic)); synthetic.spills = records;
+        for (count = 0; count < DBT_MAX_BLOCK_SPILLS; ++count) {
+            dbt_spill *s = &records[count];
+            seed = seed * 1664525u + 1013904223u;
+            memset(s, 0, sizeof(*s));
+            s->start = (sf_u16)(2 * (count / 2)); /* equal starts allowed */
+            s->end = (seed & 1) ? 0xffff : (sf_u16)(s->start + ((seed >> 8) & 63));
+            s->gpr = count % 17; s->slot = count % 8;
+        }
+        for (count = 0; count <= DBT_MAX_BLOCK_SPILLS; ++count) {
+            synthetic.nspills = (sf_u8)count;
+            for (off = 0; off <= DBT_MAX_BLOCK_SPILLS + 64; ++off) {
+                int limit;
+                for (limit = 0; limit <= 8; ++limit) {
+                    int i, n = 0, got = dbt_block_pending_spills(&synthetic, 0, off, found, limit);
+                    for (i = (int)count - 1; i >= 0 && n < limit; --i)
+                        if (records[i].start < off && off <= records[i].end) {
+                            if (n >= got || memcmp(&found[n], &records[i], sizeof(dbt_spill))) ok = 0;
+                            ++n;
+                        }
+                    if (got != n) ok = 0;
+                }
+            }
+        }
+        expect("spill search matches scalar for all table sizes and bounded output", ok);
+    }
+#endif
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

@@ -18,7 +18,16 @@ SECTIONS
     . = ALIGN(16);
     _bss_end = .;
     _image_end = .;
+    /* No file bytes: initialized only after the launcher has handed over
+     * and crt0 has abandoned its stack. Never overlaps CE's RAM window. */
+    .lowbss 0x8C000000 (NOLOAD) : {
+        _low_bss_start = .;
+        *(.lowbss)
+        . = ALIGN(16);
+        _low_bss_end = .;
+    }
     /DISCARD/ : { *(.comment) *(.note*) *(.eh_frame*) }
 }
 /* leave at least 128 KiB between the end of bss and the C stack top */
 ASSERT(_image_end + 0x20000 <= _image_stack_top, "translator image too large for its RAM region (see dbt/Makefile layout)")
+ASSERT(_low_bss_end <= 0x8C100000, "boot workspace tables overlap CE RAM")

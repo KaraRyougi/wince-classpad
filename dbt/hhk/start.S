@@ -74,7 +74,11 @@ _start:
         .asciz  "\str"
         .endm
 #ifndef HHK_APP_NAME
+#ifdef DBT_PROFILE
+#define HHK_APP_NAME "CE Profile ABI1"
+#else
 #define HHK_APP_NAME "Windows CE"
+#endif
 #define HHK_APP_DESC "flashes fls0/NK.bin if needed, then boots CE through the translator"
 #endif
         HHNOTE  NAME, HHK_APP_NAME

@@ -62,7 +62,16 @@ _start:
         mov.l   r2, @r0
         bra     1b
         add     #4, r0
-2:      mov.l   .Lmain, r0
+2:      mov.l   .Llow_start, r0
+        mov.l   .Llow_end, r1
+.Llow_clear:
+        cmp/hs  r1, r0
+        bt      .Llow_done
+        mov.l   r2, @r0
+        bra     .Llow_clear
+        add     #4, r0
+.Llow_done:
+        mov.l   .Lmain, r0
         jsr     @r0
         nop
 3:      sleep
@@ -73,6 +82,8 @@ _start:
 .Lbss_start: .long _bss_start
 .Lbss_end:   .long _bss_end
 .Lmain:      .long _dbt_main
+.Llow_start: .long _low_bss_start
+.Llow_end:   .long _low_bss_end
 
 .Lp2_bit:       .long 0x20000000
 .Lccr:          .long 0xff00001c
