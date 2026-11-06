@@ -82,11 +82,25 @@ static int window_has_our_image(void)
 
 /* NK_WINDOW=eact: the window is the eActivity volume, which Casio's OS
  * reformats at every boot that finds it holding something else (docs/03), so
- * a Fugue volume there is ours to erase as well; its header names itself. */
+ * everything in it is ours to erase. Fugue is log-structured: on a used
+ * calculator its header sector ("Fugue FAT File System" at +0x2020) can be
+ * any sector of the area and the first one may well be blank (seen on the
+ * first hardware run: "sector at 83880000 is in use" with the first sector
+ * passing), so the name is only looked for, never required. */
 static int window_is_fugue_volume(void)
 {
 #ifdef NK_WINDOW_EACT
-    return !memcmp((const char *)NK_FLASH + 0x2020, "Fugue FAT File System", 21);
+    u32 s;
+    for (s = 0; s < NK_FLASH_MAX; s += NOR_SECTOR)
+        if (!memcmp((const char *)NK_FLASH + s + 0x2020, "Fugue FAT File System", 21)) return 1;
+#endif
+    return 0;
+}
+
+static int window_is_eact(void)
+{
+#ifdef NK_WINDOW_EACT
+    return 1;
 #else
     return 0;
 #endif
@@ -95,7 +109,8 @@ static int window_is_fugue_volume(void)
 const char *nkflash_window_state(void)
 {
     return window_has_our_image() ? "holds a CE image" :
-           window_is_fugue_volume() ? "is the eActivity volume" : "is blank";
+           window_is_fugue_volume() ? "is the eActivity volume" :
+           window_is_eact() ? "is the eActivity area" : "is blank";
 }
 
 void nkflash_close(void)
@@ -194,7 +209,7 @@ int nkflash_compare(void)
 static int erase_span(u32 lo, u32 hi)
 {
     u32 s, first = lo & ~(NOR_SECTOR - 1), n = 0, i = 0;
-    int ours = window_has_our_image() || window_is_fugue_volume();
+    int ours = window_has_our_image() || window_is_eact();
     for (s = first; s < hi; s += NOR_SECTOR) {
         n++;
         if (!nor_sector_erased(s) && !ours)
