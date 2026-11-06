@@ -250,6 +250,12 @@ static void begin_meta_kind(tctx *t, int kind, sf_u32 guest_off, sf_u32 target, 
 #if defined(DBT_SAME_ASID_PTEH_STORE) && !defined(DBT_DYNAMIC_P4_STORE)
 #error DBT_SAME_ASID_PTEH_STORE requires DBT_DYNAMIC_P4_STORE
 #endif
+/* Each PTEH-checked store adds ~30 words; a run of them in delay slots can
+ * overflow the block buffer, and only DBT_BODY_BUDGET retries a smaller block
+ * (without it the runtime halts on "translation failed"). */
+#if defined(DBT_SAME_ASID_PTEH_STORE) && !defined(DBT_BODY_BUDGET)
+#error DBT_SAME_ASID_PTEH_STORE requires DBT_BODY_BUDGET
+#endif
 
 #ifdef DBT_DYNAMIC_P4_STORE
 static void tr_p4_store(tctx *t, const sh_insn *d)

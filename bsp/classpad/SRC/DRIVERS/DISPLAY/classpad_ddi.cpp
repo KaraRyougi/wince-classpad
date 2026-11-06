@@ -285,8 +285,12 @@ SCODE ClasspadGPE::WrappedLine(GPELineParms *pParms)
 {
     SCODE sc = EmulatedLine(pParms);
     if (pParms->pDst == m_pPrimarySurface) {
-        if (pParms->prclClip) Dirty(pParms->prclClip->top, pParms->prclClip->bottom);
-        else Dirty(0, m_nScreenHeightSave);
+        if (pParms->prclClip) {
+            // The clip is in logical (rotated) coordinates, like Blt's prclDst.
+            RECTL physical = *pParms->prclClip;
+            m_pPrimarySurface->RotateRectl(&physical);
+            Dirty(physical.top, physical.bottom);
+        } else Dirty(0, m_nScreenHeightSave);
     }
     return sc;
 }

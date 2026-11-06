@@ -28,6 +28,9 @@ static void ClasspadPowerPrepare(ClasspadPowerState *p, unsigned countsPerMSec)
     p->stbcr = MMIO_R32(CP_POWER_STBCR);
     p->mstp = MMIO_R32(CP_POWER_MSTPCR0);
     p->tstr = MMIO_R8(TMU_TSTR);
+    /* Stop first so TCNT and TCR.UNF form one snapshot: an underflow
+     * between the two reads would charge a whole period at resume. */
+    MMIO_W8(TMU_TSTR, 0);
     p->tcor = MMIO_R32(TMU_TCOR0);
     p->tcnt = MMIO_R32(TMU_TCNT0);
     p->tcr = MMIO_R16(TMU_TCR0);

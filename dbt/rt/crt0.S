@@ -49,6 +49,7 @@ _start:
         nop
         nop
         mov.l   .Lcached_entry, r0
+        .word   0x00e3                 /* ICBI @r0: SH-4A instruction barrier after a CCR write */
         jmp     @r0
         nop
         .align 2
