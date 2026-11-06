@@ -72,6 +72,9 @@ _start:
         bra     .Llow_clear
         add     #4, r0
 .Llow_done:
+        mov.l   .Lonchip, r0
+        jsr     @r0
+        nop
         mov.l   .Lmain, r0
         jsr     @r0
         nop
@@ -83,6 +86,7 @@ _start:
 .Lbss_start: .long _bss_start
 .Lbss_end:   .long _bss_end
 .Lmain:      .long _dbt_main
+.Lonchip:    .long _dbt_onchip_load
 .Llow_start: .long _low_bss_start
 .Llow_end:   .long _low_bss_end
 

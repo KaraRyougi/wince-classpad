@@ -102,6 +102,10 @@ extern char dbt_srfast_a[], dbt_srfast_b[], dbt_srfast_c[], dbt_srfast_end[];
 extern char dbt_tlbfast_a[], dbt_tlbfast_b[], dbt_tlbfast_c[], dbt_tlbfast_end[];
 #endif
 extern char dbt_stubs_start[], dbt_stubs_end[];
+/* Small hot data in the XRAM+YRAM pair (rt/image.ld .xyram, zero-filled by
+ * dbt_onchip_load, saved across R-standby). Zero-initialised objects only. */
+#define DBT_XYRAM __attribute__((section(".xyram")))
+void dbt_onchip_load(void);
 extern dbt_gctx dbt_ctx_rt;      /* used by lookup-miss and helper stubs */
 extern dbt_gctx dbt_ctx_exc;     /* used by the exception handlers */
 

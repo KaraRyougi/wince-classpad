@@ -53,7 +53,7 @@ void guest_main(void)
 
     hc_puts("phase 2: device-aware translation of the whole guest\n");
     inval0 = hc_getstat(2); asid0 = hc_getstat(3); dev0 = hc_getstat(6);
-    hc_devrange(GUEST_RAM_LO, GUEST_RAM_LO + 0x100000u);      /* takes effect at the next lookup: the call below */
+    hc_devrange(GUEST_LINK, GUEST_LINK + 0x100000u);      /* takes effect at the next lookup: the call below */
 
     check("plain read of TEA now returns the hardware value", *tea == 0x12345678u);
     *tea = 0x0BADF00Du;

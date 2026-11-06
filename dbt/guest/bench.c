@@ -65,7 +65,7 @@ void guest_main(void)
     for (k = 0; k < sizeof kernels / sizeof kernels[0]; k++) {
         volatile unsigned reps = 2;                       /* volatile: an unrolled loop would give each pass its own return site */
         unsigned rep;
-        if (kernels[k].fn == bench_devload) hc_devrange(GUEST_RAM_LO, GUEST_RAM_LO + 0x100000u);   /* device-aware code from the next lookup on */
+        if (kernels[k].fn == bench_devload) hc_devrange(GUEST_LINK, GUEST_LINK + 0x100000u);   /* device-aware code from the next lookup on */
         /* the first timed pass also translates the block after this call site
          * (its return address differs from any warm-up call's), so time the
          * same call site twice and keep the second */

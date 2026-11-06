@@ -60,11 +60,10 @@ bytes before handing it to `HLE_OSROM`.
 
 | range | use | size |
 |---|---|---|
-| 0x8C000000-0x8C0FFFFF | left to the launcher / Casio OS workspace in the emulator (Casio's VRAM on the device) | 1 MiB |
 | 0x81000000-0x813DFFFF | NOR: the CE image, executed in place (XIP); on the device this is the erased hole inside Casio's OS image (docs/03), `ROMSIZE` in config.bib | 3.875 MiB |
-| 0x8C100000-0x8C8FFFFF | guest: CE RAM (the whole window; a RAMIMAGE build puts its image here too); 11.5 MiB to 0x8CC7FFFF until 2026-11-05 | 8 MiB |
-| 0x8C900000-0x8CDFFFFF | translator text/data/bss (~4.4 MiB: 8192 block headers, 2.5 MiB metadata arena, hash 64 KiB) + C stack | 5 MiB |
-| 0x8CE00000-0x8CFFFFFF | code cache | 2 MiB |
+| 0x8C000000-0x8CB4FFFF | guest: CE RAM (the whole window, BOOTARGS page first, debug ring last; a RAMIMAGE build puts its image here too). Until 2026-11-06 the first MiB was left to the launcher / Casio OS workspace (Casio's VRAM on the device) and CE had 0x8C100000-0x8C8FFFFF, 8 MiB; nothing uses that MiB after the no-return handoff | 11.3125 MiB |
+| 0x8CB50000-0x8CDFFFFF | translator text/data/bss (2.46 MiB: 9600 block headers, 1752 KiB metadata arena, hash 64 KiB) + 128 KiB C stack | 2.6875 MiB |
+| 0x8CE00000-0x8CFFFFFF | code cache (3 MiB with 14400 headers and a 2624 KiB arena from 2026-11-05 to 2026-11-06) | 2 MiB |
 
 The layout is defined once in `dbt/Makefile` (`GUEST_RAM_*`, `IMAGE_BASE`,
 `CACHE_*`) and reaches the C code, the launcher and the linker script from

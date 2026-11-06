@@ -43,7 +43,7 @@ CHECK_OFF(intevt, CTX_INTEVT); CHECK_OFF(vec_off, CTX_VECOFF); CHECK_OFF(jump_to
 CHECK_OFF(new_spc, CTX_NEWSPC); CHECK_OFF(new_ssr, CTX_NEWSSR);
 typedef char check_size[(sizeof(dbt_gctx) == CTX_SIZE) ? 1 : -1];
 
-dbt_gctx dbt_ctx_rt, dbt_ctx_exc;
+dbt_gctx dbt_ctx_rt DBT_XYRAM, dbt_ctx_exc DBT_XYRAM;
 
 /* freestanding helpers GCC may call */
 /* Freestanding memcpy/memset. Word loops when both sides are aligned: the
@@ -81,7 +81,7 @@ void *memset(void *d, int c, dbt_size_t n)
 
 volatile sf_u32 dbt_shadow_vbr = 0;
 volatile sf_u32 dbt_shadow_md = SR_MD;
-dbt_stats dbt_stat;
+dbt_stats dbt_stat DBT_XYRAM;
 volatile sf_u32 dbt_lookup_sr; /* saved before lookup hash/IC tests alter T */
 
 typedef struct {
@@ -113,10 +113,10 @@ typedef char check_tagged_hash_stride[(sizeof(hent) == 12) ? 1 : -1];
 hent dbt_hash[HSIZE] HASH_TABLE_SECTION __attribute__((aligned(32)));   /* read by stubs.S */
 #define g_hash dbt_hash
 static dbt_block g_blocks[MAX_BLOCKS] BOOT_TABLE; /* sorted within each cache bank */
-static dbt_block g_scratch;                 /* translation target; copied into g_blocks + arena on success */
-static dbt_imeta g_scratch_meta[DBT_MAX_META];
-static dbt_spill g_scratch_spills[DBT_MAX_BLOCK_SPILLS];
-static dbt_link g_scratch_links[DBT_MAX_LINKS];
+static dbt_block g_scratch DBT_XYRAM;                 /* translation target; copied into g_blocks + arena on success */
+static dbt_imeta g_scratch_meta[DBT_MAX_META] DBT_XYRAM;
+static dbt_spill g_scratch_spills[DBT_MAX_BLOCK_SPILLS] DBT_XYRAM;
+static dbt_link g_scratch_links[DBT_MAX_LINKS] DBT_XYRAM;
 static sf_u8     g_arena[META_ARENA_BYTES] __attribute__((aligned(8)));
 static sf_u32    g_arena_used;
 #ifdef DBT_META_ALIGN4
@@ -131,7 +131,7 @@ static sf_u32 arena_round(sf_u32 bytes) {
 }
 
 #define SCRATCH_ARENA_NEED (DBT_MAX_META * sizeof(dbt_imeta) + DBT_MAX_BLOCK_SPILLS * sizeof(dbt_spill) + DBT_MAX_LINKS * sizeof(dbt_link) + 16)
-static dbt_rt_config g_cfg;
+static dbt_rt_config g_cfg DBT_XYRAM;
 #ifndef CACHE_BANKS
 #define CACHE_BANKS 12
 #endif
@@ -237,7 +237,7 @@ static sf_u32 g_irq_entry_hits;
 static int       g_nblocks; /* table high-water mark; holes carry binfo.dead */
 
 static sf_u32    g_cache_used;              /* bytes */
-static fpu_state g_fpu;
+static fpu_state g_fpu DBT_XYRAM;
 static int       g_translating;             /* guest pc being translated or 0 */
 static sf_u32    g_translating_pc;
 /* Host return address (X1) of the helper call being served in C, 0 outside
@@ -317,7 +317,7 @@ sf_u32 dbt_user_pages[256], dbt_fast_ldtlb_calls;
 typedef char check_tlb_hooks_offset[(__builtin_offsetof(dbt_stats, tlb_hooks) == 96) ? 1 : -1];
 typedef char check_tlb_skips_offset[(__builtin_offsetof(dbt_stats, tlb_scan_skips) == 104) ? 1 : -1];
 #else
-static sf_u32 g_user_pages[256];
+static sf_u32 g_user_pages[256] DBT_XYRAM;
 #endif
 /* Two nodes per block cover first/last 1 KiB pages. Rebuilt on bank reuse.
  * With interior-entry reuse this indexes kernel blocks too; the user-page
@@ -376,7 +376,7 @@ volatile sf_u32 dbt_fast_ldc_sr_calls;
 #else
 #define FAST_LDC_SR_CALLS 0u
 #endif
-static dbt_env   g_env;
+static dbt_env   g_env DBT_XYRAM;
 
 /* ---------------------------------------------------------- console */
 
@@ -2067,6 +2067,39 @@ static void lcd_pixels(const sf_u8 *s, sf_u32 n, volatile sf_u16 *port)
 #define RS_BLOCK  0xFD801000u
 #define RS_STUB   0xFD801200u
 extern sf_u32 dbt_standby_sleep(sf_u32 *block);
+
+/* On-chip memories (rt/image.ld): the stubs run from IL memory, small hot
+ * data lives in XRAM+YRAM. Neither survives R-standby (docs/06: only RS
+ * memory does), so dbt_standby keeps a copy of the data and reloads both. */
+extern sf_u32 lilram[] __asm__("_lilram"), rilram[] __asm__("_rilram"), eilram[] __asm__("_eilram"),
+              rxyram[] __asm__("_rxyram"), exyram[] __asm__("_exyram");
+static sf_u32 g_xyram_save[16384 / 4];
+void dbt_onchip_load(void)
+{
+    volatile sf_u32 *d = rilram;
+    const sf_u32 *s = lilram;
+    sf_u32 n = (sf_u32)(eilram - rilram), i;
+    for (i = 0; i < n; i++) d[i] = s[i];                 /* 32-bit stores, as gint's regcpy */
+    d = rxyram;
+    n = (sf_u32)(exyram - rxyram);
+    for (i = 0; i < n; i++) d[i] = 0;
+    __asm__ volatile ("synco" ::: "memory");
+}
+static void onchip_save(void)
+{
+    sf_u32 n = (sf_u32)(exyram - rxyram), i;
+    for (i = 0; i < n; i++) g_xyram_save[i] = ((volatile sf_u32 *)rxyram)[i];
+}
+static void onchip_restore(void)
+{
+    volatile sf_u32 *d = rilram;
+    sf_u32 n = (sf_u32)(eilram - rilram), i;
+    for (i = 0; i < n; i++) d[i] = lilram[i];
+    d = rxyram;
+    n = (sf_u32)(exyram - rxyram);
+    for (i = 0; i < n; i++) d[i] = g_xyram_save[i];
+    __asm__ volatile ("synco" ::: "memory");
+}
 extern const sf_u32 dbt_standby_stub[], dbt_standby_stub_end[];
 static sf_u32 g_standbys, g_standby_wakes;
 static sf_u32 dbt_standby(void)
@@ -2078,7 +2111,9 @@ static sf_u32 dbt_standby(void)
     g_standbys++;
     dbt_puts("[dbt] R-standby\n");
     dbt_dbgring_drain();
+    onchip_save();                              /* last: nothing below writes XYRAM before the sleep */
     r = dbt_standby_sleep(block);
+    if (r) onchip_restore();                    /* before anything returns into the IL-memory stubs */
     /* back, with the core reset if r == 1: the stub restored caches, MMU
      * registers and VBR; the rest of the machine is the guest's business */
     *(volatile sf_u32 *)0xA4150030u = block[(0x40 + 0x10) / 4];     /* MSTPCR0 */

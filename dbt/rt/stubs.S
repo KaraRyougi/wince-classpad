@@ -121,10 +121,11 @@
         mov.l   r1, @-r2               /* guest sr */
         .endm
 
-        .text
+        /* IL memory (rt/image.ld): subsection 0 is the vector block, at
+         * 0xE5200000 = VBR; subsection 1 the rest of the stubs. */
+        .section .ilram, "ax", @progbits
+        .subsection 1
         .align 2
-        .global _dbt_stubs_start
-_dbt_stubs_start:
 
 /* ------------------------------------------------------------------ */
 /* dbt_enter(r4 = host entry): install VBR, set MD|DSP, interrupts masked */
@@ -752,8 +753,10 @@ _dbt_rte_stub:
 1:      .long   _dbt_ctx_exc + CTX_B1END
         .endm
 
-        .balign 4096
-        .global _dbt_vectors
+        .subsection 0
+        .balign 4                      /* the section starts at 0xE5200000: VBR (rt/image.ld) */
+        .global _dbt_stubs_start, _dbt_vectors
+_dbt_stubs_start:
 _dbt_vectors:
         .org    _dbt_vectors + 0x100
         EXC_ENTRY 0x100
@@ -928,6 +931,9 @@ _dbt_exc_common:
 
         .align 2
         POOL    D
+
+        .subsection 1
+        .align 2
         .global _dbt_stubs_end
 _dbt_stubs_end:
 

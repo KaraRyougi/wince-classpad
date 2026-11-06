@@ -11,11 +11,16 @@ EMU      ?= $(HOME)/Dev/casio-emu
 BUILD    ?= build
 
 # RAM layout (16 MiB at 0x8C000000), the single place these addresses live:
-#   0x8C000000-0x8C0FFFFF  launcher workspace (casio-emu starts us with sp=0x8C080000)
-#   0x8C100000-0x8C8FFFFF  guest window: 8 MiB (test guests linked at 0x8C100000; config.bib RAM)
-#   0x8C900000-0x8CCFFFFF  translator image (compact headers, 2624 KiB arena)
-#                          and its C stack below the top
-#   0x8CD00000-0x8CFFFFFF  code cache, 3 MiB
+#   0x8C000000-0x8CB4FFFF  guest window: 11.3125 MiB (config.bib BOOTARGS/RAM/DBGRING;
+#                          test guests are linked at GUEST_LINK 0x8C100000)
+#   0x8CB50000-0x8CDFFFFF  translator image (9600 headers, 1752 KiB arena, 2.46 MiB)
+#                          and its 128 KiB C stack below the top
+#   0x8CE00000-0x8CFFFFFF  code cache, 2 MiB
+# Since 2026-11-06 the first MiB is CE's: it was the launcher's workspace, but
+# nothing uses it after the no-return handoff (casio-emu's initial sp
+# 0x8C080000 and the HollyHock stub only live there before it; crt0 moves to
+# the image stack first), and the cache, headers and arena shrank by a third
+# (3 MiB / 14400 / 2624 KiB before): CE RAM 8 MiB -> 11.3 MiB.
 # Until 2026-11-05 the window was 11.5 MiB with 4096 blocks and a 1 MiB cache;
 # the Standard Shell boot hit the 4096-block cap 28 times before POSTINIT
 # (115k translations), so the tables doubled at the expense of 3.5 MiB of CE RAM.
@@ -25,22 +30,23 @@ BUILD    ?= build
 # text + bss + a 128 KiB stack (rt/image.ld asserts it). Override on the
 # command line to try other sizes; config.bib's RAM line must agree with
 # GUEST_RAM_HI (the window ends 4 KiB earlier at the debug ring).
-GUEST_RAM_LO := 0x8C100000
-GUEST_RAM_HI ?= 0x8C900000
-IMAGE_BASE   ?= 0x8C900000
-IMAGE_STACK  ?= 0x8CD00000
-CACHE_BASE   ?= 0x8CD00000
-CACHE_SIZE   ?= 0x00300000
-BLOCKS       ?= 14400
-ARENA_KB     ?= 2624
-LAYOUT_DEFS  := -DGUEST_RAM_LO=$(GUEST_RAM_LO)u -DGUEST_RAM_HI=$(GUEST_RAM_HI)u -DIMAGE_BASE=$(IMAGE_BASE) \
+GUEST_RAM_LO ?= 0x8C000000
+GUEST_RAM_HI ?= 0x8CB50000
+GUEST_LINK   := 0x8C100000
+IMAGE_BASE   ?= 0x8CB50000
+IMAGE_STACK  ?= 0x8CE00000
+CACHE_BASE   ?= 0x8CE00000
+CACHE_SIZE   ?= 0x00200000
+BLOCKS       ?= 9600
+ARENA_KB     ?= 1752
+LAYOUT_DEFS  := -DGUEST_RAM_LO=$(GUEST_RAM_LO)u -DGUEST_RAM_HI=$(GUEST_RAM_HI)u -DGUEST_LINK=$(GUEST_LINK)u -DIMAGE_BASE=$(IMAGE_BASE) \
                 -DCACHE_BASE=$(CACHE_BASE)u -DCACHE_SIZE=$(CACHE_SIZE)u -DMAX_BLOCKS=$(BLOCKS) -DMETA_ARENA_BYTES=$(ARENA_KB)*1024u
-LAYOUT_LD    := -Wl,--defsym,IMAGE_BASE=$(IMAGE_BASE) -Wl,--defsym,_image_stack_top=$(IMAGE_STACK)
+LAYOUT_LD    := -Wl,--defsym,IMAGE_BASE=$(IMAGE_BASE) -Wl,--defsym,_image_stack_top=$(IMAGE_STACK) -Wl,--defsym,GUEST_RAM_LO=$(GUEST_RAM_LO)
 
 HOST_CFLAGS  := -mb -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables \
                 -Wall -Wextra -Wno-unused-parameter -I rt -I src -I ../fpuemu/src $(LAYOUT_DEFS) $(EXTRA_CFLAGS)
 GUEST_CFLAGS := -ml -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables -Wall \
-                -DGUEST_RAM_LO=$(GUEST_RAM_LO)u -DGUEST_RAM_HI=$(GUEST_RAM_HI)u -DMAX_BLOCKS=$(BLOCKS)
+                -DGUEST_RAM_LO=$(GUEST_RAM_LO)u -DGUEST_RAM_HI=$(GUEST_RAM_HI)u -DGUEST_LINK=$(GUEST_LINK)u -DMAX_BLOCKS=$(BLOCKS)
 
 RT_SRC := rt/crt0.S rt/stubs.S rt/standby.S rt/main.c rt/rt.c rt/lcdcon.c rt/irqpins.c rt/nkbin.c rt/bench.c bench/loops.S src/sh4dec.c src/sh4emit.c src/translate.c \
           ../fpuemu/src/fpuemu.c ../fpuemu/src/softfloat.c
@@ -151,7 +157,7 @@ DEVALL_STAMP := $(BUILD)/.devall-$(if $(filter 1,$(DEVALL)),1,0)
 $(DEVALL_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.devall-*
 	touch $@
-LAYOUT_STAMP := $(BUILD)/.layout-$(GUEST_RAM_HI)-$(IMAGE_BASE)-$(CACHE_BASE)-$(CACHE_SIZE)-$(BLOCKS)-$(ARENA_KB)-$(NK_FLASH)-$(NK_FLASH_MAX)-$(DEVICE)-$(CONSOLE)-$(IRQPINS)
+LAYOUT_STAMP := $(BUILD)/.layout-$(GUEST_RAM_LO)-$(GUEST_RAM_HI)-$(IMAGE_BASE)-$(CACHE_BASE)-$(CACHE_SIZE)-$(BLOCKS)-$(ARENA_KB)-$(NK_FLASH)-$(NK_FLASH_MAX)-$(DEVICE)-$(CONSOLE)-$(IRQPINS)
 $(LAYOUT_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.layout-*
 	touch $@
