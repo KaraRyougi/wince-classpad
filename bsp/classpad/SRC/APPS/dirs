@@ -1,5 +1,4 @@
 DIRS=\
-    hello \
     ROTATE \
     ROTATEKEY \
     doclist
