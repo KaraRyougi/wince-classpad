@@ -74,9 +74,9 @@ Two XIP regions (config.bib, docs/03 "The EXT region")
        identical afterwards; an OS update erases it.
   The OAL chains EXT to the kernel in OEMInit (classpad_extrom.h), so its
   modules run in place and its files appear in \Windows; without a valid
-  EXT region it says so and CE boots without Math Xpander. romimage gives
-  each region its DLL address range (AUTOSIZE=ON, DLLADDR_AUTOSIZE=ON,
-  ROM_AUTOSIZE=OFF, RAM_AUTOSIZE=OFF).
+  EXT region it says so and CE boots without Math Xpander. config.bib lists
+  EXT before NK (address order) with AUTOSIZE=OFF: AUTOSIZE=ON moved RAM
+  into EXT ("Ram start overlaps rom binary").
 
 Device (fx-CP400): copy NK-claude.bin as \fls0\NK.bin and EXT-claude.bin as
 \fls0\EXT.bin, start hhk\wince-eact.hh3 (it flashes what differs, then

@@ -24,19 +24,23 @@ MEMORY
 ;   Name        Start     Size      Type
 ;   -------     --------  --------  ----
     BOOTARGS    8C000000  00001000  RESERVED    ; OAL argument page (unused for now)
-    NK          83860000  007A0000  RAMIMAGE    ; eActivity area, 7.625 MiB (RAMIMAGE is the only image type; XIP follows from the address)
+; The XIP regions in address order (romimage lays multiple regions out in the
+; order they are listed: with NK first it built NK from 80EE0000, 2026-11-06).
     EXT         80EE0000  00500000  RAMIMAGE    ; the hole in Casio's OS image, 5 MiB (CLASSPAD_EXT_ROM_PA/_BYTES)
+    NK          83860000  007A0000  RAMIMAGE    ; eActivity area, 7.625 MiB (RAMIMAGE is the only image type; XIP follows from the address)
     RAM         8C001000  007FE000  RAM         ; up to 0x8C7FF000 (dbt/Makefile GUEST_RAM_HI - 4 KiB)
     DBGRING     8C7FF000  00001000  RESERVED    ; translator debug ring (image_cfg.h CLASSPAD_DBG_RING_PA)
 
 CONFIG
     KERNELFIXUPS=ON
-; Two XIP regions need a DLL address range each; romimage assigns them
-; (DLLADDR_AUTOSIZE) while the regions and RAM keep the sizes above.
-    AUTOSIZE=ON
-    DLLADDR_AUTOSIZE=ON
-    ROM_AUTOSIZE=OFF
-    RAM_AUTOSIZE=OFF
+; No autosizing: AUTOSIZE moves the start of RAM to the end of the image,
+; which only fits RAM right behind a RAMIMAGE region. Here RAM is the SDRAM
+; window and the images are in the NOR: with AUTOSIZE=ON (and
+; DLLADDR_AUTOSIZE=ON, ROM_AUTOSIZE=OFF, RAM_AUTOSIZE=OFF) romimage put RAM at
+; 8127B000, inside EXT, and stopped ("Ram start overlaps rom binary",
+; 2026-11-06). The regions and RAM keep the sizes above; romimage gives the
+; modules of both regions DLL addresses from its one range.
+    AUTOSIZE=OFF
 ; ROMSTART/ROMSIZE only shape the .nb0 file (not used: the flashers take the
 ; .bin files); they cover NK, and romimage leaves EXT's records out of it.
     ROMSTART=83860000

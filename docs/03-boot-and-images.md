@@ -168,9 +168,11 @@ loosely (`docs/04` "Limits"); the window not being free on that OS version
 With the NK image in the eActivity area, the hole 0x0EE0000-0x13E0000 is free,
 all 5 MiB of it from its real start (the NK window used 3.875 MiB from 16 MiB).
 `config.bib` makes it a second XIP region, `EXT 80EE0000 00500000 RAMIMAGE`,
-next to `NK 83860000 007A0000`; romimage assigns each region its DLL range
-(`AUTOSIZE=ON`, `DLLADDR_AUTOSIZE=ON`, sizes fixed) and writes `EXT.bin` next
-to `NK.bin`. `platform.bib` puts Math Xpander there (`FILES\xpander`): its 23
+listed before `NK 83860000 007A0000` (address order), with `AUTOSIZE=OFF`;
+romimage writes `EXT.bin` next to `NK.bin`. The first VM build (2026-11-06)
+had NK listed first and `AUTOSIZE=ON` with `DLLADDR_AUTOSIZE=ON`: romimage
+laid NK out from 0x80EE0000 and moved RAM to 0x8127B000, inside EXT ("Ram
+start overlaps rom binary"); AUTOSIZE only fits RAM right behind an image. `platform.bib` puts Math Xpander there (`FILES\xpander`): its 23
 SH3 DLLs as modules with flag `P` (romimage does not check their CPU type;
 the kernel loads ROM modules without a CPU check), `MathXpander.exe`, help
 pages, bitmaps and the Start menu link as files. `mfcce300.dll` is an XIP
