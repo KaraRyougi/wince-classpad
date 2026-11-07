@@ -38,9 +38,23 @@ CONFIG
 ; window and the images are in the NOR: with AUTOSIZE=ON (and
 ; DLLADDR_AUTOSIZE=ON, ROM_AUTOSIZE=OFF, RAM_AUTOSIZE=OFF) romimage put RAM at
 ; 8127B000, inside EXT, and stopped ("Ram start overlaps rom binary",
-; 2026-11-06). The regions and RAM keep the sizes above; romimage gives the
-; modules of both regions DLL addresses from its one range.
+; 2026-11-06). The regions and RAM keep the sizes above.
     AUTOSIZE=OFF
+; Without DLLADDR_AUTOSIZE (it needs AUTOSIZE=ON) every XIP region gets the
+; default ranges, DLL 40010000-70000000 and kernel DLL C0010000-C8000000,
+; and romimage refuses the overlap ("intersecting DLL ranges specified without
+; DLLADDR_AUTOSIZE", 2026-11-06). The per-region form is
+; "DLLLOWADDR <region> <address>" (romimage's config parser takes the region
+; name in place of '=', and refuses the global "DLLLOWADDR=" form here).
+; Disjoint halves; the 2026-11-06 image used 4 MiB of DLL addresses in all.
+    DLLLOWADDR   NK   40010000
+    DLLHIGHADDR  NK   48000000
+    DLLLOWADDR   EXT  48010000
+    DLLHIGHADDR  EXT  50000000
+    KDLLLOWADDR  NK   C0010000
+    KDLLHIGHADDR NK   C4000000
+    KDLLLOWADDR  EXT  C4010000
+    KDLLHIGHADDR EXT  C8000000
 ; ROMSTART/ROMSIZE only shape the .nb0 file (not used: the flashers take the
 ; .bin files); they cover NK, and romimage leaves EXT's records out of it.
     ROMSTART=83860000
