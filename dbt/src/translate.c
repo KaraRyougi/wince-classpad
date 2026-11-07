@@ -1272,7 +1272,7 @@ static void begin_meta_kind(tctx *t, int kind, sf_u32 guest_off, sf_u32 target, 
     dbt_imeta *m;
     if (b->nmeta >= DBT_MAX_META - 1) { t->err = DBT_ERR_OVERFLOW; return; }
     m = &b->meta[b->nmeta++];
-#ifdef DBT_META_WORD_INIT
+#ifndef DBT_META_MEMSET          /* DBT_META_WORD_INIT until 2026-11-07 */
     {
         /* Write the complete recovery record once instead of clearing it
          * and overwriting most fields. Explicit host byte order keeps the
@@ -1309,10 +1309,13 @@ static void begin_meta_kind(tctx *t, int kind, sf_u32 guest_off, sf_u32 target, 
 
 static void begin_meta(tctx *t, sf_u32 guest_off) { begin_meta_kind(t, META_INSN, guest_off, 0, 0); }
 
-static int fetch(tctx *t, sf_u32 gpc, sh_insn *d)
+/* The instruction at gpc: the pre-pass's record itself (no copy; g_pre is
+ * not written again during this translation), else decoded into *d. NULL
+ * on a fetch fault. */
+static const sh_insn *fetch(tctx *t, sf_u32 gpc, sh_insn *d)
 {
     sf_u32 op, i = (gpc - t->blk->guest_pc) / 2;
-    if (i < (sf_u32)t->pre_n) { *d = g_pre[i]; return 1; }          /* decoded by the pre-pass */
+    if (i < (sf_u32)t->pre_n) return &g_pre[i];                     /* decoded by the pre-pass */
 #ifdef DBT_NATIVE_FETCH
 #if !defined(__sh__) || __BYTE_ORDER__ != __ORDER_BIG_ENDIAN__
 #error DBT_NATIVE_FETCH requires the native big-endian SH runtime
@@ -1327,7 +1330,7 @@ static int fetch(tctx *t, sf_u32 gpc, sh_insn *d)
     if (t->env->fetch16(t->env->ctx, gpc, &op)) { t->err = DBT_ERR_FETCH; t->fault = gpc; return 0; }
 #endif
     sh4_decode(op, d);
-    return 1;
+    return d;
 }
 
 #ifdef DBT_DECODE_REF
@@ -1458,8 +1461,7 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
         d = fetch_ref(&t, gpc);
         if (!d) break;
 #else
-        if (!fetch(&t, gpc, &decoded)) break;
-        d = &decoded;
+        if (!(d = fetch(&t, gpc, &decoded))) break;
 #endif
 #ifdef DBT_LINEAR_META
         if (n > 0 && d->kind == K_PASS) {
@@ -1481,12 +1483,11 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
                 /* Decoding the slot can evict the branch's cache entry. */
                 decoded = *d; d = &decoded;
 #endif
-                if (!fetch(&t, gpc + 2, &s)) break;
-                if (!sh4_slot_legal(&s)) { /* let hardware raise slot-illegal: pass both through */
-                    emit16(&t.em, d->op); emit16(&t.em, s.op);
+                if (!(slot = fetch(&t, gpc + 2, &s))) break;
+                if (!sh4_slot_legal(slot)) { /* let hardware raise slot-illegal: pass both through */
+                    emit16(&t.em, d->op); emit16(&t.em, slot->op);
                     gpc += 4; b->end_reason = END_ILLEGAL; ended = 1; break;
                 }
-                slot = &s;
             }
 #ifdef DBT_CONST_DEVICE_ADDRESS
             t.known_mask = 0;

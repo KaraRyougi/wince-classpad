@@ -2913,3 +2913,77 @@ the old behavior. Regenerate the table when kernel.dll's sources change
 (a new CE update): `tools/kernel_devfuncs.py NK.bin kern.map -o
 dbt/rt/kernel_dev.h`; an unchanged kernel only moves, which the
 signatures absorb.
+
+### Translation copies, UTLB lookups and invalidation scans (2026-11-07)
+
+Runtime profile of the My Device load (second chance + KDEV, old 9 MiB NK,
+host samples from the tap to the frame): besides translation proper,
+`memset` 1.10 s and `memcpy` 0.86 s, `utlb_translate` 1.18 s,
+`invalidate_block` 1.24 s and `invalidate_range` 0.66 s. Their causes and
+what changed (each old form stays behind a switch):
+
+- **Per-instruction clearing and copying.** `sh4_decode` cleared a whole
+  `sh_insn` with `memset` per decoded opcode, `begin_meta_kind` a 16-byte
+  recovery record per instruction, and `fetch` copied each pre-decoded
+  instruction out of `g_pre`. The fixed-size template initialiser
+  (formerly opt-in `DBT_DECODE_TEMPLATE`; `-DDBT_DECODE_MEMSET` restores
+  the old one, `tools/test_decode_template.py` compares both for all 65536
+  opcodes) and the four-word record write (formerly `DBT_META_WORD_INIT`;
+  `-DDBT_META_MEMSET`) are now the default, and `fetch` returns a pointer
+  into `g_pre` (which nothing writes during the translation) instead of a
+  copy.
+- **UTLB lookups.** Every translation of user or P3 code, cross-ASID
+  lookups and the tick classifier read all 64 UTLB array entries (two P4
+  reads each). The slot hint (formerly `DBT_UTLB_HINT`; `-DDBT_UTLB_SCAN`
+  restores the scan) remembers the slot that matched last for a hashed
+  page and ASID and re-reads that slot's hardware words on every use, so
+  it never returns a stale mapping; a mismatch falls back to the scan.
+- **One detach pass per flush.** `invalidate_block` used to walk all
+  headers for the ICs and direct links into each block it killed: a flush
+  killing k blocks made k passes over 14400 headers. Over boot and load,
+  the range flushes killed 2635 blocks in 7 calls, the HC_FLUSH-all
+  teardowns 322 in 46, ldtlb replacements 486 in 16k hooks (counters from
+  `-DDBT_INVAL_DIAG`). Now `invalidate_block` records the dead host range
+  and `finish_invalidations`, which every caller already runs before the
+  guest continues, detaches the ICs and links into all recorded ranges in
+  one pass: up to 16 ranges compared directly, beyond that a 32-byte
+  granule map that is cleared after the pass. Nothing survives the batch,
+  so unlike `DBT_BATCH_INVALIDATE` it needs nothing from bank recycling
+  and works with second chance. `-DDBT_INVAL_IMMEDIATE` restores the
+  per-block scan.
+- **User range flushes without a full scan.** CE's HC_TLB_INVAL (229 calls
+  during the load, none killing anything) walked every header. User blocks
+  are already in the page index under their first and last 1 KiB page
+  (blocks are shorter than 1 KiB, so one of the two lies within any range
+  they overlap) and in `g_user_idx`; a range of up to 256 KiB now walks
+  the index chains of its pages, a larger one the user list.
+  `-DDBT_INVAL_RANGE_SCAN` restores the scan. The aspace guest gained
+  checks that HC_TLB_INVAL alone drops a block for a partial range on its
+  page, keeps it for a range on the next page, and drops it for a
+  whole-space flush; they pass on both the old and the new path.
+
+Results, My Device load, second chance + KDEV, all exact frame matches.
+On the 2026-11-06 8 MiB image (4 MiB / 14400 / 2624 KiB), changes added
+one at a time:
+
+| build | modeled s |
+| --- | ---: |
+| a589323 | 23.507 |
+| + no per-instruction clear/copy | 21.491 |
+| + UTLB slot hint | 19.858 |
+| + one detach pass per flush | 19.058 |
+| + user range flushes via the page index | 18.341 |
+
+The same changes on the old benchmark image (9 MiB window, 3 MiB / 14400 /
+2624 KiB, host-sampled): 21.707 s -> 13.559 s. Sampled seconds, a589323
+-> now: memset 1.17 -> 0.07, memcpy 0.72 -> 0.12, utlb_translate 1.39 ->
+0.43, invalidate_block + invalidate_range 1.50 -> 0.06 plus 0.69 in the
+single detach pass, translated code 4.51 -> 2.50 (less waiting work in the
+changed schedule; not attributable to one change).
+
+Single runs move with the schedule: a diagnostic build of a589323 that only
+adds counters and prints (`-DDBT_INVAL_DIAG -DDBT_STATS_EVERY=2000`)
+finished in 21.691 s against 23.507 s. Steps under ~2 s in the table are
+therefore not individually established; the sampled per-function times
+are the firmer evidence. Host tests (179 checks), the decode comparison
+and all 15 guests (extrom with NK_WINDOW=eact) pass.

@@ -645,13 +645,20 @@ static void hash_remove(const dbt_block *b)
 
 /* Physical address of virtual `va` under `asid` according to the UTLB
  * (array reads at 0xF6000000 / 0xF7000000), PHYS_UNKNOWN if unmapped. */
+#ifdef DBT_INVAL_DIAG
+static sf_u32 g_utlb_calls;
+#endif
 static sf_u32 utlb_translate(sf_u32 va, sf_u32 asid)
 {
     static const sf_u8 shift_of_sz[4] = { 10, 12, 16, 20 };
     int e;
+#ifdef DBT_INVAL_DIAG
+    ++g_utlb_calls;
+#endif
     if (!(REG_MMUCR & 1)) return va & 0x1FFFFFFFu;
-#ifdef DBT_UTLB_HINT
-    /* A hint caches only a hardware slot number, never a translation.
+#ifndef DBT_UTLB_SCAN
+    /* A hint caches only a hardware slot number, never a translation
+     * (DBT_UTLB_HINT until 2026-11-07; -DDBT_UTLB_SCAN: always scan all 64).
      * Re-read its VPN, ASID, validity and physical mapping on every use;
      * direct UTLB-array writes therefore cannot leave stale physical data. */
     {
@@ -712,6 +719,60 @@ static void unchain(dbt_block *o, int k)
 #if defined(DBT_BATCH_RANGES) && !defined(DBT_BATCH_INVALIDATE)
 #error DBT_BATCH_RANGES requires DBT_BATCH_INVALIDATE
 #endif
+#if !defined(DBT_BATCH_INVALIDATE) && !defined(DBT_INVAL_IMMEDIATE)
+/* Deferred detach (default since 2026-11-07; -DDBT_INVAL_IMMEDIATE for the
+ * old per-block scan). invalidate_block only records the dead host range;
+ * finish_invalidations, which every caller runs before the guest continues,
+ * detaches the ICs and direct links into all recorded ranges in one pass
+ * over the headers. A range or TLB flush killing k blocks used to make k
+ * passes over all of them. Up to PEND_RANGES ranges are compared directly,
+ * more go to a 32-byte-granule map that is cleared again afterwards (a
+ * granule shared with a live neighbour only detaches a few of its links,
+ * which the next lookup restores). Nothing outlives the batch, so bank
+ * recycling and second chance need not know about it. */
+#define DBT_INVAL_PENDING 1
+#define PEND_RANGES 16
+static sf_u32 g_pend_lo[PEND_RANGES], g_pend_len[PEND_RANGES];
+static unsigned g_npend, g_pend_over, g_pend_banks;
+static sf_u32 g_pend_min, g_pend_span;
+static sf_u8 g_pend_map[(CACHE_SIZE + 255u) / 256u];
+static void pend_mark(sf_u32 lo, sf_u32 len)
+{
+    sf_u32 i = (lo - g_cfg.cache_base) >> 5, end = (lo + len - g_cfg.cache_base + 31u) >> 5;
+    for (; i < end; ++i) g_pend_map[i >> 3] |= (sf_u8)(1u << (i & 7));
+}
+static void pend_add(sf_u32 lo, sf_u32 hi, unsigned bank_mask)
+{
+    unsigned k;
+    if (!g_npend) { g_pend_min = lo; g_pend_span = hi - lo; }
+    else {
+        sf_u32 max = g_pend_min + g_pend_span;
+        if (lo < g_pend_min) g_pend_min = lo;
+        if (hi > max) max = hi;
+        g_pend_span = max - g_pend_min;
+    }
+    g_pend_banks |= bank_mask;
+    if (g_npend < PEND_RANGES) { g_pend_lo[g_npend] = lo; g_pend_len[g_npend] = hi - lo; }
+    else {
+        if (!g_pend_over)
+            for (k = 0; k < PEND_RANGES; ++k) pend_mark(g_pend_lo[k], g_pend_len[k]);
+        g_pend_over = 1;
+        pend_mark(lo, hi - lo);
+    }
+    ++g_npend;
+}
+static int pend_dead(sf_u32 host)
+{
+    unsigned k;
+    if (host - g_pend_min >= g_pend_span) return 0;
+    if (g_pend_over) {
+        sf_u32 off = host - g_cfg.cache_base;
+        return (g_pend_map[off >> 8] >> ((off >> 5) & 7)) & 1;
+    }
+    for (k = 0; k < g_npend; ++k) if (host - g_pend_lo[k] < g_pend_len[k]) return 1;
+    return 0;
+}
+#endif
 #if defined(DBT_BATCH_HASH_REMOVE) && (!defined(DBT_BATCH_INVALIDATE) || !defined(DBT_INTERIOR_HASH))
 #error DBT_BATCH_HASH_REMOVE requires DBT_BATCH_INVALIDATE and DBT_INTERIOR_HASH
 #endif
@@ -767,9 +828,23 @@ static void verify_sources(unsigned banks)
 
 /* Make block b unreachable: hash entry, inline caches and chained jumps that
  * lead into it. Its cache memory stays dead until the next full flush. */
+#ifdef DBT_INVAL_DIAG
+/* -DDBT_INVAL_DIAG: calls and blocks killed per origin (0 range, 1 all but ROM, 2 TLB) */
+static unsigned g_inval_origin;
+static sf_u32 g_inval_calls[3], g_inval_kills[3], g_inval_multi[3];
+#define INVAL_CALL(o) do { g_inval_origin = (o); ++g_inval_calls[o]; g_inval_before = g_inval_kills[o]; } while (0)
+#define INVAL_END(o) do { if (g_inval_kills[o] - g_inval_before > 1) ++g_inval_multi[o]; } while (0)
+static sf_u32 g_inval_before;
+#else
+#define INVAL_CALL(o) ((void)0)
+#define INVAL_END(o) ((void)0)
+#endif
 static void invalidate_block(dbt_block *b)
 {
     int i, k;
+#ifdef DBT_INVAL_DIAG
+    ++g_inval_kills[g_inval_origin];
+#endif
     sf_u32 lo = b->host_base, hi = b->host_base + (sf_u32)b->host_len;
     unsigned bank_mask = 1u << bank_of_code(lo);
 #ifdef DBT_INCOMING_BITMAP
@@ -794,6 +869,10 @@ static void invalidate_block(dbt_block *b)
         g_dead_banks |= bank_mask;
     } else
 #endif
+#ifdef DBT_INVAL_PENDING
+    pend_add(lo, hi, bank_mask);
+    (void)i; (void)k;
+#else
     {
 #ifdef DBT_INCOMING_BITMAP
 #ifdef DBT_VERIFY_INCOMING_BITMAP
@@ -816,6 +895,7 @@ static void invalidate_block(dbt_block *b)
             }
         }
     }
+#endif
     dbt_stat.invalidations++;
 }
 
@@ -823,6 +903,25 @@ static void invalidate_block(dbt_block *b)
  * can die in one TLB/range flush; scan their incoming links only once. */
 static void finish_invalidations(void)
 {
+#ifdef DBT_INVAL_PENDING
+    int i, k;
+    if (!g_npend) return;
+    for (i = 0; i < g_nblocks; ++i) {
+        dbt_block *o = &g_blocks[i];
+        if (g_binfo[i].dead) continue;
+        if (o->ic_off >= 0 && pend_dead(*(volatile sf_u32 *)(o->host_base + (sf_u32)o->ic_off + 4)))
+            reset_ic(o);
+        if (!(g_link_banks[i] & g_pend_banks)) continue;
+        for (k = 0; k < o->nlinks; ++k)
+            if (pend_dead(*(volatile sf_u32 *)(o->host_base + (sf_u32)o->links[k].lit_off)))
+                unchain(o, k);
+    }
+    if (g_pend_over) {
+        sf_u32 a = (g_pend_min - g_cfg.cache_base) >> 8, b = (g_pend_min + g_pend_span - g_cfg.cache_base + 255u) >> 8;
+        memset(g_pend_map + a, 0, b - a);
+    }
+    g_npend = 0; g_pend_over = 0; g_pend_banks = 0;
+#endif
 #ifdef DBT_BATCH_INVALIDATE
     int i, k;
 #ifdef DBT_INCOMING_BITMAP
@@ -869,11 +968,42 @@ static void invalidate_range(sf_u32 lo, sf_u32 hi, int user_only)
 #ifdef DBT_BATCH_RANGES
     g_range_batch = 1;
 #endif
+    INVAL_CALL(0);
+#ifndef DBT_INVAL_RANGE_SCAN
+    /* User blocks only (CE's TLB flushes): those are in the page index
+     * under their first and last 1 KiB page (blocks are shorter than 1 KiB,
+     * so one of the two lies in the range's pages) and in g_user_idx, so
+     * neither needs a pass over every header. Default since 2026-11-07;
+     * -DDBT_INVAL_RANGE_SCAN for the full scan. */
+    if (user_only && hi > lo) {
+        if (hi - lo <= 256u * 1024u) {
+            sf_u32 page;
+            for (page = lo & ~0x3FFu; page < hi; page += 0x400u) {
+                unsigned node, bit = user_page_bit(page);
+                if (!(g_user_pages[bit >> 5] & (1u << (bit & 31)))) continue;
+                for (node = g_page_head[bit]; node != CHAIN_NONE; node = g_page_next[node]) {
+                    unsigned j = node >> 1;
+                    dbt_block *b = &g_blocks[j];
+                    if (g_binfo[j].dead || !g_binfo[j].user) continue;
+                    if (b->guest_pc < hi && b->guest_pc + b->guest_len > lo) invalidate_block(b);
+                }
+            }
+        } else {
+            int j;
+            for (j = 0; j < g_nuser; ++j) {
+                dbt_block *b = &g_blocks[g_user_idx[j]];
+                if (g_binfo[g_user_idx[j]].dead) continue;
+                if (b->guest_pc < hi && b->guest_pc + b->guest_len > lo) invalidate_block(b);
+            }
+        }
+    } else
+#endif
     for (i = 0; i < g_nblocks; i++) {
         dbt_block *b = &g_blocks[i];
         if (g_binfo[i].dead || (user_only && !g_binfo[i].user)) continue;
         if (b->guest_pc < hi && b->guest_pc + b->guest_len > lo) invalidate_block(b);
     }
+    INVAL_END(0);
     finish_invalidations();
 #ifdef DBT_BATCH_RANGES
     g_range_batch = 0;
@@ -943,6 +1073,7 @@ static void tlb_hook(void)
         __asm__ volatile ("ldtlb" ::: "memory");
         return;
     }
+    INVAL_CALL(2);
     if (shift_of_sz[sz] <= 12) {
         sf_u32 page, end = vpn + ~mask + 1;
         for (page = vpn; page < end; page += 1024) {
@@ -956,6 +1087,7 @@ static void tlb_hook(void)
             tlb_check_block((unsigned)i, vpn, mask, ptel, asid, shared);
         }
     }
+    INVAL_END(2);
     finish_invalidations();
     __asm__ volatile ("ldtlb" ::: "memory");
 }
@@ -2104,6 +2236,7 @@ static void invalidate_all_but_rom(void)
 #ifdef DBT_BATCH_RANGES
     g_range_batch = 1;
 #endif
+    INVAL_CALL(1);
     for (i = 0; i < g_nblocks; i++) {
         dbt_block *b = &g_blocks[i];
         sf_u32 pa;
@@ -2113,6 +2246,7 @@ static void invalidate_all_but_rom(void)
                                    (g_cfg.rom2_hi && pa >= g_cfg.rom2_lo && pa + b->guest_len <= g_cfg.rom2_hi))) { kept++; continue; }
         invalidate_block(b);
     }
+    INVAL_END(1);
     finish_invalidations();
 #ifdef DBT_BATCH_RANGES
     g_range_batch = 0;
@@ -2430,6 +2564,17 @@ static void print_stats(void)
 #ifdef DBT_SECOND_CHANCE
     dbt_puts(" probations="); dbt_puthex(g_probations); dbt_puts(" survivors="); dbt_puthex(g_survivors);
     dbt_puts(" survivor_bytes="); dbt_puthex(g_survivor_bytes);
+#endif
+#ifdef DBT_INVAL_DIAG
+    {
+        int o;
+        dbt_puts("\n[dbt] inval calls/kills/multi:");
+        for (o = 0; o < 3; ++o) {
+            dbt_puts(" "); dbt_puthex(g_inval_calls[o]); dbt_puts("/"); dbt_puthex(g_inval_kills[o]);
+            dbt_puts("/"); dbt_puthex(g_inval_multi[o]);
+        }
+        dbt_puts(" utlb="); dbt_puthex(g_utlb_calls);
+    }
 #endif
     dbt_puts("\n");
     print_samples();

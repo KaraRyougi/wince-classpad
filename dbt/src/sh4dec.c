@@ -41,9 +41,11 @@ void sh4_decode(sf_u32 op, sh_insn *d)
 #endif
 {
     int n = (op >> 8) & 0xF, m = (op >> 4) & 0xF;
-#ifdef DBT_DECODE_TEMPLATE
+#ifndef DBT_DECODE_MEMSET
     /* Fixed-size assignment lets the target compiler emit direct stores,
-     * avoiding the freestanding memset loop on every decoded opcode. */
+     * avoiding the freestanding memset loop on every decoded opcode
+     * (DBT_DECODE_TEMPLATE until 2026-11-07; -DDBT_DECODE_MEMSET for the old
+     * form, which tools/test_decode_template.py compares against). */
     static const sh_insn empty = {
         .kind = K_PASS, .ctrl = CR_NONE, .data = -1, .base = -1,
         .br_reg = -1
