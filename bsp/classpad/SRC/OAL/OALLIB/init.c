@@ -6,6 +6,7 @@
 //  through the ring, see debug.c).
 //------------------------------------------------------------------------------
 #include <bsp.h>
+#include <pehdr.h>        // struct info: romldr.h uses it without including pehdr.h
 #include <romldr.h>
 #include "classpad_extrom.h"
 
