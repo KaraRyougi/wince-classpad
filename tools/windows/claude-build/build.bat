@@ -91,9 +91,14 @@ rem leave an old platform.reg in the release directory.
 echo [4/5] FILES to the release directory
 rem PostFmergeBib.bat + romexclude.txt: makeimg runs the .bat after fmerge and
 rem it drops the network stack and the .wav files from ce.bib (docs/05 6).
+rem Identical files are skipped: an editor (Platform Builder) holding one open
+rem makes copy fail with "file in use" even when nothing changed.
 for %%F in (config.bib platform.bib platform.reg platform.dat PostFmergeBib.bat romexclude.txt) do (
-  copy /y "%PLAT%\FILES\%%F" "%_FLATRELEASEDIR%\%%F" >>"%LOG%" 2>&1
-  if errorlevel 1 goto failed
+  fc /b "%PLAT%\FILES\%%F" "%_FLATRELEASEDIR%\%%F" >nul 2>&1
+  if errorlevel 1 (
+    copy /y "%PLAT%\FILES\%%F" "%_FLATRELEASEDIR%\%%F" >>"%LOG%" 2>&1
+    if errorlevel 1 (echo cannot copy %%F: is it open in another program>>"%LOG%" & goto failed)
+  )
 )
 for %%F in (oal.exe classpad_ddi.dll classpad_kbd.dll classpad_touch.dll classpad_rotate.exe classpad_rotatekey.exe DocList.dll) do (
   if not exist "%_FLATRELEASEDIR%\%%F" (echo missing %%F>>"%LOG%" & goto failed)
