@@ -1,0 +1,24 @@
+!if 0
+PlotterZ.exe - Plotter-Z, a 3D function plotter (github.com/anderain/Plotter-Z,
+win32-native front end, upstream\ verbatim, README.md). plotterz.c compiles
+the whole program as one unit; plotterz.rc takes upstream's resources.
+!endif
+!INCLUDE $(_TARGETPLATROOT)\sources.cmn
+TARGETNAME=PlotterZ
+TARGETTYPE=PROGRAM
+RELEASETYPE=PLATFORM
+WINCEOEM=1
+EXEENTRY=WinMainCRTStartup
+# third-party code written for eVC 3/4: its warnings are not ours to fail on
+WARNISERROR=
+CDEFINES=$(CDEFINES) -D_CRT_SECURE_NO_DEPRECATE
+# afxres.h stand-in here; upstream's rc dir for its #include "resource.h"
+# and the icon file
+INCLUDES=$(INCLUDES);.;upstream\plotter-z\win32-native;$(_WINCEROOT)\public\common\sdk\inc
+TARGETLIBS= \
+    $(_PROJECTROOT)\cesysgen\sdk\lib\$(_CPUINDPATH)\coredll.lib \
+    $(_PROJECTROOT)\cesysgen\sdk\lib\$(_CPUINDPATH)\commctrl.lib \
+    $(_PROJECTROOT)\cesysgen\sdk\lib\$(_CPUINDPATH)\commdlg.lib
+SOURCES= \
+    plotterz.c \
+    plotterz.rc

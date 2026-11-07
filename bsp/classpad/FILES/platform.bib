@@ -22,6 +22,18 @@ MODULES
 
 FILES
 
+; Plotter-Z, a 3D function plotter (SRC\APPS\PLOTTERZ, built with the BSP):
+; command bar, trackbar and the Open/Save dialogs, so only with commctrl and
+; commdlg in the OS design. platform.dat puts the link in the Start menu.
+; @CESYSGEN IF CE_MODULES_COMMCTRL
+; @CESYSGEN IF CE_MODULES_COMMDLG
+MODULES
+    PlotterZ.exe        $(_FLATRELEASEDIR)\PlotterZ.exe        NK  S
+FILES
+    plotterz.lnk        $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\plotterz.lnk     NK  S
+; @CESYSGEN ENDIF CE_MODULES_COMMDLG
+; @CESYSGEN ENDIF CE_MODULES_COMMCTRL
+
 MODULES
     classpad_rotate.exe $(_FLATRELEASEDIR)\classpad_rotate.exe NK S
 

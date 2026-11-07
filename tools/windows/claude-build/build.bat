@@ -100,7 +100,7 @@ for %%F in (config.bib platform.bib platform.reg platform.dat PostFmergeBib.bat 
     if errorlevel 1 (echo cannot copy %%F: is it open in another program>>"%LOG%" & goto failed)
   )
 )
-for %%F in (oal.exe classpad_ddi.dll classpad_kbd.dll classpad_touch.dll classpad_rotate.exe classpad_rotatekey.exe DocList.dll sh3crt.dll) do (
+for %%F in (oal.exe classpad_ddi.dll classpad_kbd.dll classpad_touch.dll classpad_rotate.exe classpad_rotatekey.exe DocList.dll sh3crt.dll PlotterZ.exe) do (
   if not exist "%_FLATRELEASEDIR%\%%F" (echo missing %%F>>"%LOG%" & goto failed)
 )
 
@@ -118,6 +118,8 @@ findstr /i /c:"mfcce300.dll" ce.bib >nul
 if errorlevel 1 (echo mfcce300.dll is not in ce.bib>>"%LOG%" & goto failed)
 findstr /i /c:"MathXpander.exe" ce.bib >nul
 if errorlevel 1 (echo MathXpander.exe is not in ce.bib>>"%LOG%" & goto failed)
+findstr /i /c:"PlotterZ.exe" ce.bib >nul
+if errorlevel 1 (echo PlotterZ.exe is not in ce.bib: commctrl/commdlg in the OS design?>>"%LOG%" & goto failed)
 if not exist EXT.bin (echo makeimg wrote no EXT.bin: is EXT in config.bib's MEMORY>>"%LOG%" & goto failed)
 :imaged
 copy /y NK.bin "%PKG%\NK-claude.bin" >nul

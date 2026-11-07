@@ -54,6 +54,11 @@ Build (in the VM)
   build.bat kernel    relink the kernel again
   build.bat restore   orig\ back over PLATFORM\CLASSPAD, NK-before.bin back
 
+Plotter-Z (SRC\APPS\PLOTTERZ, README.md there) is part of step 3 and lands in
+NK as \Windows\PlotterZ.exe with a Start menu link (Programs > Plotter-Z);
+step 5 fails if it did not reach ce.bib (it needs commctrl and commdlg,
+both in ClasspadUI).
+
 If step 2 fails on "sysgen -p common nk", do it from the IDE instead: build -c
 in PRIVATE\WINCEOS\COREOS\NK\KERNEL, then Build > Advanced Build Commands >
 Sysgen (full, slow), then create kernel.done here and run build.bat again.
