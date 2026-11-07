@@ -385,7 +385,9 @@ static sf_u16 g_user_idx[MAX_BLOCKS];
 static sf_u16 g_ic_active[MAX_BLOCKS];
 static sf_u8 g_ic_active_seen[MAX_BLOCKS];
 /* Only hash slots that received user code since the last ASID switch. */
-static sf_u16 g_user_hash[HSIZE];
+#ifndef DBT_HASH_ASID_TAG
+static sf_u16 g_user_hash[HSIZE];     /* untagged entries leave the hash at an ASID switch */
+#endif
 static sf_u8 g_user_hash_seen[HSIZE];
 static unsigned g_nuser_hash;
 static int    g_nuser, g_nic; /* g_nic counts ICs filled with user targets this ASID */
@@ -1094,16 +1096,21 @@ static void note_asid(void)
 
 /* ldtlb executed by the guest: PTEH/PTEL describe the new entry. A page that
  * has blocks and now maps to another physical page loses them. */
+static int tlb_drops_block(unsigned i, sf_u32 vpn, sf_u32 mask,
+    sf_u32 ptel, sf_u32 asid, sf_u32 shared)
+{
+    const dbt_block *b;
+    if (g_binfo[i].dead || !g_binfo[i].user) return 0;
+    b = &g_blocks[i];
+    if (b->guest_pc >= vpn + ~mask + 1 || b->guest_pc + b->guest_len <= vpn) return 0;
+    if (!shared && g_binfo[i].asid != ASID_ANY && g_binfo[i].asid != asid) return 0;
+    return !(ptel & 0x100) || g_binfo[i].phys == PHYS_UNKNOWN ||
+        (g_binfo[i].phys & mask) != (ptel & 0x1FFFFC00u & mask);
+}
 static void tlb_check_block(unsigned i, sf_u32 vpn, sf_u32 mask,
     sf_u32 ptel, sf_u32 asid, sf_u32 shared)
 {
-    dbt_block *b;
-    if (g_binfo[i].dead || !g_binfo[i].user) return;
-    b = &g_blocks[i];
-    if (b->guest_pc >= vpn + ~mask + 1 || b->guest_pc + b->guest_len <= vpn) return;
-    if (!shared && g_binfo[i].asid != ASID_ANY && g_binfo[i].asid != asid) return;
-    if (!(ptel & 0x100) || g_binfo[i].phys == PHYS_UNKNOWN ||
-        (g_binfo[i].phys & mask) != (ptel & 0x1FFFFC00u & mask)) invalidate_block(b);
+    if (tlb_drops_block(i, vpn, mask, ptel, asid, shared)) invalidate_block(&g_blocks[i]);
 }
 
 static void tlb_hook(void)
@@ -2643,6 +2650,9 @@ static void print_stats(void)
     dbt_puts(" probations="); dbt_puthex(g_probations); dbt_puts(" survivors="); dbt_puthex(g_survivors);
     dbt_puts(" survivor_bytes="); dbt_puthex(g_survivor_bytes);
 #endif
+#ifdef DBT_TLB_REFILL
+    dbt_puts(" tlb_refills="); dbt_puthex(dbt_stat.tlb_refills);
+#endif
 #ifdef DBT_INVAL_DIAG
     {
         int o;
@@ -2965,6 +2975,10 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
 #endif
             break;
         case 60: v = 0x44425453u; break; /* DBTS */
+#ifdef DBT_TLB_REFILL
+        case 430: v = dbt_stat.tlb_refills; break;
+        case 431: v = 1; break;          /* TLB_REFILL built in */
+#endif
         case 61: v = 1; break;         /* statistics ABI version */
         case 62:
 #ifndef DBT_NO_TICK_SAMPLING
@@ -3445,12 +3459,104 @@ int dbt_exc_c(dbt_gctx *ctx)
     return act;
 }
 
+#ifdef DBT_TLB_REFILL
+/* CE6's SH TLB refill (shexcept.src TLBMissHandler, at VBR + 0x400) done
+ * here instead of in translated guest code. Delivering a UTLB miss to the
+ * guest cost an exception round trip, the handler's control-register
+ * accesses through the C fallback (TEA, TTB, EXPEVT, PTEA, PTEL), an ldtlb
+ * and an rte in C: ~32k times per My Device load. The walk below is the
+ * handler's: page directory (the process's from TTB, the kernel's from
+ * g_pprcNK->ppdir for the shared heap and kernel addresses), page table,
+ * valid bit 0x100, read-only mask for user-mode reads of the shared heap,
+ * PTEA from PTEL bits 9 and 29-31. On success the translator's ldtlb hook
+ * loads the entry and the faulting host instruction runs again. Anything
+ * else (a failing walk, memory not readable through P1/P2, a fault outside
+ * the code cache, a new mapping that would drop the faulting block) changes
+ * nothing and the guest handler runs as before. It is used only while the
+ * code at VBR + 0x400 is exactly this handler (checked once per VBR; the
+ * literals, shared-heap base and &g_pprcNK, come from its pool). */
+#define REG_TTB  (*(volatile sf_u32 *)0xFF000008u)
+#define REG_PTEA (*(volatile sf_u32 *)0xFF000034u)
+static const sf_u16 tlbr_code[57] = {          /* TLBMissHandler up to its bra TLBMissError */
+    0x5273, 0x5072, 0xe6ff, 0xd12a, 0x3212, 0x8b0e, 0x0032, 0x4029,
+    0x4019, 0xc940, 0x8840, 0x8905, 0x4211, 0x8b2a, 0xe6df, 0x5079,
+    0x8840, 0x8b26, 0xd023, 0x6002, 0x500b, 0x933e, 0x6123, 0x4119,
+    0x4109, 0x6213, 0x2239, 0x4119, 0x4109, 0x2139, 0x301c, 0x6002,
+    0x4011, 0x8916, 0x302c, 0x6002, 0x9230, 0x2209, 0x4215, 0x8b10,
+    0x2069, 0x6103, 0xe3f7, 0x413d, 0xe301, 0x2138, 0xe3ec, 0x413d,
+    0x8900, 0x7108, 0x171d, 0x1701, 0x0038, 0x0009, 0x0009, 0x002b,
+    0x0009
+};
+static sf_u32 g_tlbr_vbr = 1, g_tlbr_heap, g_tlbr_nkprc;    /* VBR last checked (1: none), literals */
+static int g_tlbr_ok;
+static int p12_word(sf_u32 a) { return a >= 0x80000000u && a < 0xC0000000u && !(a & 3); }
+static sf_u32 rd32le(sf_u32 a) { return bswap32(*(volatile sf_u32 *)a); }
+static void tlbr_check(sf_u32 vbr)
+{
+    sf_u32 h = vbr + 0x400, a;
+    unsigned i;
+    g_tlbr_vbr = vbr; g_tlbr_ok = 0;
+    if (!p12_word(h) || !p12_word(h + 0x200)) return;
+    for (i = 0; i < sizeof tlbr_code / sizeof tlbr_code[0]; ++i)
+        if (bswap16(*(volatile sf_u16 *)(h + 2 * i)) != tlbr_code[i]) return;
+    a = ((h + 0x06 + 4) & ~3u) + 4 * (tlbr_code[0x06 / 2] & 0xFF); g_tlbr_heap = rd32le(a);   /* VM_SHARED_HEAP_BASE */
+    a = ((h + 0x24 + 4) & ~3u) + 4 * (tlbr_code[0x24 / 2] & 0xFF); g_tlbr_nkprc = rd32le(a);  /* &g_pprcNK */
+    if (bswap16(*(volatile sf_u16 *)(h + 0x2A + 4 + 2 * (tlbr_code[0x2A / 2] & 0xFF))) != 0x0FFC ||
+        bswap16(*(volatile sf_u16 *)(h + 0x48 + 4 + 2 * (tlbr_code[0x48 / 2] & 0xFF))) != 0x0100 ||
+        !p12_word(g_tlbr_nkprc)) return;
+    g_tlbr_ok = 1;
+    dbt_puts("[dbt] TLB refill in the translator: shared heap "); dbt_puthex(g_tlbr_heap);
+    dbt_puts(", g_pprcNK at "); dbt_puthex(g_tlbr_nkprc); dbt_puts("\n");
+}
+static int tlb_refill(const dbt_gctx *ctx)
+{
+    static const sf_u8 shift_of_sz[4] = { 10, 12, 16, 20 };
+    sf_u32 tea = ctx->tea, mask = 0xFFFFFFFFu, dir, pde, pte, a, pteh, sz, pmask, vpn;
+    dbt_block *b;
+    if (dbt_shadow_vbr != g_tlbr_vbr) tlbr_check(dbt_shadow_vbr);
+    if (!g_tlbr_ok || ctx->host_spc - g_cfg.cache_base >= g_cfg.cache_size) return 0;
+    if (ctx->expevt != 0x040 && ctx->expevt != 0x060) return 0;
+    dir = REG_TTB;
+    if (tea >= g_tlbr_heap) {
+        if (!(dbt_shadow_md & SR_MD)) {                  /* user mode: shared heap, reads only */
+            if (tea >= 0x80000000u || ctx->expevt != 0x040) return 0;
+            mask = 0xFFFFFFDFu;
+        }
+        a = rd32le(g_tlbr_nkprc) + 44;                   /* &g_pprcNK->ppdir */
+        if (!p12_word(a)) return 0;
+        dir = rd32le(a);
+    }
+    a = dir + ((tea >> 20) & 0xFFCu);
+    if (!p12_word(dir) || !p12_word(a)) return 0;
+    pde = rd32le(a);
+    a = pde + ((tea >> 10) & 0xFFCu);
+    if (!p12_word(pde) || !p12_word(a)) return 0;     /* a page table outside P1/P2 is the guest's business */
+    pte = rd32le(a);
+    if (!(pte & 0x100)) return 0;
+    pte &= mask;
+    /* the block that faulted must survive the new entry (it runs again) */
+    b = block_of_host(ctx->host_spc);
+    if (!b) return 0;
+    pteh = REG_PTEH;
+    sz = ((pte >> 4) & 1) | ((pte >> 6) & 2); pmask = ~((1u << shift_of_sz[sz]) - 1);
+    vpn = pteh & 0xFFFFFC00u & pmask;
+    if (tlb_drops_block((unsigned)(b - g_blocks), vpn, pmask, pte, pteh & 0xFF, (pte >> 1) & 1)) return 0;
+    REG_PTEA = (pte >> 29) | (((pte >> 9) & 1) << 3);
+    REG_PTEL = pte;
+    tlb_hook();                                          /* ASID, stale blocks, ldtlb */
+    return 1;
+}
+#endif
+
 static int exc_c_body(dbt_gctx *ctx)
 {
     dbt_block *b = 0;                   /* set on the in-block paths only */
     sf_u32 guest_pc, handler;
     int act, where = 0;                 /* where as trace_exc: 1 exit stub, 2 block, 3 stub window, 4 translating, 5 helper */
     dbt_stat.exceptions++;
+#ifdef DBT_TLB_REFILL
+    if (ctx->vec_off == 0x400 && !g_exc_depth && tlb_refill(ctx)) { dbt_stat.tlb_refills++; return RT_ACT_RESUME; }
+#endif
 
     if (ctx->vec_off == 0x100 && ctx->expevt == 0x160) {
         sf_u32 nr = (ctx->tra >> 2) & 0xFF;

@@ -3045,3 +3045,45 @@ leaders: `dbt_translate_block` 1.50 s, `lookup_or_translate` 1.12 s,
 the assembly stubs 1.8 s in that run. Host tests, the decoder comparison,
 all 15 guests (aspace runs its 9 tagged-hash checks too) and the HHK check
 pass.
+
+### Where the guest's time goes, and CE's TLB refill in the translator (2026-11-07)
+
+Guest-block profile of the 8 MiB image at three tap ticks (3 MiB-cache
+build, so the sampler's 256 KiB banks apply; maps from the VM release
+directory): 15.49 / 14.68 / 15.45 s, translated guest code 4.34 / 3.87 /
+4.38 s. classpad_ddi (0.75 s, `GPE::EmulatedBlt_Internal` 0.56 s), gwes
+(0.5 s) and the rest are the same in all three; the difference is
+kernel.dll (2.25 / 1.86 / 2.28 s: KCall, GeneralException, KCNextThread,
+NKHandleCall), i.e. how many system calls and thread switches happen. No
+polling loop or background job stands out. The quiet 13.71 s run of the
+old image (kernel.dll 0.86 s) was the outlier, not the rule.
+
+`TLB_REFILL=1` (Makefile, default): a UTLB miss taken in the code cache
+is refilled by the translator (rt.c `tlb_refill`) with the walk of CE6's
+`TLBMissHandler` (shexcept.src): page directory from TTB, or
+`g_pprcNK->ppdir` for addresses from the shared heap base up (user mode
+there: reads only, PR write bit masked), page table, valid bit 0x100,
+PTEA from PTEL bits 9 and 29-31; then the translator's ldtlb hook and the
+faulting host instruction runs again (`RT_ACT_RESUME`). It applies only
+while VBR + 0x400 holds that handler word for word (57 words up to its
+`bra TLBMissError`, checked once per VBR; shared-heap base and &g_pprcNK
+come from its literal pool; both measured images match). Anything else
+leaves the state untouched and delivers the exception as before: a
+failing walk (the guest then reaches TLBMissError itself), a directory or
+table outside P1/P2, a fault outside the code cache or during nested
+exception handling, and a new mapping that would drop the faulting block.
+
+Before, each miss was an exception into C, the guest handler in
+translated code with TEA/TTB/EXPEVT/PTEA/PTEL through the C fallback, an
+ldtlb hook and an rte in C. Counters over the load (old image): 26234
+refills; device-access fallbacks 236718 -> 100442, rte 69031 -> 41188.
+New guest `tlbrefill`: CE's handler at its VBR + 0x400 with its own page
+directories and fake g_pprcNK; process-directory read, write miss,
+shared-heap lookup and a missing valid bit (TLBMissError path), with and
+without TLB_REFILL (the handler as translated guest code gives the same
+results).
+
+| 8 MiB image, mean of taps 7.5M/8.0M/8.5M | mean | runs |
+| --- | ---: | --- |
+| before (HASH_TAG=1 commit) | 15.31 s | 14.81 15.51 15.60 |
+| TLB_REFILL=1 | 13.56 s | 13.51 13.78 13.40 |

@@ -140,6 +140,7 @@ typedef struct {
     sf_u32 dbgring_bytes;          /* bytes printed from the guest debug ring */
     sf_u32 lcd_pixels;             /* pixels pushed to the panel by HC_LCD_BLIT */
     sf_u32 dev_accesses;           /* device-aware 32-bit accesses taken through the fallback helper */
+    sf_u32 tlb_refills;            /* UTLB misses refilled by the translator (DBT_TLB_REFILL) */
 } dbt_stats;
 extern dbt_stats dbt_stat;
 

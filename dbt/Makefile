@@ -132,6 +132,12 @@ HOST_CFLAGS  += $(if $(filter 1,$(KDEV)),-DDBT_KDEV,)
 # (16384: ~0.2 s faster on My Device for 96 KiB more; docs/04).
 HASH_TAG      ?= 1
 HASH_ENTRIES  ?= 8192
+# TLB_REFILL=1: UTLB misses in translated code are refilled by the translator
+# with CE6's own page-table walk (rt.c tlb_refill) instead of an exception
+# round trip into the guest's TLBMissHandler; only while VBR + 0x400 holds
+# exactly that handler.
+TLB_REFILL    ?= 1
+HOST_CFLAGS  += $(if $(filter 1,$(TLB_REFILL)),-DDBT_TLB_REFILL,)
 HOST_CFLAGS  += $(if $(filter 1,$(HASH_TAG)),-DDBT_HASH_ASID_TAG -DDBT_HASH_ASID_MIX -DDBT_USER_IC_HASH_HIT,) -DDBT_HASH_ENTRIES=$(HASH_ENTRIES)
 NK_PADDED = $(BUILD)/nk-flash.bin
 NK_OFF_FILE = $(BUILD)/nk-flash.off
@@ -169,6 +175,7 @@ GUEST_EXTRA_bench := bench/loops.S
 GUEST_EXTRA_apicall := guest/fault_vectors.S
 GUEST_EXTRA_mmu := guest/fault_vectors.S
 GUEST_EXTRA_aspace := guest/fault_vectors.S
+GUEST_EXTRA_tlbrefill := guest/tlbrefill_vectors.S
 GUEST_EXTRA_bank := guest/bank_vectors.S
 GUEST_EXTRA_devmem := guest/devmem_asm.S
 GUEST_EXTRA_tlbdata := guest/fault_vectors.S guest/tlbdata_asm.S
@@ -186,7 +193,7 @@ DEVALL_STAMP := $(BUILD)/.devall-$(if $(filter 1,$(DEVALL)),1,0)
 $(DEVALL_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.devall-*
 	touch $@
-LAYOUT_STAMP := $(BUILD)/.layout-$(GUEST_RAM_LO)-$(HHK_PAYLOAD)-$(GUEST_RAM_HI)-$(IMAGE_BASE)-$(CACHE_BASE)-$(CACHE_SIZE)-$(BLOCKS)-$(ARENA_KB)-$(NK_FLASH)-$(NK_FLASH_MAX)-$(DEVICE)-$(CONSOLE)-$(IRQPINS)-$(LAZY_META)$(SECOND_CHANCE)$(KDEV)$(HASH_TAG)-$(HASH_ENTRIES)
+LAYOUT_STAMP := $(BUILD)/.layout-$(GUEST_RAM_LO)-$(HHK_PAYLOAD)-$(GUEST_RAM_HI)-$(IMAGE_BASE)-$(CACHE_BASE)-$(CACHE_SIZE)-$(BLOCKS)-$(ARENA_KB)-$(NK_FLASH)-$(NK_FLASH_MAX)-$(DEVICE)-$(CONSOLE)-$(IRQPINS)-$(LAZY_META)$(SECOND_CHANCE)$(KDEV)$(HASH_TAG)$(TLB_REFILL)-$(HASH_ENTRIES)
 $(LAYOUT_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.layout-*
 	touch $@
