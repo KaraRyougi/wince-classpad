@@ -207,9 +207,35 @@ Language screen as the pristine NOR, frame for frame, and after 1M ticks no
 sector of the chip has changed, the hole included (emulator only; other
 paths such as the OS updater may still check the sum). An OS update rewrites
 the image and erases the region; CE then boots without it ("no EXT ROM
-region" from the OAL). Before relying on it on hardware: dump the hole from
-HollyHock, write one sector, RESET and power-cycle, check that Casio's OS
-boots and the sector survives.
+region" from the OAL).
+
+Who checks the sum (static analysis of OS 02.01.7003, 2026-11-06; the
+device dump `~/Downloads/nor-fx-cp400.bin` has the same code, its
+[0x20000, 0x14FFEB0) identical to the update package's image, only the region
+tag byte at 0x14FFEB5 differs):
+
+- The boot code (0x0-0x1FFFF) does not sum the OS: before jumping it compares
+  the 8 bytes "CASIOWIN" at 0xA0020000 (0xA0000348). Its byte-sum loops
+  (0xA0008122 and nearby) add 2 to 4 bytes of communication packets.
+- The OS has the fx-CG100's integrity routine (CG100 0x8023014A) at
+  0x80063EB8: sum [0xA0020000, 0xA14FFEB0) + [0xA14FFEF0, end) against the
+  big-endian word at 0xA1800000 - 0xA0008 - 0x2A0000 = 0xA14BFFF8. On this
+  layout that word is erased (0xFFFFFFFF) and the second range is empty, so it
+  fails even on a pristine image. Its only caller, 0x80063FF0 (identity
+  record at 0xA0000300 = 0xA14FFEB0, then this sum), is never called: no bsr,
+  bra or literal anywhere in the OS refers to it. The CG100 diverts to its
+  OS-update receiver from the same routine; the ClassPad OS does not run it.
+- The factory test mode ("OS    SUM  Testing!", "ABS   SUM  Testing!",
+  "USER  SUM  Testing!", " NG"/" OK", strings at 0x808BD660; routines at
+  0x8008D5D6, 0x800923FA, 0x800944FC, 0x8009901C) sums the OS and shows the
+  result: with EXT written it would say NG there, and that is all.
+
+So writing EXT without fixing the stored sum is harmless for booting and
+running Casio's OS 02.01.7003 (and casio-emu's cold boot agrees). Not
+covered: other OS versions, and what the PC-side updater checks before it
+rewrites the image (it erases the hole either way). Hardware check, still
+open: write EXT, RESET and power-cycle, check that Casio's OS boots and EXT
+survives.
 
 ## The eActivity area as an alternative window (experiment, 2026-11-05)
 
