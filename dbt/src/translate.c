@@ -32,6 +32,7 @@
 #define TAG_IC_G      400           /* inline cache: cached guest target (followed by TAG_IC_H in the pool) */
 #define TAG_IC_H      401           /* inline cache: its host address */
 #define TAG_IC_A      402           /* address of the TAG_IC_G literal (X1 for the lookup_ic stub) */
+#define TAG_RET       403           /* helper return address: host_base + offset (relocated with the block) */
 #define TAG_NONE      (-1)
 
 typedef struct {
@@ -240,7 +241,19 @@ static int dev_candidate(const tctx *t, const sh_insn *d)
     sf_u32 pc;
     if (!t->env->dev_hi || d->kind != K_MEM || d->size != 4 || d->ctrl != CR_NONE || d->movca || d->am == AM_GBR) return 0;
     pc = t->gpc & 0x1FFFFFFFu;
-    return pc >= (t->env->dev_lo & 0x1FFFFFFFu) && pc < (t->env->dev_hi & 0x1FFFFFFFu);
+    if (pc < (t->env->dev_lo & 0x1FFFFFFFu) || pc >= (t->env->dev_hi & 0x1FFFFFFFu)) return 0;
+    if (t->env->dev_ranges) {
+        /* the few functions that can reach P4 (rt/kdev.c): binary search */
+        unsigned lo = 0, hi = t->env->ndev_ranges;
+        while (lo < hi) {
+            unsigned mid = (lo + hi) / 2;
+            if (pc < t->env->dev_ranges[2 * mid]) hi = mid;
+            else if (pc >= t->env->dev_ranges[2 * mid + 1]) lo = mid + 1;
+            else return 1;
+        }
+        return 0;
+    }
+    return 1;
 }
 
 static void tr_mem_plain(tctx *t, const sh_insn *d);
@@ -691,7 +704,7 @@ static void call_helper(tctx *t, sf_u32 helper, sf_u32 arg_reg, int arg_mode, sf
     if (arg_mode == 1) emit16(e, op_lds_slot((int)arg_reg, SLOT_X0));
     spill(t, rT, SLOT_Y0);
     if (arg_mode == 2) { emit_mov_imm(e, rT, arg_imm); emit16(e, op_lds_slot(rT, SLOT_X0)); }
-    ret_lit = emit_mov_lit(e, rT, 0, TAG_NONE);              /* return address, patched below */
+    ret_lit = emit_mov_lit(e, rT, 0, TAG_RET);               /* return address, patched below */
     emit16(e, op_lds_slot(rT, SLOT_X1));
     emit_mov_lit(e, rT, helper, TAG_NONE);
     emit16(e, OP_JMP(rT));
@@ -1407,7 +1420,7 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
     tctx t;
     dbt_block *b = out;
     int max = env->max_insns > 0 && env->max_insns <= DBT_MAX_INSNS ? env->max_insns : DBT_MAX_INSNS;
-    int n = 0, ended = 0, k;
+    int n = 0, ended = 0, k, pool;
     sf_u32 gpc = guest_pc;
 
     {
@@ -1544,10 +1557,26 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
         emit16(&t.em, OP_JMP(rS));
         emit16(&t.em, op_sts_slot(SLOT_Y0, rS));
     }
-    emit_flush_lits(&t.em);
+    pool = emit_flush_lits(&t.em);
     /* The emitter rejects failed literal sites; reject failed jump slots
      * before inspecting them. No further instructions are emitted below. */
     if (t.em.overflow) return DBT_ERR_OVERFLOW;
+    if (env->reloc_map) {
+        /* Pool words holding an address inside this block (helper return
+         * addresses, exit-stub link-literal addresses, the IC pair's
+         * address): what a move must rebase. Link literals are left out;
+         * a moved block is unchained and they are rewritten from links. */
+        int nl = -t.em.nlits, i;
+        memset(env->reloc_map, 0, DBT_RELOC_BYTES);
+        *env->reloc_pool = (sf_u16)pool;
+        for (i = 0; i < nl; i++) {
+            int tag = t.em.lits[i].tag;
+            if (tag == TAG_RET || tag == TAG_IC_A || (tag >= TAG_STUB_L(0) && tag < TAG_STUB_L(DBT_MAX_LINKS))) {
+                unsigned w = (unsigned)(t.em.lits[i].at - pool) / 4;
+                env->reloc_map[w >> 3] |= (sf_u8)(1u << (w & 7));
+            }
+        }
+    }
     {
         int g_off = emit_lit_offset(&t.em, TAG_IC_G), a_off = emit_lit_offset(&t.em, TAG_IC_A);
         if (g_off >= 0 && a_off >= 0) {

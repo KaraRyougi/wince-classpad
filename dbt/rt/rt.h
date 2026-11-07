@@ -52,6 +52,8 @@ typedef struct {
     sf_u32 cache_base, cache_size;     /* code cache */
     sf_u32 guest_ram_lo, guest_ram_hi; /* what the guest may use (for sanity checks only) */
     sf_u32 dev_lo, dev_hi;             /* device-aware translation range (kernel.dll), 0,0 = none */
+    const sf_u32 *dev_ranges;          /* narrower: [lo, hi) pairs inside it (rt/kdev.c), NULL = all of it */
+    unsigned ndev_ranges;
     sf_u32 rom_lo, rom_hi;             /* the ROM image (physical, read-only for the whole run), 0,0 = none */
     sf_u32 rom2_lo, rom2_hi;           /* a second XIP region (EXT, in the NOR hole), 0,0 = none */
 } dbt_rt_config;

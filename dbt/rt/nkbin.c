@@ -52,6 +52,7 @@ static void parse_rom(sf_u32 start, sf_u32 lo, sf_u32 hi, nkbin_info *out)
                             const sf_u8 *o = (const sf_u8 *)o32;
                             sf_u32 vsize = le32(o), real = le32(o + 16), flags = le32(o + 20);
                             if (!(flags & 0x20) || !vsize) continue;
+                            if (vsize > out->kernel_text_len) { out->kernel_text = real; out->kernel_text_len = vsize; }
                             if (real < clo) clo = real;
                             if (real + vsize > chi) chi = real + vsize;
                         }

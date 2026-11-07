@@ -17,6 +17,7 @@
  */
 #include "rt.h"
 #include "nkbin.h"
+#include "kdev.h"
 #include "boot_power.h"
 
 #ifndef GUEST_RAM_LO
@@ -115,6 +116,21 @@ void dbt_main(void)
     cfg.cache_base = CACHE_BASE; cfg.cache_size = CACHE_SIZE;
     cfg.guest_ram_lo = GUEST_RAM_LO; cfg.guest_ram_hi = GUEST_RAM_HI;
     cfg.dev_lo = info.kernel_lo; cfg.dev_hi = info.kernel_hi;      /* kernel.dll reaches the CCN registers directly */
+    cfg.dev_ranges = 0; cfg.ndev_ranges = 0;
+#ifdef DBT_KDEV
+    /* ...but only in a few of its functions (rt/kdev.c) */
+    if (info.kernel_text_len) {
+        static sf_u32 ranges[2 * KDEV_MAX_RANGES];
+        cfg.ndev_ranges = kdev_locate(info.kernel_text, info.kernel_text_len, ranges, KDEV_MAX_RANGES);
+        if (cfg.ndev_ranges) {
+            cfg.dev_ranges = ranges;
+            unsigned i;
+            dbt_puts("[kdev] device-aware kernel.dll ranges:");
+            for (i = 0; i < cfg.ndev_ranges; ++i) { dbt_puts(" "); dbt_puthex(ranges[2 * i]); dbt_puts("-"); dbt_puthex(ranges[2 * i + 1]); }
+            dbt_puts("\n");
+        }
+    }
+#endif
     cfg.rom_lo = info.physfirst & 0x1FFFFFFFu; cfg.rom_hi = info.physlast & 0x1FFFFFFFu;
 #ifdef EXT_FLASH
     /* config.bib's second XIP region (EXT, docs/03): its modules run in place
