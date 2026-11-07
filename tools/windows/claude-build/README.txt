@@ -65,10 +65,10 @@ Two XIP regions (config.bib, docs/03 "The EXT region")
        reformats the area after a Casio session, so wince.hhk writes NK.bin
        again then.
   EXT  80EE0000, 5 MiB, the erased hole inside Casio's OS image: Math Xpander's
-       23 SH3 DLLs as XIP modules (flag P: no CPU type check; realigned to
-       4 KiB sections by stage.py), MathXpander.exe (linked /FIXED, so not
-       realignable: a file, 10 KiB in RAM), its help pages, keypad bitmaps
-       and Start menu link as files. Casio's boots leave
+       23 SH3 DLLs and MathXpander.exe as XIP modules (flag P: no CPU type
+       check; realigned to 4 KiB sections by stage.py, the /FIXED EXE after
+       its relocations are rebuilt), its help pages, keypad bitmaps and
+       Start menu link as files. Casio's boots leave
        it alone (emulator: a cold boot neither checks the OS checksum that
        covers it nor writes it), so wince.hhk writes EXT.bin once and finds it
        identical afterwards; an OS update erases it.
@@ -90,7 +90,7 @@ boots). Things to look at:
     An IDE Sysgen alone never rebuilds nkmain.lib: run build.bat at least once.
   - the OAL's line "CLASSPAD OAL: EXT ROM region 80ee0000..., N files"
     (console builds / debug ring), then Start > Programs > Math Xpander
-    (\Windows\MathXpander.exe, loaded from the hole; its DLLs run in place).
+    (\Windows\MathXpander.exe, run in place from the hole like its DLLs).
     The Keyboard key shows its math keyboard (MathKeyPad.dll, a SIP input
     method registered in platform.reg); the strip icons act as HP Xpander's
     keys: Menu = HOME (Start menu), Main = MATH (Math Xpander), Settings =

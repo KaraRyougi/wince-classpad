@@ -41,8 +41,10 @@ MODULES
 ; its binaries as XIP modules, help pages, keypad bitmaps and the Start menu
 ; link as files. The binaries are not in the repository: stage.py copies them
 ; into FILES\xpander from the unpacked cab (FILES\xpander\README.md) and
-; realigns the DLLs. MathXpander.exe is linked /FIXED (no relocations), so it
-; cannot be realigned: it is a file, loaded into RAM (10 KiB). The
+; realigns them to 4 KiB sections. MathXpander.exe is linked /FIXED (no
+; relocations): stage.py rebuilds them first (pe4k.reconstruct_relocs; as a
+; plain file CE 6 refused it, "not a valid Windows CE application": its loader
+; takes no section that is not page aligned, 2026-11-06). The
 ; program is \Windows\MathXpander.exe; platform.dat puts the link in the Start
 ; menu, platform.reg registers .mwb. MathKeyPad.dll (its keypad input method)
 ; is in, not registered.
@@ -71,8 +73,8 @@ MODULES
    TablePane.dll            $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\TablePane.dll             EXT  P
    Workbook.dll             $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\Workbook.dll              EXT  P
    MathKeyPad.dll           $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\MathKeyPad.dll            EXT  P
+   MathXpander.exe          $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\MathXpander.exe           EXT  P
 FILES
-   MathXpander.exe          $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\MathXpander.exe           EXT  S
    geometry1.htm            $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\geometry1.htm             EXT  S
    graph1.htm               $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\graph1.htm                EXT  S
    math1.htm                $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\math1.htm                 EXT  S

@@ -183,7 +183,11 @@ the file layout stays, the sections move to 4 KiB boundaries, and the RVAs
 (entry point, directories, import thunks, export arrays, resource entries),
 every HIGHLOW fixup and the .reloc table follow; the check relocates the
 original and the copy to one base and compares every section. The EXE is
-linked /FIXED (no relocations), cannot move, and stays a file (10 KiB of RAM).
+linked /FIXED (no relocations); as a plain file CE 6 refused it ("not a
+valid Windows CE application": the loader takes no section of a file image
+that is not page aligned either), so `pe4k.reconstruct_relocs` rebuilds its
+222 fixups (pinned by SHA-256 in `stage.py`) and it becomes an XIP module
+too.
 
 `OEMInit` validates the region (`classpad_extrom.h`: signature, ROMHDR, every
 module's name, e32/o32 records and section data, every file inside the

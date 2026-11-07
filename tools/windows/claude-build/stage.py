@@ -10,19 +10,29 @@
          plus Math Xpander's files in FILES\\xpander (platform.bib puts them
          into the EXT region; they are not in the repository); every
          platform.bib module under FILES is realigned to 4 KiB sections
-         (tools/pe4k.py: romimage takes no 1 KiB-aligned XIP module)
+         (tools/pe4k.py: romimage takes no 1 KiB-aligned XIP module, and
+         CE 6 loads none from a file either); MathXpander.exe, linked
+         /FIXED, gets its relocations rebuilt first (RELOC_PINS)
   orig\\  with --platform: the VM's current versions of every file src\\ changes
   hhk\\   wince-eact.hh3 and nkflash-eact.hh3 (make DEVICE=1 NK_WINDOW=eact hhk)
 EXT.bin itself is made by makeimg in the VM (build.bat), next to NK.bin.
 Nothing outside <dest> is written except the dbt/build-pkg build directory.
 Commit first: src\\ comes from HEAD, not from the working tree.
 """
-import io, os, shutil, subprocess, sys, tarfile
+import hashlib, io, os, shutil, subprocess, sys, tarfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 sys.path.insert(0, os.path.join(REPO, "tools"))
 import pe4k
+
+# /FIXED EXEs whose relocations pe4k.reconstruct_relocs rebuilds: the SHA-256
+# of the copy checked by hand and its fixup count (Math Xpander 1.0 PPC SH3:
+# 157 literal-pool addresses in .text, 43 vtable and message-map pointers in
+# .rdata, 2 in .data, 20 .pdata function starts; .rsrc has none).
+RELOC_PINS = {
+    "mathxpander.exe": ("09da9ddf8e965a6fe9cf3d2f35354bdc919a0839f7ccff65017fffdb2ea09417", 222),
+}
 BUILD = "build-pkg"
 
 def run(*cmd, **kw):
@@ -93,6 +103,16 @@ def main(argv):
             p = os.path.join(src, *w[1].split("\\PLATFORM\\CLASSPAD\\", 1)[1].split("\\"))
             data = open(p, "rb").read()
             try:
+                pin = RELOC_PINS.get(w[0].lower())
+                if pin:
+                    # /FIXED EXE: relocations rebuilt by scanning, only for the
+                    # copy checked by hand (tools/pe4k.py reconstruct_relocs)
+                    if hashlib.sha256(data).hexdigest() != pin[0]:
+                        sys.exit("stage: %s is not the copy whose relocations were checked" % w[0])
+                    rvas = pe4k.reconstruct_relocs(data)
+                    if len(rvas) != pin[1]:
+                        sys.exit("stage: %s: %d fixups found, %d expected" % (w[0], len(rvas), pin[1]))
+                    data = pe4k.add_relocs(data, rvas)
                 new, what = pe4k.realign(data)
                 errs = pe4k.check(data, new)
             except pe4k.PEError as e:

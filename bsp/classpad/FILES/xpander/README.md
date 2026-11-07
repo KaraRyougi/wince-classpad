@@ -4,9 +4,9 @@ Math Xpander 1.0 (Saltire Software, 2001), the Pocket PC 2000 SH3 build
 (`Xpander.PPC300_10003.cab`), executed in place from the EXT region: the
 second XIP region of `config.bib`, in the erased hole inside Casio's OS image
 (P1 `0x80EE0000`, 5 MiB; docs/03 "The EXT region"). `platform.bib` lists its
-23 SH3 DLLs as `MODULES ... EXT P` (P: no CPU type check, they are SH3) and
-`MathXpander.exe`, its help pages, keypad bitmaps and `mathxpander.lnk` as
-`FILES ... EXT`. makeimg then writes `EXT.bin` next to `NK.bin`.
+23 SH3 DLLs and `MathXpander.exe` as `MODULES ... EXT P` (P: no CPU type
+check, they are SH3) and its help pages, keypad bitmaps and `mathxpander.lnk`
+as `FILES ... EXT`. makeimg then writes `EXT.bin` next to `NK.bin`.
 
 The Pocket PC tools linked the binaries with 1 KiB sections, and romimage
 takes only 4 KiB-aligned XIP modules ("only 4k page alignments supported at
@@ -14,8 +14,14 @@ this time"): stage.py realigns every `MODULES` entry under `FILES` with
 `tools/pe4k.py` (same file layout and bytes; new section addresses, the RVAs,
 every HIGHLOW fixup and the .reloc table moved with them; checked against the
 original after relocating both). `MathXpander.exe` is linked /FIXED, with no
-relocations, so it cannot be moved: as a file it is loaded into RAM
-(SizeOfImage 10 KiB) and its DLLs still run in place.
+relocations, and CE 6 refuses it as a plain file too ("not a valid Windows CE
+application": `loader.c` ReadO32Info takes no section that is not page
+aligned). `pe4k.reconstruct_relocs` rebuilds its 222 HIGHLOW fixups (in a
+/FIXED image at 0x10000 every own address is 0x0001xxxx, no SH instruction:
+157 literal-pool words in .text, 43 vtable and message-map pointers in
+.rdata, 2 in .data, 20 .pdata function starts; .rsrc's 0x00010000 words are
+version fields), checked by hand and pinned by SHA-256 in stage.py; then it
+is realigned and runs in place like the DLLs.
 
 Only this README and `mathxpander.lnk` (pointing at
 `\Windows\MathXpander.exe`; the cab's link points into

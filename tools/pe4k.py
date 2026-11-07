@@ -3,6 +3,8 @@
 
   pe4k.py <in> <out>          write the realigned copy, then check it
   pe4k.py --check <in> <out>  only check an existing pair
+  pe4k.py --relocs <in> <out> give a /FIXED SH EXE a .reloc section first
+                              (reconstruct_relocs), then realign it
 
 romimage puts only 4 KiB-aligned modules into an XIP region ("only 4k page
 alignments supported at this time"), and the Pocket PC 2000/2002 SH3 tools
@@ -22,8 +24,8 @@ the gap after it maps by that section's delta. Patched:
     new pages (a 4 KiB page can now hold parts of two old sections); .pdata's
     function addresses are HIGHLOW fixups like any other
 
-Refused: no relocations (an EXE linked /FIXED cannot be moved: put it in the
-image as a file instead), relocation types other than HIGHLOW, TLS, load
+Refused: no relocations (an EXE linked /FIXED cannot be moved as it is; see
+reconstruct_relocs below), relocation types other than HIGHLOW, TLS, load
 config, bound or delay imports, a fixup whose target is outside the image, a
 .reloc section that is not last in the file. The check re-reads both files
 and compares what the loader and romimage see: imports, exports (and the code
@@ -302,6 +304,78 @@ def realign(data):
     return bytes(d), "%d sections, %d fixups, image 0x%x -> 0x%x" % (len(pe.secs), len(fix), pe.image_size, new_image)
 
 
+# ------------------------------------------------- relocations for /FIXED EXEs
+def reconstruct_relocs(data):
+    """The HIGHLOW fixups of a small /FIXED SH EXE, found by scanning.
+
+    CE 6 on SH-4 loads no EXE whose sections are not 4 KiB aligned, not even
+    from a file (loader.c ReadO32Info: "Bad EXE/DLL format"), and a Pocket PC
+    SH3 EXE linked /FIXED has no .reloc to move its sections with. For an
+    image at 0x10000 smaller than 64 KiB every address inside it is
+    0x0001xxxx, which as the upper halfword of a 4-aligned word is no SH
+    instruction (0x0001 is undefined), so in code such a word is a literal
+    pool entry: an address. In .rdata/.data/.pdata the aligned words inside
+    the image are taken too; .rsrc is left out (its 0x00010000 words are
+    version numbers and icon header fields, and nothing in it is relocated),
+    and so are the import/export/resource/debug RVA fields (rva_fields).
+    Returns the sorted RVAs. Only for what was checked by hand (stage.py pins
+    the input's SHA-256 and the count)."""
+    pe = PE(data)
+    if struct.unpack_from("<H", pe.d, pe.pe + 4)[0] not in (0x1A2, 0x1A3, 0x1A6):
+        raise PEError("reconstruct_relocs: not an SH image")
+    if pe.base != 0x10000 or pe.image_size > 0x10000:
+        raise PEError("reconstruct_relocs: only images at 0x10000 below 64 KiB")
+    m, fx = loaded(pe, pe.base)
+    if fx:
+        raise PEError("reconstruct_relocs: the image has relocations")
+    rf = rva_fields(pe, m)
+    lo, hi = pe.base, pe.base + pe.image_size
+    out = []
+    for s in pe.secs:
+        if s["name"] == ".rsrc":
+            continue
+        n = max(s["vs"], s["rs"])
+        for a in range(s["va"], s["va"] + n - 3, 4):
+            v = struct.unpack_from("<I", m, a)[0]
+            if lo <= v <= hi and a not in rf:
+                out.append(a)
+    return out
+
+
+def add_relocs(data, rvas):
+    """data with a .reloc section for the HIGHLOW fixups at rvas appended as
+    the last section (old SectionAlignment), RELOCS_STRIPPED cleared."""
+    pe = PE(data)
+    if pe.dir(5)[0]:
+        raise PEError("add_relocs: the image has a .reloc already")
+    last = pe.secs[-1]
+    if last["rp"] + last["rs"] != len(pe.d):
+        raise PEError("add_relocs: data after the last section")
+    hdr = pe.sh + 40 * pe.nsec
+    if hdr + 40 > min(s["rp"] for s in pe.secs) or any(pe.d[hdr:hdr + 40]):
+        raise PEError("add_relocs: no room for another section header")
+    pages = {}
+    for r in sorted(set(rvas)):
+        pages.setdefault(r & ~0xFFF, []).append(r & 0xFFF)
+    tab = bytearray()
+    for page in sorted(pages):
+        ents = [HIGHLOW << 12 | x for x in pages[page]]
+        if len(ents) & 1:
+            ents.append(0)
+        tab += struct.pack("<II", page, 8 + 2 * len(ents)) + struct.pack("<%dH" % len(ents), *ents)
+    va = align(last["va"] + max(last["vs"], last["rs"]), pe.salign)
+    rp = len(pe.d)
+    rs = align(len(tab), pe.falign)
+    d = pe.d
+    d += tab + bytes(rs - len(tab))
+    d[hdr:hdr + 40] = b".reloc\0\0" + struct.pack("<IIIIIIHHI", len(tab), va, rs, rp, 0, 0, 0, 0, 0x42000040)
+    struct.pack_into("<H", d, pe.pe + 6, pe.nsec + 1)
+    struct.pack_into("<H", d, pe.pe + 22, pe.chars & ~1)
+    struct.pack_into("<II", d, pe.dir_off(5), va, len(tab))
+    struct.pack_into("<I", d, pe.opt + 56, align(va + len(tab), pe.salign))
+    return bytes(d)
+
+
 # --------------------------------------------------------------------- check
 def loaded(pe, base):
     """The image as the loader maps it at base."""
@@ -490,6 +564,23 @@ def check(old_data, new_data):
 
 
 def main(argv):
+    if len(argv) == 4 and argv[1] == "--relocs":
+        data = open(argv[2], "rb").read()
+        try:
+            rvas = reconstruct_relocs(data)
+            fixed = add_relocs(data, rvas)
+            new, what = realign(fixed)
+            errs = check(fixed, new)
+        except PEError as e:
+            print("pe4k: %s: %s" % (argv[2], e), file=sys.stderr)
+            return 1
+        for e in errs:
+            print("pe4k: %s: %s" % (argv[2], e), file=sys.stderr)
+        if errs:
+            return 1
+        open(argv[3], "wb").write(new)
+        print("pe4k: %s: %d reconstructed fixups; %s" % (argv[2], len(rvas), what))
+        return 0
     if len(argv) == 4 and argv[1] == "--check":
         errs = check(open(argv[2], "rb").read(), open(argv[3], "rb").read())
         for e in errs:
