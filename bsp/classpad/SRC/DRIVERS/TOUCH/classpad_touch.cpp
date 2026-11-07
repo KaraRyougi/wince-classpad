@@ -46,15 +46,49 @@ static BOOL     g_panel;                        // sensor present (fx-CP400)
 static INT      g_rate = TOUCH_SAMPLE_RATE_HIGH;
 static INT      g_rateSetting = 1;              // 0 low, 1 high
 static BOOL     g_prevDown;
-static BOOL     g_stripContact, g_rotateArmed;
-static HANDLE   g_rotateEvent;
+static BOOL     g_stripContact;
+static INT      g_iconArmed = -1;               // icon under the pen since the down
 
-// Physical sensor coordinates: icon strip is below the native 320x528 LCD.
-// Rotate occupies x=229..273, y=528..575, independent of desktop rotation.
-static BOOL InRotate(INT x, INT y)
+// The icon strip below the native 320x528 LCD, y=528..575, in physical sensor
+// coordinates (independent of desktop rotation): Settings, Menu, Main,
+// Resize, Swap, Rotate, Esc, 320/7 pixels each (casio-emu's panel and
+// CASIO's fx-CP400 guide). A release on the icon the pen went down on sets
+// its named event; classpad_rotatekey.exe acts on it outside GWES. Resize and
+// Swap have none.
+#define STRIP_X(px)     (0x20B + (px)*0x9B6/256)
+#define STRIP_Y(py)     (0xF4 + (py)*0x66F/256)
+#define STRIP_ICONS     7
+static const INT     g_iconLeft[STRIP_ICONS + 1] = { 0, 46, 91, 137, 183, 229, 274, 320 };
+static const LPCTSTR g_iconEventName[STRIP_ICONS] = {
+    TEXT("ClassPadIconSettings"), TEXT("ClassPadIconMenu"), TEXT("ClassPadIconMain"),
+    NULL, NULL, TEXT("ClassPadRotateKey"), TEXT("ClassPadIconEsc")
+};
+static const LPCTSTR g_iconName[STRIP_ICONS] = {
+    TEXT("Settings"), TEXT("Menu"), TEXT("Main"), TEXT("Resize"), TEXT("Swap"), TEXT("Rotate"), TEXT("Esc")
+};
+static HANDLE   g_iconEvent[STRIP_ICONS];
+
+static INT IconAt(INT x, INT y)
 {
-    return x >= 0x20B + 229*0x9B6/256 && x < 0x20B + 274*0x9B6/256
-        && y >= 0xF4 + 528*0x66F/256 && y < 0xF4 + 576*0x66F/256;
+    INT i;
+    if (y < STRIP_Y(528) || y >= STRIP_Y(576)) return -1;
+    for (i = 0; i < STRIP_ICONS; i++)
+        if (x >= STRIP_X(g_iconLeft[i]) && x < STRIP_X(g_iconLeft[i + 1])) return i;
+    return -1;
+}
+
+static void IconEventsOpen(void)
+{
+    INT i;
+    for (i = 0; i < STRIP_ICONS; i++)
+        if (g_iconEventName[i] && !g_iconEvent[i]) g_iconEvent[i] = CreateEvent(NULL, FALSE, FALSE, g_iconEventName[i]);
+}
+
+static void IconEventsClose(void)
+{
+    INT i;
+    for (i = 0; i < STRIP_ICONS; i++)
+        if (g_iconEvent[i]) { CloseHandle(g_iconEvent[i]); g_iconEvent[i] = NULL; }
 }
 static INT      g_lastX, g_lastY;
 static LONG     g_attached;
@@ -196,8 +230,9 @@ BOOL DdsiTouchPanelEnable(void)
     }
     gIntrTouchChanged = SYSINTR_NOP;
     g_prevDown = FALSE;
-    g_stripContact = g_rotateArmed = FALSE;
-    if (!g_rotateEvent) g_rotateEvent = CreateEvent(NULL, FALSE, FALSE, TEXT("ClassPadRotateKey"));
+    g_stripContact = FALSE;
+    g_iconArmed = -1;
+    IconEventsOpen();
     g_sampling = FALSE;
     if (g_panel) {
         // Own the bus and pins instead of depending on the Casio OS state.
@@ -226,7 +261,7 @@ BOOL DdsiTouchPanelEnable(void)
 void DdsiTouchPanelDisable(void)
 {
     RETAILMSG(1, (TEXT("CLASSPAD TOUCH: disabled after %d samples, %d contacts\r\n"), g_samples, g_contacts));
-    if (g_rotateEvent) { CloseHandle(g_rotateEvent); g_rotateEvent = NULL; }
+    IconEventsClose();
     if (g_hSampler) {
         g_quit = TRUE; g_sampling = FALSE;
         SetEvent(g_hevSample);
@@ -253,7 +288,7 @@ LONG DdsiTouchPanelDetach(void)
 void DdsiTouchPanelPowerHandler(BOOL bOff)
 {
     g_suspended = bOff;
-    g_rotateArmed = FALSE;
+    g_iconArmed = -1;
     if (!g_panel) return;
     if (bOff) MMIO_W8(IIC0_ICCR, 0);
     else { TouchBusReset(); g_sampling = TRUE; }
@@ -284,17 +319,18 @@ void DdsiTouchPanelGetPoint(P_TOUCH_PANEL_SAMPLE_FLAGS pTipState, INT *pUncalX, 
     }
 
     if (down && !g_prevDown) {
-        g_stripContact = g_lastY >= 0xF4 + 528*0x66F/256;
-        g_rotateArmed = g_stripContact && InRotate(g_lastX, g_lastY);
+        g_stripContact = g_lastY >= STRIP_Y(528);
+        g_iconArmed = g_stripContact ? IconAt(g_lastX, g_lastY) : -1;
     }
     if (g_stripContact) {
-        if (down && !InRotate(g_lastX, g_lastY)) g_rotateArmed = FALSE;
+        if (down && IconAt(g_lastX, g_lastY) != g_iconArmed) g_iconArmed = -1;   // slid off: cancel
         if (!down) {
-            if (g_rotateArmed && g_rotateEvent) {
-                SetEvent(g_rotateEvent);
-                RETAILMSG(1, (TEXT("CLASSPAD TOUCH: Rotate released\r\n")));
+            if (g_iconArmed >= 0) {
+                if (g_iconEvent[g_iconArmed]) SetEvent(g_iconEvent[g_iconArmed]);
+                RETAILMSG(1, (TEXT("CLASSPAD TOUCH: %s released\r\n"), g_iconName[g_iconArmed]));
             }
-            g_stripContact = g_rotateArmed = FALSE;
+            g_stripContact = FALSE;
+            g_iconArmed = -1;
             if (gIntrTouch != SYSINTR_NOP && gIntrTouch != SYSINTR_UNDEFINED) InterruptDone(gIntrTouch);
         }
         g_sampling = down;

@@ -377,9 +377,25 @@ Rotate when dragged outside its region, and signals `ClassPadRotateKey` once.
 live orientation and calling ChangeDisplaySettingsEx from outside GWES. The
 strip remains in physical sensor coordinates in either orientation. Manual
 four-direction selection remains available in `classpad_rotate.exe`.
+
+Since 2026-11-06 the other strip icons work the same way: the DDSI sets
+`ClassPadIconMenu`, `ClassPadIconMain`, `ClassPadIconEsc` or
+`ClassPadIconSettings` on release (seven icons of 320/7 pixels: Settings,
+Menu, Main, Resize, Swap, Rotate, Esc; Resize and Swap do nothing), and the
+same service acts on them: Menu sends the Windows key (VK_LWIN, Start menu,
+like the fx-CG100's HOME), Main brings Math Xpander to the front or starts
+`\Windows\MathXpander.exe`, Esc sends VK_ESCAPE, Settings the Menu key
+(VK_APPS, like the fx-CG100's SETTINGS).
+
+Keypad operators (`kbd_layout.cpp`) type what Math Xpander's own math
+keyboard sends, as a US keyboard's main block types it: `= . , -` and `/`
+directly, `+ * ( ) ^` as Shift + `= 8 9 0 6` (pseudo VKs expanded by the
+device layout's remap function; no Shift is added while SHIFT is held).
+Before, `( )` typed `[ ]`, `^` a backquote, and `+ - * /` were the numeric
+keypad's VKs.
 `python3 tools/test_rotate_key.py` tests the actual GetPoint routing with stubbed
-hardware, including hold, drag cancellation, adjacent icon, bus failure and
-normal desktop contacts. `test_rotation_emulator.py --soft-key` tests four
+hardware, including hold, drag cancellation, adjacent icon, bus failure,
+every icon's event and normal desktop contacts. `test_rotation_emulator.py --soft-key` tests four
 physical strip taps against the background service in the diagnostic image.
 
 2026-11-06 emulator verification: all four manual orientations passed live
