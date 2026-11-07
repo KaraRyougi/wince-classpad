@@ -12,6 +12,14 @@ fix e54c409), DocList.dll, mfcce300.dll (MFC CE 3.0 only, always in the image), 
 LCD DMA presenter, no hello window. Two XIP regions (below): NK and EXT with
 Math Xpander.
 
+Since 2026-11-06 also staged from claude/rstandby-diag, which adds: R-standby
+suspend/resume that works on the board (Clear/ON, or SHIFT then Clear/ON), no
+white flash at power-off, the image filter (FILES\PostFmergeBib.bat +
+romexclude.txt, copied to the release directory in step 4: makeimg drops the
+network stack and the .wav files, makeimg.log says "PostFmergeBib: N ce.bib
+entries dropped") and CE RAM 0x8C000000-0x8C7FFFFF (8 MiB; the translator has
+the other 8 MiB with a 4 MiB code cache). Boot only with this package's hhk\.
+
 Folder
   build.bat   the build (arguments below)
   src\        the complete bsp\classpad tree, copied over

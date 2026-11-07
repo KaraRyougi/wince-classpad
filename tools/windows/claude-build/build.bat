@@ -89,7 +89,9 @@ rem Direct copy instead of buildrel: faster, and buildrel has been seen to
 rem leave an old platform.reg in the release directory.
 :files
 echo [4/5] FILES to the release directory
-for %%F in (config.bib platform.bib platform.reg platform.dat) do (
+rem PostFmergeBib.bat + romexclude.txt: makeimg runs the .bat after fmerge and
+rem it drops the network stack and the .wav files from ce.bib (docs/05 6).
+for %%F in (config.bib platform.bib platform.reg platform.dat PostFmergeBib.bat romexclude.txt) do (
   copy /y "%PLAT%\FILES\%%F" "%_FLATRELEASEDIR%\%%F" >>"%LOG%" 2>&1
   if errorlevel 1 goto failed
 )
