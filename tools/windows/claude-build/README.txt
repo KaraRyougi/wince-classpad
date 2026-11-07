@@ -9,21 +9,21 @@ Source: branch claude/ce-5-memory-pressure-7462c3 (commit in VERSION.txt):
 Codex's integration work (tickless timer, rotation, timer recovery)
 + review fixes, the R-standby OAL (claude/device-profiler-tickless, incl. the KEYSC two-write
 fix e54c409), DocList.dll, mfcce300.dll (MFC CE 3.0 only, always in the image), object store 3.1% (FSRAMPERCENT=08080808), and no
-LCD DMA presenter. Plus the EXT region (below): Math Xpander in the NOR hole.
+LCD DMA presenter, no hello window. Two XIP regions (below): NK and EXT with
+Math Xpander.
 
 Folder
   build.bat   the build (arguments below)
   src\        the complete bsp\classpad tree, copied over
-              C:\WINCE600\PLATFORM\CLASSPAD by build.bat. Only difference from
-              the repository: FILES\config.bib uses the eActivity window
-              (ROMSTART 83860000, ROMSIZE 007A0000 = 7.625 MiB), like the VM's.
+              C:\WINCE600\PLATFORM\CLASSPAD by build.bat, plus Math Xpander's
+              files in FILES\xpander (not in the repository: stage.py copies
+              them from the unpacked cab)
   orig\       the VM's PLATFORM\CLASSPAD versions of those files before this
               package (build.bat restore puts them back)
   hhk\        the matching programs for the eActivity window (NK_WINDOW=eact):
               wince-eact.hh3        the launcher + translator; flashes NK.bin
                                     and EXT.bin from \fls0\ when they differ
               nkflash-eact.hh3      the same flasher as a tool of its own
-              EXT.bin               the EXT region (Math Xpander), built on the Mac
 
 Build (in the VM)
   Open any command prompt (build.bat calls PBInitEnv.bat itself) and run
@@ -37,8 +37,10 @@ Build (in the VM)
     3. build -c of the whole BSP (OAL, drivers, apps incl. DocList)
     4. copy FILES\config.bib, platform.bib, platform.reg, platform.dat to
        the release directory (instead of buildrel)
-    5. makeimg, then check that mfcce300.dll is in the merged ce.bib
-  Result: NK-claude.bin here, result.txt, build.log, makeimg.log.
+    5. makeimg (NK.bin and EXT.bin, one per region), then check that
+       mfcce300.dll and MathXpander.exe are in the merged ce.bib
+  Result: NK-claude.bin and EXT-claude.bin here, result.txt, build.log,
+  makeimg.log.
 
   build.bat image     only FILES + makeimg (after editing bib/reg/config.bib)
   build.bat kernel    relink the kernel again
@@ -48,20 +50,24 @@ If step 2 fails on "sysgen -p common nk", do it from the IDE instead: build -c
 in PRIVATE\WINCEOS\COREOS\NK\KERNEL, then Build > Advanced Build Commands >
 Sysgen (full, slow), then create kernel.done here and run build.bat again.
 
-The EXT region (docs/03)
-  The 5 MiB erased hole inside Casio's OS image (chip 0x0EE0000-0x13E0000,
-  P1 80EE0000) holds a second, files-only ROM region that the OAL chains to
-  the kernel (OEMInit, classpad_extrom.h): its files appear in \Windows like
-  the NK image's. It is not made by makeimg: on the Mac,
-      make -C dbt NK_WINDOW=eact XPANDER=~/Downloads/Xpander_SH3/files extrom
-  builds dbt/build/EXT.bin from bsp/classpad/EXT/xpander.txt (Math Xpander:
-  24 SH3 binaries, help, keypad bitmaps, the Start menu link; 3.8 of 5 MiB).
-  Casio's boots leave the hole alone (emulator: a cold boot neither checks
-  the OS checksum that covers it nor writes it), so wince.hhk writes EXT.bin
-  once and later finds it identical; an OS update erases it. With no EXT
-  region the OAL says so and CE boots without those files.
+Two XIP regions (config.bib, docs/03 "The EXT region")
+  NK   83860000, 7.625 MiB, the eActivity area: kernel, shell, drivers,
+       mfcce300.dll (SH3, as an XIP module) and DocList.dll. Casio's OS
+       reformats the area after a Casio session, so wince.hhk writes NK.bin
+       again then.
+  EXT  80EE0000, 5 MiB, the erased hole inside Casio's OS image: Math Xpander's
+       24 SH3 binaries as XIP modules (flag P: no CPU type check), its help
+       pages, keypad bitmaps and Start menu link as files. Casio's boots leave
+       it alone (emulator: a cold boot neither checks the OS checksum that
+       covers it nor writes it), so wince.hhk writes EXT.bin once and finds it
+       identical afterwards; an OS update erases it.
+  The OAL chains EXT to the kernel in OEMInit (classpad_extrom.h), so its
+  modules run in place and its files appear in \Windows; without a valid
+  EXT region it says so and CE boots without Math Xpander. romimage gives
+  each region its DLL address range (AUTOSIZE=ON, DLLADDR_AUTOSIZE=ON,
+  ROM_AUTOSIZE=OFF, RAM_AUTOSIZE=OFF).
 
-Device (fx-CP400): copy NK-claude.bin as \fls0\NK.bin and hhk\EXT.bin as
+Device (fx-CP400): copy NK-claude.bin as \fls0\NK.bin and EXT-claude.bin as
 \fls0\EXT.bin, start hhk\wince-eact.hh3 (it flashes what differs, then
 boots). Things to look at:
   - it boots to the desktop with the object store at 3.1%: open Control
@@ -71,8 +77,8 @@ boots). Things to look at:
     2026-11-06 (NK.bin 5,795,023 bytes) had neither mfcce300 nor that kernel
     (its kern.dll came from an nkmain.lib older than the patched loader.c).
     An IDE Sysgen alone never rebuilds nkmain.lib: run build.bat at least once.
-  - the OAL's line "CLASSPAD OAL: EXT ROM region 80ee0000..812..., 38 files"
+  - the OAL's line "CLASSPAD OAL: EXT ROM region 80ee0000..., N files"
     (console builds / debug ring), then Start > Programs > Math Xpander
-    (\Windows\MathXpander.exe: SH3, needs mfcce300.dll and the kernel above).
+    (\Windows\MathXpander.exe, executed in place from the hole).
     Its keypad input method (MathKeyPad.dll) is in the region but not
     registered (the cab ran regsvrce.exe; COM self-registration is not done).

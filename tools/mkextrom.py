@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
-"""mkextrom.py - build the EXT region: a files-only Windows CE ROM region for the
-erased hole inside Casio's OS image (docs/03 "The EXT region"), as a B000FF .bin
-that the flashers treat like an XIP NK.bin.
+"""mkextrom.py - build test EXT regions: small Windows CE ROM regions in the
+format makeimg writes for config.bib's EXT region (docs/03), as B000FF .bin
+files that the flashers and tools/nkflash.py treat like an XIP NK.bin.
+
+The real EXT region (Math Xpander, XIP) is built by makeimg in the VM; this
+tool exists for the tests of the code that finds and chains it
+(bsp/classpad/SRC/INC/classpad_extrom.h): bsp/tests/test_extrom.c and the
+extrom guest.
 
   mkextrom.py <manifest> <out.bin> [--base 0x80EE0000] [--max 0x500000] [--root DIR]
 
-The manifest has one file per line, '#' starts a comment:
+The manifest has one entry per line, '#' starts a comment:
 
     <ROM name>  <source path>  [flags]
 
-flags as in a .bib FILES line: S (system), H (hidden); every ROM file is also
-read-only. Source paths are relative to --root (default: the manifest's
-directory); $NAME expands from the environment. The ROM name is what the file
-is called in \\Windows on the device (ROM files all appear there).
+flags: S (system), H (hidden), M (a module: a TOCentry with an e32_rom and
+one o32_rom whose section is the file's bytes, enough for the structure
+checks, not a runnable image). Names with spaces are quoted. Source paths
+are relative to --root (default: the manifest's directory); $NAME expands
+from the environment.
 
-Layout (what the CE 6 kernel reads through g_pOemGlobal->pROMChain, see
-bsp/classpad/SRC/INC/classpad_extrom.h):
-    base+0x40  "ECEC" (ROM_SIGNATURE), +0x44 pTOC, +0x48 pTOC - base
-    base+0x50  ROMHDR (84 bytes): nummods 0, numfiles n, physfirst base,
-               physlast end, dllfirst/dlllast 0 (no DLL address space)
-               FILESentry[n] right after it (no TOCentry: nummods is 0)
-               the names, then each file's bytes, 4-byte aligned, uncompressed
-One record per 64 KiB so the flashers stream it like any image.
+Layout: base+0x40 "ECEC" (ROM_SIGNATURE), +0x44 pTOC, +0x48 pTOC - base;
+base+0x50 ROMHDR (84 bytes); TOCentry[nummods], FILESentry[numfiles]; names,
+e32/o32 records, then the data, 4-byte aligned, uncompressed. One record per
+64 KiB.
 """
 import os, struct, sys, time
 
@@ -29,7 +31,10 @@ ROM_SIGNATURE = 0x43454345
 FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_SYSTEM = 1, 2, 4
 ROMHDR_AT = 0x50
 ROMHDR_SIZE = 84
+TOC_ENTRY = 32
 FILES_ENTRY = 28
+E32_SIZE = 112
+O32_SIZE = 24
 CPU_SH4 = 0x01A6
 RECORD = 0x10000
 
@@ -69,7 +74,7 @@ def parse_manifest(path, root):
         if "H" in flags: attr |= FILE_ATTRIBUTE_HIDDEN
         if len(name.encode("ascii")) > 63:
             sys.exit(f"{path}:{n}: ROM name too long")
-        entries.append((name, src, attr))
+        entries.append((name, src, attr, "M" in flags))
     names = [e[0].lower() for e in entries]
     dup = {x for x in names if names.count(x) > 1}
     if dup:
@@ -79,19 +84,24 @@ def parse_manifest(path, root):
 
 def build(entries, base, maxlen):
     al = lambda x: (x + 3) & ~3
-    nfiles = len(entries)
-    files_at = base + ROMHDR_AT + ROMHDR_SIZE
-    names_at = files_at + FILES_ENTRY * nfiles
-    pos = names_at
-    name_addr = []
-    for name, _, _ in entries:
-        name_addr.append(pos)
-        pos += len(name) + 1
+    mods = [e for e in entries if e[3]]
+    files = [e for e in entries if not e[3]]
+    toc_at = base + ROMHDR_AT + ROMHDR_SIZE
+    files_at = toc_at + TOC_ENTRY * len(mods)
+    pos = files_at + FILES_ENTRY * len(files)
+    name_addr = {}
+    for e in mods + files:
+        name_addr[e[0]] = pos
+        pos += len(e[0]) + 1
     pos = al(pos)
-    data_addr, blobs = [], []
-    for _, src, _ in entries:
-        b = open(src, "rb").read()
-        data_addr.append(pos); blobs.append(b)
+    e32_addr, o32_addr = {}, {}
+    for e in mods:
+        e32_addr[e[0]] = pos; pos += E32_SIZE
+        o32_addr[e[0]] = pos; pos += O32_SIZE
+    data_addr, blob = {}, {}
+    for e in mods + files:
+        b = open(e[1], "rb").read()
+        data_addr[e[0]] = pos; blob[e[0]] = b
         pos = al(pos + len(b))
     end = pos
     if end - base > maxlen:
@@ -102,16 +112,27 @@ def build(entries, base, maxlen):
     put(base + 0x40, "<III", ROM_SIGNATURE, base + ROMHDR_AT, ROMHDR_AT)
     img[0x4C:ROMHDR_AT] = b"\0" * (ROMHDR_AT - 0x4C)
     put(base + ROMHDR_AT, "<IIIIIIIIIIIIIIIIIHHIII",
-        0, 0, base, end, 0,            # dllfirst, dlllast, physfirst, physlast, nummods
+        0, 0, base, end, len(mods),    # dllfirst, dlllast, physfirst, physlast, nummods
         0, 0, 0, 0, 0, 0, 0,           # RAM start/free/end, copy entries/offset, profile len/offset
-        nfiles, 0, 0, 0, 0,            # numfiles, kernel flags, FS RAM %, drivglob start/len
+        len(files), 0, 0, 0, 0,        # numfiles, kernel flags, FS RAM %, drivglob start/len
         CPU_SH4, 0, 0, 0, 0)           # usCPUType, usMiscFlags, pExtensions, tracking start/len
-    for i, ((name, src, attr), na, da, b) in enumerate(zip(entries, name_addr, data_addr, blobs)):
-        ft = filetime(os.path.getmtime(src))
+    for name, src, attr, _ in mods + files:
+        img[name_addr[name] - base:name_addr[name] - base + len(name) + 1] = name.encode("ascii") + b"\0"
+        d = data_addr[name]
+        img[d - base:d - base + len(blob[name])] = blob[name]
+    for i, (name, src, attr, _) in enumerate(mods):
+        ft, n = filetime(os.path.getmtime(src)), len(blob[name])
+        put(toc_at + TOC_ENTRY * i, "<IIIIIIII", attr, ft & 0xFFFFFFFF, ft >> 32, n,
+            name_addr[name], e32_addr[name], o32_addr[name], data_addr[name])
+        e32 = bytearray(E32_SIZE)
+        struct.pack_into("<HHIIHHIIIII", e32, 0, 1, 0x0102, 0, 0x10000000, 3, 0, 0, al(n) + 0x1000, 0, 0, 0)
+        struct.pack_into("<H", e32, 108, 9)           # e32_subsys: Windows CE GUI
+        img[e32_addr[name] - base:e32_addr[name] - base + E32_SIZE] = e32
+        put(o32_addr[name], "<IIIIII", n, 0x1000, n, data_addr[name], 0, 0x60000020)
+    for i, (name, src, attr, _) in enumerate(files):
+        ft, n = filetime(os.path.getmtime(src)), len(blob[name])
         put(files_at + FILES_ENTRY * i, "<IIIIIII", attr, ft & 0xFFFFFFFF, ft >> 32,
-            len(b), len(b), na, da)
-        img[na - base:na - base + len(name) + 1] = name.encode("ascii") + b"\0"
-        img[da - base:da - base + len(b)] = b
+            n, n, name_addr[name], data_addr[name])
     return bytes(img), end
 
 
@@ -142,7 +163,7 @@ def main(argv):
     entries = parse_manifest(manifest, root)
     img, end = build(entries, base, maxlen)
     write_bin(out, base, img)
-    sys.stderr.write("mkextrom: %d files, %08x..%08x (%d of %d bytes)\n" % (len(entries), base, end, end - base, maxlen))
+    sys.stderr.write("mkextrom: %d entries, %08x..%08x (%d of %d bytes)\n" % (len(entries), base, end, end - base, maxlen))
     return 0
 
 

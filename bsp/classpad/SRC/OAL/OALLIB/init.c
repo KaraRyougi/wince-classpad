@@ -9,7 +9,7 @@
 #include <romldr.h>
 #include "classpad_extrom.h"
 
-// The EXT region (classpad_extrom.h): the kernel puts the NK region after it
+// The EXT XIP region (classpad_extrom.h): the kernel puts the NK region after it
 // in its ROM chain (KernelFindMemory), which runs after OEMInit.
 static ROMChain_t g_extRom;
 
@@ -23,8 +23,8 @@ static void OALExtRomInit(void)
     g_extRom.pNext = NULL;
     g_extRom.pTOC = (ROMHDR *)toc;
     g_pOemGlobal->pROMChain = &g_extRom;
-    RETAILMSG(1, (L"CLASSPAD OAL: EXT ROM region %08x..%08x, %u files\r\n",
-                  g_extRom.pTOC->physfirst, g_extRom.pTOC->physlast, g_extRom.pTOC->numfiles));
+    RETAILMSG(1, (L"CLASSPAD OAL: EXT ROM region %08x..%08x, %u modules, %u files\r\n",
+                  g_extRom.pTOC->physfirst, g_extRom.pTOC->physlast, g_extRom.pTOC->nummods, g_extRom.pTOC->numfiles));
 }
 
 void OEMInit()

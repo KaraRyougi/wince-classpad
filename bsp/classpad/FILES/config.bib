@@ -1,32 +1,46 @@
 ;-------------------------------------------------------------------------------
-; CLASSPAD config.bib: the image executes in place from the NOR flash (XIP),
-; 16 MiB into the chip (P1 0x81000000, what the translator's loader scans:
-; dbt/rt/main.c NK_FLASH, tools/nkflash.py puts the flat image there in the
-; emulator, dbt/hhk nkflash.hhk on the device). On the fx-CP400 the window is
-; the erased hole inside Casio's 21 MiB OS image, offsets 0x1000000-0x13E0000
-; (docs/03), so ROMSIZE is 3.875 MiB (was 8 MiB until 2026-11-05), and the
-; whole guest RAM window 0x8C000000-0x8C7FFFFF is RAM, 8 MiB (dbt/Makefile owns
-; these numbers; briefly 0x8C000000-0x8CB4FFFF, 11.3 MiB, on 2026-11-06;
-; 0x8C100000-0x8C8FFFFF from 2026-11-05; 11.5 MiB to 0x8CC7FFFF before). The
-; last 4 KiB page (0x8C7FF000) is the debug ring shared with the
-; translator, kept out of RAM. Before 2026-11-03 NK was a RAMIMAGE inside the
-; window and the loader copied it there, costing 2.5 MiB of RAM.
+; CLASSPAD config.bib: two XIP regions in the NOR flash, both executed in place.
+;   NK  83860000, 7.625 MiB: the eActivity area (chip 0x3860000-0x3FFFFFF),
+;       where the translator boots it (dbt/Makefile NK_WINDOW=eact, NK_FLASH).
+;       Casio's OS reformats that area at every boot that finds it holding
+;       something else, so wince.hhk writes \fls0\NK.bin again after each
+;       Casio session (docs/03).
+;   EXT 80EE0000, 5 MiB: the erased hole inside Casio's 21 MiB OS image (chip
+;       0x0EE0000-0x13E0000), which the OS never writes after an update: Math
+;       Xpander and anything else that does not change with the BSP. The OAL
+;       chains it to the kernel (OEMInit, classpad_extrom.h); wince.hhk writes
+;       \fls0\EXT.bin there only when it differs (docs/03 "The EXT region").
+; makeimg writes one .bin per region: NK.bin and EXT.bin. The translator, the
+; flashers and the OAL hold the same addresses (dbt/Makefile NK_FLASH and
+; EXT_FLASH, classpad_extrom.h). Until 2026-11-06 the repository built NK into
+; the hole (81000000, 3.875 MiB), too small for the Standard Shell; the VM has
+; used the eActivity area since 2026-11-05.
+; RAM: the whole guest RAM window 0x8C000000-0x8C7FFFFF, 8 MiB (dbt/Makefile
+; owns these numbers; briefly 0x8C000000-0x8CB4FFFF, 11.3 MiB, on 2026-11-06;
+; 0x8C100000-0x8C8FFFFF from 2026-11-05; 11.5 MiB to 0x8CC7FFFF before) less
+; its last 4 KiB page (0x8C7FF000), the debug ring shared with the translator.
 ;-------------------------------------------------------------------------------
 MEMORY
 ;   Name        Start     Size      Type
 ;   -------     --------  --------  ----
     BOOTARGS    8C000000  00001000  RESERVED    ; OAL argument page (unused for now)
-    NK          81000000  003E0000  RAMIMAGE    ; 3.875 MiB of NOR, run in place (RAMIMAGE is the only image type; XIP follows from the address)
-;   NK          83860000  007A0000  RAMIMAGE    ; alternative: the eActivity area (make NK_WINDOW=eact; docs/03: needs an OS patch first)
+    NK          83860000  007A0000  RAMIMAGE    ; eActivity area, 7.625 MiB (RAMIMAGE is the only image type; XIP follows from the address)
+    EXT         80EE0000  00500000  RAMIMAGE    ; the hole in Casio's OS image, 5 MiB (CLASSPAD_EXT_ROM_PA/_BYTES)
     RAM         8C001000  007FE000  RAM         ; up to 0x8C7FF000 (dbt/Makefile GUEST_RAM_HI - 4 KiB)
     DBGRING     8C7FF000  00001000  RESERVED    ; translator debug ring (image_cfg.h CLASSPAD_DBG_RING_PA)
 
 CONFIG
     KERNELFIXUPS=ON
-    AUTOSIZE=OFF
-    ROMSTART=81000000
-    ROMSIZE=003E0000
-;   ROMSTART=83860000  ROMSIZE=007A0000           ; the eActivity-area variant (with the NK line above)
+; Two XIP regions need a DLL address range each; romimage assigns them
+; (DLLADDR_AUTOSIZE) while the regions and RAM keep the sizes above.
+    AUTOSIZE=ON
+    DLLADDR_AUTOSIZE=ON
+    ROM_AUTOSIZE=OFF
+    RAM_AUTOSIZE=OFF
+; ROMSTART/ROMSIZE only shape the .nb0 file (not used: the flashers take the
+; .bin files); they cover NK, and romimage leaves EXT's records out of it.
+    ROMSTART=83860000
+    ROMSIZE=007A0000
     ROMWIDTH=32
 ; No compression: the writable sections are stored as is, so the kernel
 ; does not run its decompressor at boot (slow under the translator) and

@@ -81,7 +81,7 @@
     "Depend94"=hex:14,00,1e,00,32,00
 
 ; Math Xpander workbooks (.mwb), as its Pocket PC cab registers them, with the
-; program at its ROM path in the EXT region (bsp/classpad/EXT).
+; program at its ROM path in the EXT region (FILES\xpander).
 [HKEY_CLASSES_ROOT\.mwb]
     @="isce_mwbfile"
 [HKEY_CLASSES_ROOT\isce_mwbfile]

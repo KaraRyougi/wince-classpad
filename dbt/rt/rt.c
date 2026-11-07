@@ -1712,7 +1712,8 @@ static void invalidate_all_but_rom(void)
         sf_u32 pa;
         if (g_binfo[i].dead) continue;
         pa = (b->guest_pc >= 0x80000000u && b->guest_pc < 0xC0000000u) ? (b->guest_pc & 0x1FFFFFFFu) : g_binfo[i].phys;
-        if (g_cfg.rom_hi && pa != PHYS_UNKNOWN && pa >= g_cfg.rom_lo && pa + b->guest_len <= g_cfg.rom_hi) { kept++; continue; }
+        if (pa != PHYS_UNKNOWN && ((g_cfg.rom_hi && pa >= g_cfg.rom_lo && pa + b->guest_len <= g_cfg.rom_hi) ||
+                                   (g_cfg.rom2_hi && pa >= g_cfg.rom2_lo && pa + b->guest_len <= g_cfg.rom2_hi))) { kept++; continue; }
         invalidate_block(b);
     }
     finish_invalidations();

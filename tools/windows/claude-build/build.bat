@@ -8,12 +8,13 @@ rem                         copy FILES to the release directory, makeimg
 rem    build.bat image      only sync src\FILES and makeimg (bib/reg/config edits)
 rem    build.bat kernel     also relink the kernel even if kernel.done exists
 rem    build.bat restore    put orig\ back over PLATFORM\CLASSPAD and the
-rem                         previous NK.bin back into the release directory
+rem                         previous NK.bin/EXT.bin back into the release directory
 rem
-rem  Arguments combine (build.bat image kernel). Output: NK-claude.bin here,
-rem  result.txt = BUILD_OK / BUILD_FAILED, logs here. mfcce300.dll (SH3) is
-rem  always in platform.bib; it needs the kernel step, so image mode refuses
-rem  to run until kernel.done exists.
+rem  Arguments combine (build.bat image kernel). Output: NK-claude.bin and
+rem  EXT-claude.bin here (config.bib's two XIP regions: NK in the eActivity
+rem  area, EXT in the hole of Casio's OS image), result.txt = BUILD_OK /
+rem  BUILD_FAILED, logs here. Image mode refuses to run until kernel.done
+rem  exists (the kernel step relinks kern.dll with the SH3 loader patch).
 rem  No Sysgen of the OS design is needed: the catalog is unchanged.
 rem ===========================================================================
 setlocal EnableExtensions
@@ -100,25 +101,32 @@ rem -------------------------------------------------------------- 5. image
 echo [5/5] makeimg
 cd /d "%_FLATRELEASEDIR%"
 if not exist "%PKG%\NK-before.bin" if exist NK.bin copy /y NK.bin "%PKG%\NK-before.bin" >nul
+if not exist "%PKG%\EXT-before.bin" if exist EXT.bin copy /y EXT.bin "%PKG%\EXT-before.bin" >nul
 set RESULT=BUILD_OK
 call :makeimg
 if errorlevel 1 goto failed
-rem mfcce300.dll must have reached the merged bib (it is a FILES entry; romimage
-rem does not name files in its log).
+rem mfcce300.dll (NK) and MathXpander.exe (EXT) must have reached the merged
+rem bib; makeimg writes EXT.bin for config.bib's second RAMIMAGE region.
 findstr /i /c:"mfcce300.dll" ce.bib >nul
 if errorlevel 1 (echo mfcce300.dll is not in ce.bib>>"%LOG%" & goto failed)
-if not exist "%PLAT%\FILES\legacy-mfc\mfcce300.dll" (echo FILES\legacy-mfc\mfcce300.dll missing>>"%LOG%" & goto failed)
+findstr /i /c:"MathXpander.exe" ce.bib >nul
+if errorlevel 1 (echo MathXpander.exe is not in ce.bib>>"%LOG%" & goto failed)
+if not exist EXT.bin (echo makeimg wrote no EXT.bin: is EXT in config.bib's MEMORY>>"%LOG%" & goto failed)
 :imaged
 copy /y NK.bin "%PKG%\NK-claude.bin" >nul
 if errorlevel 1 goto failed
+copy /y EXT.bin "%PKG%\EXT-claude.bin" >nul
+if errorlevel 1 goto failed
 for %%F in (NK.bin) do echo NK.bin %%~zF bytes (window 7995392)
+for %%F in (EXT.bin) do echo EXT.bin %%~zF bytes (window 5242880)
 echo %RESULT%>"%PKG%\result.txt"
-echo %RESULT%: %PKG%\NK-claude.bin
+echo %RESULT%: %PKG%\NK-claude.bin and %PKG%\EXT-claude.bin
 exit /b 0
 
 rem ------------------------------------------------------------ helpers
 :makeimg
 if exist NK.bin del /f /q NK.bin
+if exist EXT.bin del /f /q EXT.bin
 "%MAKEIMG%" >"%PKG%\makeimg.log" 2>&1
 if errorlevel 1 exit /b 1
 if not exist NK.bin exit /b 1
@@ -135,6 +143,7 @@ echo Restoring orig\ over PLATFORM\CLASSPAD
 xcopy "%PKG%\orig" "%PLAT%" /e /i /y /q >>"%LOG%" 2>&1
 if errorlevel 2 goto failed
 if exist "%PKG%\NK-before.bin" copy /y "%PKG%\NK-before.bin" "%_FLATRELEASEDIR%\NK.bin" >nul
+if exist "%PKG%\EXT-before.bin" copy /y "%PKG%\EXT-before.bin" "%_FLATRELEASEDIR%\EXT.bin" >nul
 echo RESTORED>"%PKG%\result.txt"
 echo RESTORED (files added by src\, such as SRC\APPS\DOCLIST, stay; rebuild to use the old sources)
 exit /b 0

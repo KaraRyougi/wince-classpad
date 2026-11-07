@@ -60,7 +60,8 @@ bytes before handing it to `HLE_OSROM`.
 
 | range | use | size |
 |---|---|---|
-| 0x81000000-0x813DFFFF | NOR: the CE image, executed in place (XIP); on the device this is the erased hole inside Casio's OS image (docs/03), `ROMSIZE` in config.bib | 3.875 MiB |
+| 0x83860000-0x83FFFFFF | NOR: the NK region, executed in place (XIP), in the eActivity area since 2026-11-05 (docs/03; 0x81000000 with 3.875 MiB before) | 7.625 MiB |
+| 0x80EE0000-0x813DFFFF | NOR: the EXT region (XIP, Math Xpander), the erased hole inside Casio's OS image, chained by the OAL (docs/03) | 5 MiB |
 | 0x8C000000-0x8C7FFFFF | guest: CE RAM (the whole window, BOOTARGS page first, debug ring last; a RAMIMAGE build puts its image here too). Until 2026-11-06 the first MiB was left to the launcher / Casio OS workspace (Casio's VRAM on the device) and CE had 0x8C100000-0x8C8FFFFF; nothing uses that MiB after the no-return handoff. On 2026-11-06 the window briefly ran to 0x8CB4FFFF (11.3 MiB, with a 2 MiB cache, 9600 headers and a 1752 KiB arena) | 8 MiB |
 | 0x8C800000-0x8CBFFFFF | translator text/data/bss (14400 block headers, 2624 KiB metadata arena, hash) + 128 KiB C stack | 4 MiB |
 | 0x8CC00000-0x8CFFFFFF | code cache (3 MiB from 2026-11-05 until the freed launcher MiB went to it) | 4 MiB |

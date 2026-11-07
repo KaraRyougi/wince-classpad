@@ -165,16 +165,28 @@ loosely (`docs/04` "Limits"); the window not being free on that OS version
 
 ## The EXT region in the hole (2026-11-06)
 
-With the NK image in the eActivity area (`NK_WINDOW=eact`), the hole
-0x0EE0000-0x13E0000 is free, all 5 MiB of it from its real start (the NK
-window used 3.875 MiB from 16 MiB). It holds a second, files-only ROM region
-(`bsp/classpad/EXT`, `tools/mkextrom.py`): "ECEC" at +0x40, a ROMHDR with no
-modules, FILESentry records, names and the files uncompressed. `OEMInit`
-validates it (`classpad_extrom.h`) and sets `g_pOemGlobal->pROMChain`;
-`KernelFindMemory` (after `OEMInit` on SH, `mdsh3.c`) appends the NK region,
-and the loader and the ROM file system walk the chain, so the files appear in
-`\Windows`. `wince.hhk` / `nkflash.hhk` flash `\fls0\EXT.bin` there next to
-`NK.bin` (window table in `hhk/nkflash.c`), only when it differs.
+With the NK image in the eActivity area, the hole 0x0EE0000-0x13E0000 is free,
+all 5 MiB of it from its real start (the NK window used 3.875 MiB from 16 MiB).
+`config.bib` makes it a second XIP region, `EXT 80EE0000 00500000 RAMIMAGE`,
+next to `NK 83860000 007A0000`; romimage assigns each region its DLL range
+(`AUTOSIZE=ON`, `DLLADDR_AUTOSIZE=ON`, sizes fixed) and writes `EXT.bin` next
+to `NK.bin`. `platform.bib` puts Math Xpander there (`FILES\xpander`): its 24
+SH3 binaries as modules with flag `P` (romimage does not check their CPU
+type; the kernel loads ROM modules without a CPU check), help pages, bitmaps
+and the Start menu link as files. `mfcce300.dll` is an XIP module in NK.
+
+`OEMInit` validates the region (`classpad_extrom.h`: signature, ROMHDR, every
+module's name, e32/o32 records and section data, every file inside the
+window) and sets `g_pOemGlobal->pROMChain`; `KernelFindMemory` (after
+`OEMInit` on SH, `mdsh3.c`) appends the NK region, and the loader and the ROM
+file system walk the chain, so EXT's modules run in place and its files
+appear in `\Windows`. Without a valid region the OAL says so and CE boots
+without them. `wince.hhk` / `nkflash.hhk` (NK_WINDOW=eact) flash
+`\fls0\EXT.bin` there next to `NK.bin` (window table in `hhk/nkflash.c`),
+only when it differs; the translator keeps EXT's blocks over whole-cache
+flushes like NK's (`rom2_lo/hi`). In the emulator `EXTBIN=` adds a region to
+the NOR (`tools/nkflash.py --ext`); `tools/mkextrom.py` writes small test
+regions for `bsp/tests/test_extrom.c` and the `extrom` guest.
 
 Is the hole safe to write? Casio's OS checksum covers it: a byte sum over
 [0x20000, 0x14FFEB0) + [0x14FFEF0, 0x14FFFF8), stored big-endian at 0x14FFFF8
