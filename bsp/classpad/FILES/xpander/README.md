@@ -4,9 +4,18 @@ Math Xpander 1.0 (Saltire Software, 2001), the Pocket PC 2000 SH3 build
 (`Xpander.PPC300_10003.cab`), executed in place from the EXT region: the
 second XIP region of `config.bib`, in the erased hole inside Casio's OS image
 (P1 `0x80EE0000`, 5 MiB; docs/03 "The EXT region"). `platform.bib` lists its
-24 SH3 binaries as `MODULES ... EXT P` (P: no CPU type check, they are SH3)
-and its help pages, keypad bitmaps and `mathxpander.lnk` as `FILES ... EXT`.
-makeimg then writes `EXT.bin` next to `NK.bin`.
+23 SH3 DLLs as `MODULES ... EXT P` (P: no CPU type check, they are SH3) and
+`MathXpander.exe`, its help pages, keypad bitmaps and `mathxpander.lnk` as
+`FILES ... EXT`. makeimg then writes `EXT.bin` next to `NK.bin`.
+
+The Pocket PC tools linked the binaries with 1 KiB sections, and romimage
+takes only 4 KiB-aligned XIP modules ("only 4k page alignments supported at
+this time"): stage.py realigns every `MODULES` entry under `FILES` with
+`tools/pe4k.py` (same file layout and bytes; new section addresses, the RVAs,
+every HIGHLOW fixup and the .reloc table moved with them; checked against the
+original after relocating both). `MathXpander.exe` is linked /FIXED, with no
+relocations, so it cannot be moved: as a file it is loaded into RAM
+(SizeOfImage 10 KiB) and its DLLs still run in place.
 
 Only this README and `mathxpander.lnk` (pointing at
 `\Windows\MathXpander.exe`; the cab's link points into

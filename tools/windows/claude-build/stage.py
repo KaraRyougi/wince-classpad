@@ -8,7 +8,9 @@
   build.bat, README.txt, VERSION.txt
   src\\   bsp/classpad of the committed HEAD (git archive: CRLF as checked out)
          plus Math Xpander's files in FILES\\xpander (platform.bib puts them
-         into the EXT region; they are not in the repository)
+         into the EXT region; they are not in the repository); every
+         platform.bib module under FILES is realigned to 4 KiB sections
+         (tools/pe4k.py: romimage takes no 1 KiB-aligned XIP module)
   orig\\  with --platform: the VM's current versions of every file src\\ changes
   hhk\\   wince-eact.hh3 and nkflash-eact.hh3 (make DEVICE=1 NK_WINDOW=eact hhk)
 EXT.bin itself is made by makeimg in the VM (build.bat), next to NK.bin.
@@ -19,6 +21,8 @@ import io, os, shutil, subprocess, sys, tarfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
+sys.path.insert(0, os.path.join(REPO, "tools"))
+import pe4k
 BUILD = "build-pkg"
 
 def run(*cmd, **kw):
@@ -75,6 +79,29 @@ def main(argv):
     if missing:
         sys.exit("stage: platform.bib wants %s, not in the Xpander files" % missing)
     print("stage: %d Math Xpander files in FILES\\xpander (%d bib entries)" % (n, len(need)))
+
+    # MODULES from FILES (the Pocket PC SH3 binaries, linked with 1 KiB
+    # SectionAlignment): 4 KiB sections for romimage, checked by pe4k.
+    sect, n = None, 0
+    for l in bib.splitlines():
+        w = l.split()
+        if not w or w[0].startswith(";"):
+            continue
+        if len(w) == 1 and w[0] in ("MODULES", "FILES"):
+            sect = w[0]; continue
+        if sect == "MODULES" and len(w) >= 2 and "\\PLATFORM\\CLASSPAD\\FILES\\" in w[1]:
+            p = os.path.join(src, *w[1].split("\\PLATFORM\\CLASSPAD\\", 1)[1].split("\\"))
+            data = open(p, "rb").read()
+            try:
+                new, what = pe4k.realign(data)
+                errs = pe4k.check(data, new)
+            except pe4k.PEError as e:
+                sys.exit("stage: %s: %s" % (w[0], e))
+            if errs:
+                sys.exit("stage: %s: %s" % (w[0], "; ".join(errs[:5])))
+            if new != data:
+                open(p, "wb").write(new); n += 1
+    print("stage: %d modules realigned to 4 KiB sections" % n)
 
     if opts["--platform"]:
         n = 0

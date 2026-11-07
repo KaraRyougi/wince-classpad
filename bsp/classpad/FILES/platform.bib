@@ -31,13 +31,18 @@ MODULES
 ; MFC CE 3.0 (Pocket PC, SH3) for legacy applications, with DocList.dll above,
 ; executed in place like the rest of NK. P: romimage does not check the CPU
 ; type of an SH3 module; the kernel loads ROM modules without a CPU check.
+; The Pocket PC tools linked SH3 binaries with 1 KiB sections and romimage
+; takes only 4 KiB ones ("only 4k page alignments supported"): stage.py
+; realigns every MODULES entry under FILES with tools/pe4k.py.
 MODULES
    mfcce300.dll          $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\legacy-mfc\mfcce300.dll        NK  P
 
 ; Math Xpander 1.0 (Saltire, Pocket PC 2000 SH3) in the EXT region (config.bib):
 ; its binaries as XIP modules, help pages, keypad bitmaps and the Start menu
 ; link as files. The binaries are not in the repository: stage.py copies them
-; into FILES\xpander from the unpacked cab (FILES\xpander\README.md). The
+; into FILES\xpander from the unpacked cab (FILES\xpander\README.md) and
+; realigns the DLLs. MathXpander.exe is linked /FIXED (no relocations), so it
+; cannot be realigned: it is a file, loaded into RAM (10 KiB). The
 ; program is \Windows\MathXpander.exe; platform.dat puts the link in the Start
 ; menu, platform.reg registers .mwb. MathKeyPad.dll (its keypad input method)
 ; is in, not registered.
@@ -56,7 +61,6 @@ MODULES
    GraphFrame.dll           $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\GraphFrame.dll            EXT  P
    Graphics.dll             $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\Graphics.dll              EXT  P
    GraphicsPlane.dll        $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\GraphicsPlane.dll         EXT  P
-   MathXpander.exe          $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\MathXpander.exe           EXT  P
    MfcComponents.dll        $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\MfcComponents.dll         EXT  P
    ndosspal.dll             $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\ndosspal.dll              EXT  P
    NumericCAS.dll           $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\NumericCAS.dll            EXT  P
@@ -68,6 +72,7 @@ MODULES
    Workbook.dll             $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\Workbook.dll              EXT  P
    MathKeyPad.dll           $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\MathKeyPad.dll            EXT  P
 FILES
+   MathXpander.exe          $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\MathXpander.exe           EXT  S
    geometry1.htm            $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\geometry1.htm             EXT  S
    graph1.htm               $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\graph1.htm                EXT  S
    math1.htm                $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\math1.htm                 EXT  S

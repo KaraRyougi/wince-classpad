@@ -170,10 +170,18 @@ all 5 MiB of it from its real start (the NK window used 3.875 MiB from 16 MiB).
 `config.bib` makes it a second XIP region, `EXT 80EE0000 00500000 RAMIMAGE`,
 next to `NK 83860000 007A0000`; romimage assigns each region its DLL range
 (`AUTOSIZE=ON`, `DLLADDR_AUTOSIZE=ON`, sizes fixed) and writes `EXT.bin` next
-to `NK.bin`. `platform.bib` puts Math Xpander there (`FILES\xpander`): its 24
-SH3 binaries as modules with flag `P` (romimage does not check their CPU
-type; the kernel loads ROM modules without a CPU check), help pages, bitmaps
-and the Start menu link as files. `mfcce300.dll` is an XIP module in NK.
+to `NK.bin`. `platform.bib` puts Math Xpander there (`FILES\xpander`): its 23
+SH3 DLLs as modules with flag `P` (romimage does not check their CPU type;
+the kernel loads ROM modules without a CPU check), `MathXpander.exe`, help
+pages, bitmaps and the Start menu link as files. `mfcce300.dll` is an XIP
+module in NK. The Pocket PC SH3 binaries have 1 KiB sections and romimage
+refuses them as XIP modules ("only 4k page alignments supported"), so
+`stage.py` realigns every `MODULES` entry under `FILES` with `tools/pe4k.py`:
+the file layout stays, the sections move to 4 KiB boundaries, and the RVAs
+(entry point, directories, import thunks, export arrays, resource entries),
+every HIGHLOW fixup and the .reloc table follow; the check relocates the
+original and the copy to one base and compares every section. The EXE is
+linked /FIXED (no relocations), cannot move, and stays a file (10 KiB of RAM).
 
 `OEMInit` validates the region (`classpad_extrom.h`: signature, ROMHDR, every
 module's name, e32/o32 records and section data, every file inside the
