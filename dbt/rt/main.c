@@ -3,8 +3,8 @@
  * Memory layout (fx-CG100 / fx-CP400 class, 16 MiB RAM) is defined in
  * dbt/Makefile and passed in as GUEST_RAM_LO/HI, IMAGE_BASE, CACHE_BASE/SIZE:
  *   0x8C000000 .. 0x8C7FFFFF  guest RAM, 8 MiB (test guests linked at GUEST_LINK 0x8C100000)
- *   0x8C800000 .. 0x8CBFFFFF  this image (text/data/bss) + C stack
- *   0x8CC00000 .. 0x8CFFFFFF  code cache, 4 MiB
+ *   0x8C800000 .. 0x8CCBFFFF  this image (text/data/bss) + C stack
+ *   0x8CCC0000 .. 0x8CFFFFFF  code cache, 3.25 MiB
  * Guest sources, in order of preference:
  *   1. a Windows CE .bin image in flash at NK_FLASH (P1 alias of the NOR;
  *      casio-emu: HLE_OSROM=... HLE_OSROM_PAD=<offset>, tools/nkflash.py
@@ -23,8 +23,8 @@
 #ifndef GUEST_RAM_LO
 #define GUEST_RAM_LO 0x8C000000u
 #define GUEST_RAM_HI 0x8C800000u
-#define CACHE_BASE   0x8CC00000u
-#define CACHE_SIZE   0x00400000u
+#define CACHE_BASE   0x8CCC0000u
+#define CACHE_SIZE   0x00340000u
 #endif
 #ifndef GUEST_LINK
 #define GUEST_LINK   0x8C100000u          /* where guest/guest.ld links the raw test guests */

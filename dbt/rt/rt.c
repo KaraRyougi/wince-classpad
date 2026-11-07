@@ -12,7 +12,7 @@ void *memcpy(void *d, const void *s, dbt_size_t n);
 void *memset(void *d, int c, dbt_size_t n);
 
 #ifndef DBT_HASH_ENTRIES
-#define DBT_HASH_ENTRIES 8192
+#define DBT_HASH_ENTRIES 32768                 /* dbt/Makefile HASH_ENTRIES */
 #endif
 #if DBT_HASH_ENTRIES < 256 || DBT_HASH_ENTRIES > 65536 || (DBT_HASH_ENTRIES & (DBT_HASH_ENTRIES - 1))
 #error DBT_HASH_ENTRIES must be a power of two between 256 and 65536
@@ -25,7 +25,7 @@ void *memset(void *d, int c, dbt_size_t n);
 #error DBT_HASH_ASID_MIX requires tagged hash entries
 #endif
 #ifndef MAX_BLOCKS
-#define MAX_BLOCKS   14400                 /* compact block headers + a metadata arena; see docs/04 */
+#define MAX_BLOCKS   19200                 /* compact block headers + a metadata arena; see docs/04 */
 #endif
 #ifndef META_ARENA_BYTES
 #define META_ARENA_BYTES (1280u * 1024u)  /* meta + spill entries of all live blocks (~320 B per block in the CE boot) */
@@ -108,10 +108,12 @@ typedef char check_tagged_hash_stride[(sizeof(hent) == 12) ? 1 : -1];
  * (collision), 1 never filled, 2 invalidation, 3 ASID switch, 4 bank
  * probation (second chance), 5 bank recycle, 6 full flush; 7 all lookups
  * that missed the hash, 8 of those that went on to translate; 9
- * block_of_host calls, 10 of them answered by its cache. */
+ * block_of_host calls, 10 of them answered by its cache; 11-13 banks full
+ * by headers / code / metadata, 14-16 headers / code / metadata bytes of
+ * those banks, summed (printed with the statistics). */
 enum { HD_COLLIDE, HD_NEVER, HD_INVAL, HD_ASID, HD_PROBATION, HD_RECYCLE, HD_FLUSH_ALL, HD_MISSES, HD_TRANSLATED,
        HD_OWNER_CALLS, HD_OWNER_HITS };
-sf_u32 g_hash_diag[11];
+sf_u32 g_hash_diag[17];
 static sf_u8 g_hash_why[DBT_HASH_ENTRIES];
 #define HASH_WHY(slot, why) (g_hash_why[slot] = (sf_u8)(why))
 #else
@@ -228,7 +230,8 @@ static sf_u16 g_link_banks[MAX_BLOCKS];
  * when a header is filled (translation, survivor move); stale for dead
  * headers, so readers check the dead flag before acting on a match. It
  * lets finish_invalidations skip blocks without an IC without touching
- * their headers. */
+ * their headers. (A dense copy of each IC's target, kept by every refill
+ * including the stub's, measured slower on 2026-11-07: docs/04.) */
 static sf_u32 g_ic_site[MAX_BLOCKS];
 #ifndef DBT_HOST_OWNER_CACHE
 #ifndef DBT_OWNER_SEARCH
@@ -1953,6 +1956,16 @@ static dbt_block *translate_at(sf_u32 gpc)
     if (g_bank_count[g_bank] >= BANK_BLOCKS ||
         g_cache_used + DBT_BLOCK_WORDS * 2 > (g_bank + 1) * bank_code_bytes() ||
         g_arena_used + SCRATCH_ARENA_NEED > (g_bank + 1) * bank_arena_bytes()) {
+#ifdef DBT_HASH_DIAG
+        /* why banks fill: 11 headers, 12 code, 13 metadata (several may hold) */
+        if (g_bank_count[g_bank] >= BANK_BLOCKS) ++g_hash_diag[11];
+        if (g_cache_used + DBT_BLOCK_WORDS * 2 > (g_bank + 1) * bank_code_bytes()) ++g_hash_diag[12];
+        if (g_arena_used + SCRATCH_ARENA_NEED > (g_bank + 1) * bank_arena_bytes()) ++g_hash_diag[13];
+        /* 14-16: headers, code bytes and metadata bytes of the full bank, summed */
+        g_hash_diag[14] += g_bank_count[g_bank];
+        g_hash_diag[15] += g_cache_used - g_bank * bank_code_bytes();
+        g_hash_diag[16] += g_arena_used - g_bank * bank_arena_bytes();
+#endif
         cache_next_bank();
     }
     host = g_cfg.cache_base + g_cache_used;
@@ -2659,6 +2672,13 @@ static void print_stats(void)
 #endif
 #ifdef DBT_FAST_RTE
     dbt_puts(" fast_rte="); dbt_puthex(dbt_fast_rte_calls);
+#endif
+#ifdef DBT_HASH_DIAG
+    {
+        int o;
+        dbt_puts("\n[dbt] hashdiag:");
+        for (o = 0; o < 17; ++o) { dbt_puts(" "); dbt_puthex(g_hash_diag[o]); }
+    }
 #endif
 #ifdef DBT_INVAL_DIAG
     {

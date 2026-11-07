@@ -3126,3 +3126,41 @@ calls 100442 -> 60874 (the remaining 58025 device accesses are stores).
 | reads + stores + fast ldc sr (MD) | 12.92 s | 12.98 13.15 12.65 |
 | ... + fast ldtlb | 12.71 s | 12.96 13.03 12.13 |
 | FAST_HELPERS=1 (reads, ldc sr, ldtlb, rte; no stores) | 12.61 s | 12.78 12.51 12.55 |
+
+### Layout by what fills a bank (2026-11-07)
+
+`-DDBT_HASH_DIAG` now also counts why a bank is full when translation
+moves on (headers, code space or metadata) and what the full bank held.
+My Device load, 4 MiB / 14400 / 2624 KiB: 34 banks filled, 33 by their
+1200 headers and 1 by metadata; a full bank held on average 192 KiB of
+its 341 KiB code space (56%) and 180 KiB of its 218 KiB metadata. A block
+averages ~160 bytes of host code and ~150 bytes of metadata. So a quarter
+of the code cache was idle while blocks were evicted for want of headers.
+
+Layouts within the same 8 MiB (tap-averaged on the 2026-11-06 image, all
+exact frame matches):
+
+| code cache / headers / arena / hash entries | mean | runs |
+| --- | ---: | --- |
+| 4 MiB / 14400 / 2624 KiB / 8192 (ae8e567) | 12.61 s | 12.78 12.51 12.55 |
+| 4 MiB / 16800 / 2624 KiB / 8192 | 12.59 s | 12.96 12.43 12.38 |
+| 3.5 MiB / 18000 / 2720 KiB / 8192 | 12.11 s | 11.91 12.16 12.25 |
+| 3 MiB / 18000 / 2720 KiB / 8192 | 11.73 s | 11.99 11.78 11.40 |
+| 3.25 MiB / 19200 / 2900 KiB / 8192 | 11.19 s | 11.23 10.86 11.47 |
+| 3 MiB / 19200 / 2900 KiB / 8192 | 10.98 s | 10.48 10.93 11.53 |
+| 3.25 MiB / 20400 / 3100 KiB / 8192 | 10.86 s | 10.84 10.71 11.03 |
+| 3 MiB / 20400 / 3100 KiB / 16384 | 10.70 s | 10.28 11.01 10.82 |
+| 3.25 MiB / 19200 / 2900 KiB / 16384 | 10.51 s | 10.64 10.55 10.34 |
+| 3.25 MiB / 20400 / 3000 KiB / 16384 | 10.48 s | 10.83 10.36 10.25 |
+| **3.25 MiB / 19200 / 2900 KiB / 32768** | **10.21 s** | 9.94 10.26 10.42 |
+
+The last one is the default since 2026-11-07 (Makefile, rt/main.c,
+docs/05); at taps 9.0M/9.5M/10.0M it gives 10.41 10.38 9.76, so 10.20 s
+over six. The image ends at 0x8CC970D0, 36 KiB below its 128 KiB stack
+(rt/image.ld asserts the bound); a 65536-entry hash no longer fits.
+
+Tried and dropped: a dense copy of every inline cache's target (a pool
+word after the IC pair pointing into the copy, written by the stub's
+refill, the C refill, resets and survivor moves), so that the
+invalidation pass and the recycle scans stop reading ICs from code
+memory. Over six tap ticks it was slower, 10.49 s against 10.20 s.

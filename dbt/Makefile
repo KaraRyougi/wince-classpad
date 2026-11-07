@@ -13,9 +13,15 @@ BUILD    ?= build
 # RAM layout (16 MiB at 0x8C000000), the single place these addresses live:
 #   0x8C000000-0x8C7FFFFF  guest window: 8 MiB (config.bib BOOTARGS/RAM/DBGRING;
 #                          test guests are linked at GUEST_LINK 0x8C100000)
-#   0x8C800000-0x8CBFFFFF  translator image (14400 headers, 2624 KiB arena)
-#                          and its 128 KiB C stack below the top
-#   0x8CC00000-0x8CFFFFFF  code cache, 4 MiB
+#   0x8C800000-0x8CCBFFFF  translator image (19200 headers, 2900 KiB arena,
+#                          32768-entry lookup hash) and its 128 KiB C stack
+#                          below the top
+#   0x8CCC0000-0x8CFFFFFF  code cache, 3.25 MiB
+# Since 2026-11-07 the split follows what fills a cache bank: with 4 MiB /
+# 14400 / 2624 KiB, 33 of 34 banks recycled during a My Device load ran out
+# of headers with only 56% of their code space used (a block averages ~160
+# bytes of host code and ~150 of metadata), so code space went to headers,
+# metadata and a larger hash (docs/04 "Layout by what fills a bank").
 # The first MiB is CE's since 2026-11-06: it was the launcher's workspace, but
 # nothing uses it after the no-return handoff (casio-emu's initial sp
 # 0x8C080000 and the HollyHock stub only live there before it; crt0 moves to
@@ -36,11 +42,11 @@ GUEST_RAM_LO ?= 0x8C000000
 GUEST_RAM_HI ?= 0x8C800000
 GUEST_LINK   := 0x8C100000
 IMAGE_BASE   ?= 0x8C800000
-IMAGE_STACK  ?= 0x8CC00000
-CACHE_BASE   ?= 0x8CC00000
-CACHE_SIZE   ?= 0x00400000
-BLOCKS       ?= 14400
-ARENA_KB     ?= 2624
+IMAGE_STACK  ?= 0x8CCC0000
+CACHE_BASE   ?= 0x8CCC0000
+CACHE_SIZE   ?= 0x00340000
+BLOCKS       ?= 19200
+ARENA_KB     ?= 2900
 LAYOUT_DEFS  := -DGUEST_RAM_LO=$(GUEST_RAM_LO)u -DGUEST_RAM_HI=$(GUEST_RAM_HI)u -DGUEST_LINK=$(GUEST_LINK)u -DIMAGE_BASE=$(IMAGE_BASE) \
                 -DCACHE_BASE=$(CACHE_BASE)u -DCACHE_SIZE=$(CACHE_SIZE)u -DMAX_BLOCKS=$(BLOCKS) -DMETA_ARENA_BYTES=$(ARENA_KB)*1024u
 LAYOUT_LD    := -Wl,--defsym,IMAGE_BASE=$(IMAGE_BASE) -Wl,--defsym,_image_stack_top=$(IMAGE_STACK) -Wl,--defsym,GUEST_RAM_LO=$(GUEST_RAM_LO)
@@ -129,9 +135,9 @@ HOST_CFLAGS  += $(if $(filter 1,$(KDEV)),-DDBT_KDEV,)
 # switch no longer empties the user entries (72% of the C lookups that found
 # their block outside the hash), and an IC miss on a user target is served
 # from the hash in the stub instead of in C. HASH_ENTRIES: lookup hash size
-# (16384: ~0.2 s faster on My Device for 96 KiB more; docs/04).
+# (12 bytes each; 32768 since the 19200-header layout, docs/04).
 HASH_TAG      ?= 1
-HASH_ENTRIES  ?= 8192
+HASH_ENTRIES  ?= 32768
 # TLB_REFILL=1: UTLB misses in translated code are refilled by the translator
 # with CE6's own page-table walk (rt.c tlb_refill) instead of an exception
 # round trip into the guest's TLBMissHandler; only while VBR + 0x400 holds
