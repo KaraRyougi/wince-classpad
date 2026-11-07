@@ -881,9 +881,10 @@ rule; the optional legacy Blit=2 path is not the bounded DCS default.
 ### Incremental cache and address-space optimization (2026-11-05)
 
 The 2026-11-05 layout kept CE's 8 MiB guest RAM and used a 3 MiB code cache,
-14400 compact block headers (now 36 bytes on target), and a 2624 KiB metadata arena; since 2026-11-06
-the cache is 2 MiB with 9600 headers and a 1752 KiB arena (the same ratio), which with the
-launcher's first MiB gives CE 11.3 MiB (docs/05). Twelve disjoint
+14400 compact block headers (now 36 bytes on target), and a 2624 KiB metadata arena; on 2026-11-06
+the cache briefly shrank to 2 MiB (9600 headers, 1752 KiB arena) to give CE 11.3 MiB; CE
+then went back to 8 MiB, now starting at 0x8C000000, and the translator kept the
+2026-11-05 tables and took the launcher's freed MiB as a 4 MiB code cache (docs/05). Twelve disjoint
 banks recycle code and metadata together. Before reuse, incoming direct
 links and inline caches are detached; surviving code stays at its original
 host address. FIFO is the default. `DBT_CACHE_LRU` is an experimental policy

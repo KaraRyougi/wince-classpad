@@ -667,7 +667,7 @@ static int g_range_batch;
 #define SHOULD_BATCH_INVALIDATION 1
 #endif
 #ifndef CACHE_SIZE
-#define CACHE_SIZE 0x00300000u
+#define CACHE_SIZE 0x00400000u
 #endif
 /* One bit conservatively covers 32 code bytes. With compact alignment a
  * live neighbour may share a bit: detaching its incoming links is harmless,

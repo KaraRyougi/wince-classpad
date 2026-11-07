@@ -72,7 +72,9 @@ it, so `NK_FLASH` stays 0x81000000 and the usable window ends at 0x13E0000:
     `start.S`) in HollyHock's program window 0x8CFF0000-0x8D000000 and the
     translator image `dbt-<guest>.bin` as a second loadable region at its own
     link address 0x8CC80000, so the launcher's copy puts it where `loader.S`
-    would. The stub checks the copy against the byte sum recorded at build
+    would (since 2026-11-06 the region is at `HHK_PAYLOAD`, 0x8C900000, an
+    address already loaded on the board, and `takeover.S` moves it to
+    `IMAGE_BASE` 0x8C800000 once the OS is shut out). The stub checks the copy against the byte sum recorded at build
     time, then (since 2026-11-05 the flasher is built in) looks for
     `\fls0\NK.bin`: when the file is there it is compared with the window
     record by record and, if it differs, erased and programmed after the

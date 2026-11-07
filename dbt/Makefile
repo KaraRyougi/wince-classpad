@@ -11,16 +11,18 @@ EMU      ?= $(HOME)/Dev/casio-emu
 BUILD    ?= build
 
 # RAM layout (16 MiB at 0x8C000000), the single place these addresses live:
-#   0x8C000000-0x8CB4FFFF  guest window: 11.3125 MiB (config.bib BOOTARGS/RAM/DBGRING;
+#   0x8C000000-0x8C7FFFFF  guest window: 8 MiB (config.bib BOOTARGS/RAM/DBGRING;
 #                          test guests are linked at GUEST_LINK 0x8C100000)
-#   0x8CB50000-0x8CDFFFFF  translator image (9600 headers, 1752 KiB arena, 2.46 MiB)
+#   0x8C800000-0x8CBFFFFF  translator image (14400 headers, 2624 KiB arena)
 #                          and its 128 KiB C stack below the top
-#   0x8CE00000-0x8CFFFFFF  code cache, 2 MiB
-# Since 2026-11-06 the first MiB is CE's: it was the launcher's workspace, but
+#   0x8CC00000-0x8CFFFFFF  code cache, 4 MiB
+# The first MiB is CE's since 2026-11-06: it was the launcher's workspace, but
 # nothing uses it after the no-return handoff (casio-emu's initial sp
 # 0x8C080000 and the HollyHock stub only live there before it; crt0 moves to
-# the image stack first), and the cache, headers and arena shrank by a third
-# (3 MiB / 14400 / 2624 KiB before): CE RAM 8 MiB -> 11.3 MiB.
+# the image stack first). On 2026-11-06 CE briefly had 11.3 MiB (window to
+# 0x8CB4FFFF, 2 MiB cache, 9600 headers, 1752 KiB arena); CE went back to
+# 8 MiB the same day and the translator got the other 8 MiB: the 2026-11-05
+# tables plus the freed MiB as code cache (3 -> 4 MiB).
 # Until 2026-11-05 the window was 11.5 MiB with 4096 blocks and a 1 MiB cache;
 # the Standard Shell boot hit the 4096-block cap 28 times before POSTINIT
 # (115k translations), so the tables doubled at the expense of 3.5 MiB of CE RAM.
@@ -31,14 +33,14 @@ BUILD    ?= build
 # command line to try other sizes; config.bib's RAM line must agree with
 # GUEST_RAM_HI (the window ends 4 KiB earlier at the debug ring).
 GUEST_RAM_LO ?= 0x8C000000
-GUEST_RAM_HI ?= 0x8CB50000
+GUEST_RAM_HI ?= 0x8C800000
 GUEST_LINK   := 0x8C100000
-IMAGE_BASE   ?= 0x8CB50000
-IMAGE_STACK  ?= 0x8CE00000
-CACHE_BASE   ?= 0x8CE00000
-CACHE_SIZE   ?= 0x00200000
-BLOCKS       ?= 9600
-ARENA_KB     ?= 1752
+IMAGE_BASE   ?= 0x8C800000
+IMAGE_STACK  ?= 0x8CC00000
+CACHE_BASE   ?= 0x8CC00000
+CACHE_SIZE   ?= 0x00400000
+BLOCKS       ?= 14400
+ARENA_KB     ?= 2624
 LAYOUT_DEFS  := -DGUEST_RAM_LO=$(GUEST_RAM_LO)u -DGUEST_RAM_HI=$(GUEST_RAM_HI)u -DGUEST_LINK=$(GUEST_LINK)u -DIMAGE_BASE=$(IMAGE_BASE) \
                 -DCACHE_BASE=$(CACHE_BASE)u -DCACHE_SIZE=$(CACHE_SIZE)u -DMAX_BLOCKS=$(BLOCKS) -DMETA_ARENA_BYTES=$(ARENA_KB)*1024u
 LAYOUT_LD    := -Wl,--defsym,IMAGE_BASE=$(IMAGE_BASE) -Wl,--defsym,_image_stack_top=$(IMAGE_STACK) -Wl,--defsym,GUEST_RAM_LO=$(GUEST_RAM_LO)
@@ -161,7 +163,7 @@ DEVALL_STAMP := $(BUILD)/.devall-$(if $(filter 1,$(DEVALL)),1,0)
 $(DEVALL_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.devall-*
 	touch $@
-LAYOUT_STAMP := $(BUILD)/.layout-$(GUEST_RAM_LO)-$(GUEST_RAM_HI)-$(IMAGE_BASE)-$(CACHE_BASE)-$(CACHE_SIZE)-$(BLOCKS)-$(ARENA_KB)-$(NK_FLASH)-$(NK_FLASH_MAX)-$(DEVICE)-$(CONSOLE)-$(IRQPINS)
+LAYOUT_STAMP := $(BUILD)/.layout-$(GUEST_RAM_LO)-$(HHK_PAYLOAD)-$(GUEST_RAM_HI)-$(IMAGE_BASE)-$(CACHE_BASE)-$(CACHE_SIZE)-$(BLOCKS)-$(ARENA_KB)-$(NK_FLASH)-$(NK_FLASH_MAX)-$(DEVICE)-$(CONSOLE)-$(IRQPINS)
 $(LAYOUT_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.layout-*
 	touch $@
@@ -221,13 +223,19 @@ $(IMG).g3a: $(IMG)-loader.bin
 # the NOR window at NK_FLASH. Both are plain ELF files (also copied as .hh3).
 HHK_BASE   := 0x8CFF0000
 HHK_LIMIT  := 0x8D000000
+# Where HollyHock's own copy puts the translator payload (~64 KiB) while
+# Casio's OS still runs (the flasher calls into it after that); takeover then
+# moves it to IMAGE_BASE with the OS shut out. 0x8C900000 was IMAGE_BASE on
+# the board from 2026-11-05; IMAGE_BASE 0x8C800000 (2026-11-06) never was.
+# Must not be below IMAGE_BASE (the copy runs forward; hhk.ld asserts it).
+HHK_PAYLOAD ?= 0x8C900000
 HHK_VERSION := $(shell git -C .. log -1 --format=%cd --date=short 2>/dev/null || echo dev)
 # IRQPINS=mask (default): takeover masks the IRQ pins (INTMSK00) like every
 # other interrupt source; keep: leaves them as Casio's OS had them (the touch
 # contact interrupt may be one), with the translator's storm guard watching.
 IRQPINS    ?= mask
 HHK_CFLAGS := $(HOST_CFLAGS) -I hhk -DHHK_APP_VERSION='"$(HHK_VERSION)"' $(if $(filter keep,$(IRQPINS)),-DHHK_IRQPINS_KEEP,)
-HHK_LD     := -T hhk/hhk.ld -Wl,--defsym,HHK_BASE=$(HHK_BASE) -Wl,--defsym,HHK_LIMIT=$(HHK_LIMIT) -Wl,--defsym,PAYLOAD_BASE=$(IMAGE_BASE)
+HHK_LD     := -T hhk/hhk.ld -Wl,--defsym,HHK_BASE=$(HHK_BASE) -Wl,--defsym,HHK_LIMIT=$(HHK_LIMIT) -Wl,--defsym,PAYLOAD_BASE=$(HHK_PAYLOAD) -Wl,--defsym,IMAGE_BASE=$(IMAGE_BASE)
 HHK_COMMON := hhk/start.S hhk/util.c hhk/os.c
 
 .PHONY: lcdprobe
@@ -257,7 +265,7 @@ hhk: $(WINCE_HHK) $(NKFLASH_HHK) hhk-check
 
 # the .hhk carries the very bytes the emulator runs (and loads where the layout says)
 hhk-check: $(WINCE_HHK) $(NKFLASH_HHK) $(IMG).g3a ../tools/hhkcheck.py
-	python3 ../tools/hhkcheck.py $(WINCE_HHK) $(IMG).bin $(IMG).g3a $(IMAGE_BASE)
+	python3 ../tools/hhkcheck.py $(WINCE_HHK) $(IMG).bin $(IMG).g3a $(HHK_PAYLOAD)
 	python3 ../tools/hhkcheck.py $(NKFLASH_HHK)
 
 # the same stub as a casio-emu payload: hhk_takeover (quiesce, copy, cache sync,

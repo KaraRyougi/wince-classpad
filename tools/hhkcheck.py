@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """hhkcheck.py - check a HollyHock program built by dbt/Makefile.
 
-  hhkcheck.py <prog.hhk> [<dbt-image.bin> <dbt-image.g3a> <image_base>]
+  hhkcheck.py <prog.hhk> [<dbt-image.bin> <dbt-image.g3a> <payload_base>]
 
 Always: a big-endian SH ET_EXEC ELF whose loadable sections lie inside the
 HollyHock program window 0x8CFF0000-0x8D000000 or, for the payload, at
-image_base; a .note.hollyhock NAME note; an entry inside the window.
+payload_base; a .note.hollyhock NAME note; an entry inside the window.
 With the image and the .g3a: the .wince.payload section is byte-identical to
 the translator image, and so is the image that casio-emu's .g3a carries, so
 the device and the emulator run the same translator bytes.
@@ -44,7 +44,7 @@ def main(argv):
         if name == ".wince.payload":
             payload = elf[off:off + size]
             if image_base is not None and addr != image_base:
-                bad.append("payload at 0x%08x, image base is 0x%08x" % (addr, image_base))
+                bad.append("payload at 0x%08x, expected 0x%08x" % (addr, image_base))
         elif flags & 2 and size:                                 # SHF_ALLOC
             if not (HHK_LO <= addr and addr + size <= HHK_HI):
                 bad.append("section %s 0x%08x+0x%x outside the HollyHock window" % (name, addr, size))
