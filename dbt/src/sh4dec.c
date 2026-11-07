@@ -59,9 +59,10 @@ void sh4_decode(sf_u32 op, sh_insn *d)
     d->kind = K_PASS;
 #endif
 
-#ifdef DBT_DECODE_FPU_GATE
+#ifndef DBT_DECODE_NO_FPU_GATE
     /* Only 0xxx/4xxx control transfers and Fxxx arithmetic can be FPU
-     * instructions. Most memory/ALU opcodes need none of the subdecoding. */
+     * instructions. Most memory/ALU opcodes need none of the subdecoding,
+     * nor the call into fpuemu (DBT_DECODE_FPU_GATE until 2026-11-07). */
     if (((op & 0xB000u) == 0 || (op >> 12) == 15) && fpuemu_is_fpu_op(op)) {
 #else
     if (fpuemu_is_fpu_op(op)) {

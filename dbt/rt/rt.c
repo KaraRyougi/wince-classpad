@@ -97,6 +97,22 @@ typedef struct {
 #ifdef DBT_HASH_ASID_TAG
 typedef char check_tagged_hash_stride[(sizeof(hent) == 12) ? 1 : -1];
 #endif
+#ifdef DBT_HASH_DIAG
+/* -DDBT_HASH_DIAG: why a C lookup found its block outside the hash. Each
+ * slot remembers what last emptied it; g_hash_diag (snapshot it with
+ * HLE_DBT_COUNTER_BASE) counts per cause: 0 slot held another pc
+ * (collision), 1 never filled, 2 invalidation, 3 ASID switch, 4 bank
+ * probation (second chance), 5 bank recycle, 6 full flush; 7 all lookups
+ * that missed the hash, 8 of those that went on to translate; 9
+ * block_of_host calls, 10 of them answered by its cache. */
+enum { HD_COLLIDE, HD_NEVER, HD_INVAL, HD_ASID, HD_PROBATION, HD_RECYCLE, HD_FLUSH_ALL, HD_MISSES, HD_TRANSLATED,
+       HD_OWNER_CALLS, HD_OWNER_HITS };
+sf_u32 g_hash_diag[11];
+static sf_u8 g_hash_why[DBT_HASH_ENTRIES];
+#define HASH_WHY(slot, why) (g_hash_why[slot] = (sf_u8)(why))
+#else
+#define HASH_WHY(slot, why) ((void)0)
+#endif
 
 /* Opt-in reuse of the launcher's first MiB after the no-return handoff.
  * crt0 switches to the private translator stack before clearing this area.
@@ -204,6 +220,28 @@ static int ref_test(unsigned i) { return (g_ref[i >> 5] >> (i & 31)) & 1; }
 /* Conservative destinations of patched direct links. Bits remain set until
  * the owner is replaced; false positives only cost a scan. */
 static sf_u16 g_link_banks[MAX_BLOCKS];
+/* Host address of block i's inline-cache pair, 0 if it has none. Written
+ * when a header is filled (translation, survivor move); stale for dead
+ * headers, so readers check the dead flag before acting on a match. It
+ * lets finish_invalidations skip blocks without an IC without touching
+ * their headers. */
+static sf_u32 g_ic_site[MAX_BLOCKS];
+#ifndef DBT_HOST_OWNER_CACHE
+#ifndef DBT_OWNER_SEARCH
+/* block_of_host's last answers by host address (index + 1, 0 = empty).
+ * A hit counts only for a live block whose host range holds the address:
+ * live blocks never overlap, so that is the block the search would find
+ * (dead owners, which some callers need, still come from the search).
+ * Cleared wherever headers are rewritten or reordered (full flush, bank
+ * recycle). Default since 2026-11-07; -DDBT_OWNER_SEARCH: search only. */
+#define DBT_OWNER_CACHE 1
+static sf_u16 g_owner_cache[256];
+#define OWNER_CACHE_CLEAR() memset(g_owner_cache, 0, sizeof g_owner_cache)
+#endif
+#endif
+#ifndef OWNER_CACHE_CLEAR
+#define OWNER_CACHE_CLEAR() ((void)0)
+#endif
 #ifdef DBT_INCOMING_BITMAP
 #define SOURCE_WORDS ((MAX_BLOCKS + 31) / 32)
 /* Conservative source sets: stale bits only add work. Publish before a
@@ -637,7 +675,7 @@ static void hash_remove(const dbt_block *b)
     }
 #endif
     hent *e = &g_hash[fast_hidx(b->guest_pc, g_binfo[b - g_blocks].asid)];
-    if (e->host == b->host_base) { e->gpc = 1; e->host = 0; }
+    if (e->host == b->host_base) { e->gpc = 1; e->host = 0; HASH_WHY(e - g_hash, HD_INVAL); }
 #ifdef DBT_HASH_TWO_WAY
     if (e[1].host == b->host_base) { e[1].gpc = 1; e[1].host = 0; }
 #endif
@@ -904,17 +942,26 @@ static void invalidate_block(dbt_block *b)
 static void finish_invalidations(void)
 {
 #ifdef DBT_INVAL_PENDING
-    int i, k;
+    int i, k, n = g_nblocks;           /* local: the calls below would force a reload per block */
+    sf_u32 min = g_pend_min, span = g_pend_span;
+    unsigned banks = g_pend_banks;
     if (!g_npend) return;
-    for (i = 0; i < g_nblocks; ++i) {
-        dbt_block *o = &g_blocks[i];
-        if (g_binfo[i].dead) continue;
-        if (o->ic_off >= 0 && pend_dead(*(volatile sf_u32 *)(o->host_base + (sf_u32)o->ic_off + 4)))
-            reset_ic(o);
-        if (!(g_link_banks[i] & g_pend_banks)) continue;
-        for (k = 0; k < o->nlinks; ++k)
-            if (pend_dead(*(volatile sf_u32 *)(o->host_base + (sf_u32)o->links[k].lit_off)))
-                unchain(o, k);
+    /* two tight passes: IC targets from the dense site array, then links
+     * of the blocks whose link mask meets a dead bank */
+    for (i = 0; i < n; ++i) {
+        sf_u32 a = g_ic_site[i], h;
+        if (!a) continue;
+        h = *(volatile sf_u32 *)(a + 4);
+        if (h - min < span && !g_binfo[i].dead && pend_dead(h)) reset_ic(&g_blocks[i]);
+    }
+    for (i = 0; i < n; ++i) {
+        dbt_block *o;
+        if (!(g_link_banks[i] & banks) || g_binfo[i].dead) continue;
+        o = &g_blocks[i];
+        for (k = 0; k < o->nlinks; ++k) {
+            sf_u32 v = *(volatile sf_u32 *)(o->host_base + (sf_u32)o->links[k].lit_off);
+            if (v - min < span && pend_dead(v)) unchain(o, k);
+        }
     }
     if (g_pend_over) {
         sf_u32 a = (g_pend_min - g_cfg.cache_base) >> 8, b = (g_pend_min + g_pend_span - g_cfg.cache_base + 255u) >> 8;
@@ -1024,7 +1071,7 @@ static void switch_asid(sf_u32 asid)
     for (j = 0; j < (int)g_nuser_hash; j++) {
         unsigned slot = g_user_hash[j];
         hent *e = &g_hash[slot];
-        if (IS_USER(e->gpc)) { e->gpc = 1; e->host = 0; }
+        if (IS_USER(e->gpc)) { e->gpc = 1; e->host = 0; HASH_WHY(slot, HD_ASID); }
         g_user_hash_seen[slot] = 0;
     }
     g_nuser_hash = 0;
@@ -1215,6 +1262,7 @@ static void cache_flush_all(void)
      * the flush (one tick of latency, once per cache fill). */
     __asm__ volatile ("stc sr, %0" : "=r"(sr));
     __asm__ volatile ("ldc %0, sr" :: "r"(sr | 0xF0u) : "memory");
+    OWNER_CACHE_CLEAR();
     g_nblocks = 0; g_bank = 0; g_allocated = 0;
 #ifdef DBT_INCOMING_BITMAP
     memset(g_source_links, 0, sizeof g_source_links);
@@ -1258,7 +1306,7 @@ static void cache_flush_all(void)
 #ifdef DBT_LAZY_META
     g_lazy_owner = -1;
 #endif
-    for (i = 0; i < HSIZE; i++) { g_hash[i].gpc = 1; g_hash[i].host = 0; g_chain_head[i] = CHAIN_NONE; }
+    for (i = 0; i < HSIZE; i++) { g_hash[i].gpc = 1; g_hash[i].host = 0; g_chain_head[i] = CHAIN_NONE; HASH_WHY(i, HD_FLUSH_ALL); }
     dbt_stat.flushes++;
     __asm__ volatile ("ldc %0, sr" :: "r"(sr) : "memory");
 #ifdef DBT_TRACE_FLUSH
@@ -1500,7 +1548,7 @@ static void detach_bank(unsigned bank)
         g_link_banks[i] &= (sf_u16)~(1u << bank);     /* no link into the bank is left */
     }
     for (i = 0; i < HSIZE; ++i)
-        if (g_hash[i].host >= lo && g_hash[i].host < hi) { g_hash[i].gpc = 1; g_hash[i].host = 0; }
+        if (g_hash[i].host >= lo && g_hash[i].host < hi) { g_hash[i].gpc = 1; g_hash[i].host = 0; HASH_WHY(i, HD_PROBATION); }
 }
 
 /* Move the blocks of the recycled bank that were used while it was on
@@ -1545,6 +1593,7 @@ static unsigned keep_survivors(unsigned bank, unsigned count, sf_u32 *code, sf_u
         g_blocks[j] = nb;
         g_binfo[j] = g_binfo[i]; g_binfo[j].dead = 0;
         g_link_banks[j] = 0;
+        g_ic_site[j] = nb.ic_off >= 0 ? base + (sf_u32)nb.ic_off : 0;
         ref_clear(j);
         /* rebase the pool words that hold addresses inside the block */
         rec = reloc_rec(&nb); pool = reloc_pool(rec); words = (nb.host_len - pool) / 4;
@@ -1617,6 +1666,7 @@ static void cache_next_bank(void)
     first = bank * BANK_BLOCKS; count = g_bank_count[bank];
     __asm__ volatile ("stc sr, %0" : "=r"(sr));
     __asm__ volatile ("ldc %0, sr" :: "r"(sr | SR_IMASK) : "memory");
+    OWNER_CACHE_CLEAR();
     lo = g_cfg.cache_base + bank * bank_code_bytes();
     hi = lo + bank_code_bytes();
     if (count) {
@@ -1676,7 +1726,7 @@ static void cache_next_bank(void)
 #endif
         for (i = 0; i < HSIZE; ++i) {
             hent *e = &g_hash[i];
-            if (e->host >= lo && e->host < hi) { e->gpc = 1; e->host = 0; }
+            if (e->host >= lo && e->host < hi) { e->gpc = 1; e->host = 0; HASH_WHY(i, HD_RECYCLE); }
 #ifndef DBT_HASH_ASID_TAG
             else if (e->host && e->gpc != 1 && IS_USER(e->gpc)) {
                 g_user_hash[g_nuser_hash++] = (sf_u16)i;
@@ -1990,6 +2040,7 @@ static dbt_block *translate_at(sf_u32 gpc)
     {
         binfo *bi = &g_binfo[index];
         g_link_banks[index] = 0;
+        g_ic_site[index] = b->ic_off >= 0 ? host + (sf_u32)b->ic_off : 0;
 #ifdef DBT_INCOMING_BITMAP
         {
             unsigned bank, word = index >> 5;
@@ -2076,6 +2127,15 @@ static sf_u32 lookup_or_translate(sf_u32 gpc)
 #endif
     if (!host) {
         dbt_block *b = find_block_by_gpc(gpc);     /* evicted from the hash by a collision */
+#ifdef DBT_HASH_DIAG
+        {
+            unsigned slot = fast_hidx(gpc, g_asid);
+            ++g_hash_diag[HD_MISSES];
+            if (!b) ++g_hash_diag[HD_TRANSLATED];
+            else if (g_hash[slot].gpc != 1) ++g_hash_diag[HD_COLLIDE];
+            else ++g_hash_diag[g_hash_why[slot]];
+        }
+#endif
         if (b) { dbt_stat.hash_evicted++; hash_insert(gpc, b->host_base); host = b->host_base; }
         else {
 #ifdef DBT_INTERIOR_ENTRY
@@ -2136,6 +2196,21 @@ static dbt_block *block_of_host(sf_u32 host)
         return cached;
     }
 #endif
+#ifdef DBT_HASH_DIAG
+    ++g_hash_diag[HD_OWNER_CALLS];
+#endif
+#ifdef DBT_OWNER_CACHE
+    unsigned slot = (host >> 5) & 255u, c = g_owner_cache[slot];
+    if (c) {
+        dbt_block *b = &g_blocks[c - 1];
+        if (!g_binfo[c - 1].dead && host - b->host_base < (sf_u32)b->host_len) {
+#ifdef DBT_HASH_DIAG
+            ++g_hash_diag[HD_OWNER_HITS];
+#endif
+            touch_code(host); return b;
+        }
+    }
+#endif
     lo = (int)(bank * BANK_BLOCKS); hi = lo + (int)g_bank_count[bank] - 1;
     while (lo <= hi) {
         int mid = (lo + hi) / 2;
@@ -2146,6 +2221,9 @@ static dbt_block *block_of_host(sf_u32 host)
 #ifdef DBT_HOST_OWNER_CACHE
             g_host_owner[slot].block = b;
             g_host_owner[slot].generation = g_bank_generation[bank];
+#endif
+#ifdef DBT_OWNER_CACHE
+            g_owner_cache[slot] = (sf_u16)(mid + 1);
 #endif
             touch_code(host); return b;
         }

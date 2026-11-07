@@ -2987,3 +2987,61 @@ finished in 21.691 s against 23.507 s. Steps under ~2 s in the table are
 therefore not individually established; the sampled per-function times
 are the firmer evidence. Host tests (179 checks), the decode comparison
 and all 15 guests (extrom with NK_WINDOW=eact) pass.
+
+### Lookup hash per address space, owner cache, cheaper detach pass (2026-11-07)
+
+Load-window counters of d4091fa (old benchmark image, `-DDBT_STAT_IN_RAM`
+snapshot): 35873 translations, 207160 C lookups, 107076 of them for a block
+that existed but was not in the hash. `-DDBT_HASH_DIAG` records what last
+emptied each hash slot and classifies those lookups: ASID switch 67006
+(72%), another pc in the slot 18611, bank recycle 4899, second-chance
+probation 3013. CE6 processes share virtual addresses, and untagged entries
+had to leave the hash at every address-space switch.
+
+- `HASH_TAG=1` (Makefile, default): `DBT_HASH_ASID_TAG` (12-byte entries
+  with the ASID; a switch keeps them), `DBT_HASH_ASID_MIX` (user keys mix
+  the ASID into the index; tagging alone put every process's code at the
+  same addresses into the same slots: 276k C lookups, slower) and
+  `DBT_USER_IC_HASH_HIT` (an IC miss on a user target jumps from a hash
+  hit in the stub instead of refilling in C). These were measured opt-ins
+  of earlier work; together they take C lookups from 278k to 148k at the
+  same workload. `HASH_ENTRIES` sets the size (8192; 16384 gave 131k and
+  ~0.24 s for 96 KiB more, within the run-to-run spread).
+- `block_of_host` keeps its last answers in 256 slots by host address. A
+  hit needs a live block whose host range holds the address; live blocks
+  never overlap, so it is the block the binary search finds, and dead
+  owners still come from the search. Cleared on full flush and bank
+  recycle. 49% of 211k calls hit. `-DDBT_OWNER_SEARCH` disables it.
+- The one-pass detach reads the IC addresses from a dense per-header array
+  (`g_ic_site`, written at translation and survivor moves; stale for dead
+  headers, which are checked) and the link masks in a separate loop with a
+  local bound.
+- The emitter's per-halfword helpers (`emit16`, `emit_pos`, slot opcodes)
+  are inline in sh4emit.h; the FPU opcode gate (formerly
+  `DBT_DECODE_FPU_GATE`, `-DDBT_DECODE_NO_FPU_GATE` restores it) skips the
+  call into fpuemu for opcode groups that cannot be FPU instructions; the
+  exhaustive decoder comparison now covers both.
+
+Single runs vary with the system state at the tap: the same changes took
+the old image from 13.71 s to 16.43 s in one run because the guest did
+more work in it (`ldc sr` 97k -> 323k, ASID switches 13.5k -> 21k,
+translated code 2.56 -> 4.34 s), while the translator's own C time stayed
+at ~10 s. Comparisons below are therefore means over three tap ticks
+(7.5M, 8.0M, 8.5M) on the 2026-11-06 8 MiB image, all exact frame matches:
+
+| build | mean | runs |
+| --- | ---: | --- |
+| d4091fa | 18.30 s | 18.34 18.30 18.25 |
+| owner cache, detach arrays, inline emitter, FPU gate | 16.98 s | 17.11 17.06 16.77 |
+| + HASH_TAG=1 | 15.69 s | 15.69 15.86 15.52 |
+| + HASH_ENTRIES=16384 | 15.45 s | 15.24 15.41 15.68 |
+| final default (HASH_TAG=1, 8192, local loop bound) | 15.31 s | 14.81 15.51 15.60 |
+
+Sampled on the old image at the same (busier) workload, items without vs
+with HASH_TAG: translator C 10.26 -> 9.25 s, C lookups 278k -> 148k,
+`block_of_host` 0.60 -> 0.28 s, the detach pass 0.60 -> 0.52 s. Remaining
+leaders: `dbt_translate_block` 1.50 s, `lookup_or_translate` 1.12 s,
+`sh4_decode` 0.74 s (36.4k translations); translated guest code 4.3 s and
+the assembly stubs 1.8 s in that run. Host tests, the decoder comparison,
+all 15 guests (aspace runs its 9 tagged-hash checks too) and the HHK check
+pass.

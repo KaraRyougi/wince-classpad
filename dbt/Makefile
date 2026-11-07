@@ -124,6 +124,15 @@ HOST_CFLAGS  += $(if $(filter 1,$(LAZY_META)),-DDBT_LAZY_META,) $(if $(filter 1,
 # tools/kernel_devfuncs.py NK.bin kern.map -o rt/kernel_dev.h.
 KDEV          ?= 1
 HOST_CFLAGS  += $(if $(filter 1,$(KDEV)),-DDBT_KDEV,)
+# HASH_TAG=1: lookup hash entries carry their ASID and user keys mix the ASID
+# into the index (CE processes share virtual addresses), so an address-space
+# switch no longer empties the user entries (72% of the C lookups that found
+# their block outside the hash), and an IC miss on a user target is served
+# from the hash in the stub instead of in C. HASH_ENTRIES: lookup hash size
+# (16384: ~0.2 s faster on My Device for 96 KiB more; docs/04).
+HASH_TAG      ?= 1
+HASH_ENTRIES  ?= 8192
+HOST_CFLAGS  += $(if $(filter 1,$(HASH_TAG)),-DDBT_HASH_ASID_TAG -DDBT_HASH_ASID_MIX -DDBT_USER_IC_HASH_HIT,) -DDBT_HASH_ENTRIES=$(HASH_ENTRIES)
 NK_PADDED = $(BUILD)/nk-flash.bin
 NK_OFF_FILE = $(BUILD)/nk-flash.off
 NK_ENV = $(if $(NKBIN)$(EXTBIN),HLE_OSROM=$(abspath $(NK_PADDED)) HLE_OSROM_PAD=$$(cat $(NK_OFF_FILE)),)   # recursive: nkrun sets NKBIN per target
@@ -177,7 +186,7 @@ DEVALL_STAMP := $(BUILD)/.devall-$(if $(filter 1,$(DEVALL)),1,0)
 $(DEVALL_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.devall-*
 	touch $@
-LAYOUT_STAMP := $(BUILD)/.layout-$(GUEST_RAM_LO)-$(HHK_PAYLOAD)-$(GUEST_RAM_HI)-$(IMAGE_BASE)-$(CACHE_BASE)-$(CACHE_SIZE)-$(BLOCKS)-$(ARENA_KB)-$(NK_FLASH)-$(NK_FLASH_MAX)-$(DEVICE)-$(CONSOLE)-$(IRQPINS)-$(LAZY_META)$(SECOND_CHANCE)$(KDEV)
+LAYOUT_STAMP := $(BUILD)/.layout-$(GUEST_RAM_LO)-$(HHK_PAYLOAD)-$(GUEST_RAM_HI)-$(IMAGE_BASE)-$(CACHE_BASE)-$(CACHE_SIZE)-$(BLOCKS)-$(ARENA_KB)-$(NK_FLASH)-$(NK_FLASH_MAX)-$(DEVICE)-$(CONSOLE)-$(IRQPINS)-$(LAZY_META)$(SECOND_CHANCE)$(KDEV)$(HASH_TAG)-$(HASH_ENTRIES)
 $(LAYOUT_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.layout-*
 	touch $@
