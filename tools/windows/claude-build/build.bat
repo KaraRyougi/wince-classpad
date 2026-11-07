@@ -100,7 +100,7 @@ for %%F in (config.bib platform.bib platform.reg platform.dat PostFmergeBib.bat 
     if errorlevel 1 (echo cannot copy %%F: is it open in another program>>"%LOG%" & goto failed)
   )
 )
-for %%F in (oal.exe classpad_ddi.dll classpad_kbd.dll classpad_touch.dll classpad_rotate.exe classpad_rotatekey.exe DocList.dll) do (
+for %%F in (oal.exe classpad_ddi.dll classpad_kbd.dll classpad_touch.dll classpad_rotate.exe classpad_rotatekey.exe DocList.dll sh3crt.dll) do (
   if not exist "%_FLATRELEASEDIR%\%%F" (echo missing %%F>>"%LOG%" & goto failed)
 )
 

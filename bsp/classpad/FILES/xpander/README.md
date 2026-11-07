@@ -37,3 +37,13 @@ copies the link to the Start menu (`platform.dat`) and registers `.mwb`
 workbooks (`platform.reg`). `platform.reg` also registers `MathKeyPad.dll`,
 the math keyboard, as a SIP input method (what its DllRegisterServer writes;
 the cab ran `regsvrce.exe` on it), and the fx-CP400 Keyboard key shows it.
+
+Floating point: the SH-3 binaries call coredll's software floating-point
+helpers and double C functions, which CE 6.0's SH-4 coredll implements with
+the FPU calling convention; `stage.py` points those imports at
+`SH3CRT.dll` (`SRC/APPS/SH3CRT`, the SH-3 convention) with
+`tools/sh3imports.py`. Without it the math keyboard computed every tap as
+"no key" (found in casio-emu, 2026-11-06), and any computed number was
+suspect. Not covered: `printf`-family `%f` arguments (variadic doubles) and
+any other coredll function taking or returning a float or double outside
+the list in `sh3crt.def`.

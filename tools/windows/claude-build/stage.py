@@ -12,7 +12,8 @@
          platform.bib module under FILES is realigned to 4 KiB sections
          (tools/pe4k.py: romimage takes no 1 KiB-aligned XIP module, and
          CE 6 loads none from a file either); MathXpander.exe, linked
-         /FIXED, gets its relocations rebuilt first (RELOC_PINS)
+         /FIXED, gets its relocations rebuilt first (RELOC_PINS); SH-3
+         modules' floating-point imports go to SH3CRT.dll (tools/sh3imports.py)
   orig\\  with --platform: the VM's current versions of every file src\\ changes
   hhk\\   wince-eact.hh3 and nkflash-eact.hh3 (make DEVICE=1 NK_WINDOW=eact hhk)
 EXT.bin itself is made by makeimg in the VM (build.bat), next to NK.bin.
@@ -25,6 +26,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 sys.path.insert(0, os.path.join(REPO, "tools"))
 import pe4k
+import sh3imports
 
 # /FIXED EXEs whose relocations pe4k.reconstruct_relocs rebuilds: the SHA-256
 # of the copy checked by hand and its fixup count (Math Xpander 1.0 PPC SH3:
@@ -92,7 +94,7 @@ def main(argv):
 
     # MODULES from FILES (the Pocket PC SH3 binaries, linked with 1 KiB
     # SectionAlignment): 4 KiB sections for romimage, checked by pe4k.
-    sect, n = None, 0
+    sect, n, nfp = None, 0, 0
     for l in bib.splitlines():
         w = l.split()
         if not w or w[0].startswith(";"):
@@ -115,13 +117,23 @@ def main(argv):
                     data = pe4k.add_relocs(data, rvas)
                 new, what = pe4k.realign(data)
                 errs = pe4k.check(data, new)
+                if not errs:
+                    # SH-3 floating point: COREDLL's SH-4 helpers -> SH3CRT.dll
+                    fixed, moved = sh3imports.rewrite(new)
+                    if moved:
+                        errs = sh3imports.check(new, fixed)
+                        idle = [name for name, c in moved if not c]
+                        if idle:
+                            print("stage: %s imports but never calls %s" % (w[0], ",".join(idle)))
+                        new = fixed
+                        nfp += 1
             except pe4k.PEError as e:
                 sys.exit("stage: %s: %s" % (w[0], e))
             if errs:
                 sys.exit("stage: %s: %s" % (w[0], "; ".join(errs[:5])))
             if new != data:
                 open(p, "wb").write(new); n += 1
-    print("stage: %d modules realigned to 4 KiB sections" % n)
+    print("stage: %d modules realigned to 4 KiB sections, %d with SH3CRT imports" % (n, nfp))
 
     if opts["--platform"]:
         n = 0

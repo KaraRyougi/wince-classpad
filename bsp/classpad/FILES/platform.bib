@@ -28,6 +28,12 @@ MODULES
 MODULES
     classpad_rotatekey.exe $(_FLATRELEASEDIR)\classpad_rotatekey.exe NK S
 
+; SH-3 floating point for the Pocket PC SH-3 binaries below (SRC\APPS\SH3CRT):
+; coredll's helpers and double C functions with the SH-3 calling convention;
+; stage.py points their imports here (tools/sh3imports.py).
+MODULES
+    sh3crt.dll          $(_FLATRELEASEDIR)\sh3crt.dll          NK  S
+
 ; MFC CE 3.0 (Pocket PC, SH3) for legacy applications, with DocList.dll above,
 ; executed in place like the rest of NK. P: romimage does not check the CPU
 ; type of an SH3 module; the kernel loads ROM modules without a CPU check.

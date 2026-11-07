@@ -1,4 +1,5 @@
 DIRS=\
     ROTATE \
     ROTATEKEY \
+    SH3CRT \
     doclist

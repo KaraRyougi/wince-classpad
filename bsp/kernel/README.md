@@ -22,6 +22,13 @@ against that file applies cleanly.
   binaries (Math Xpander and the like) run as they are; what they import
   (coredll ordinals, aygshell, commctrl, an MFC runtime) is a separate
   question. Applies to `loader.c` dated 2012-01-25 (KB2649922).
+  One import question has an answer (2026-11-06): floating point. SH-3 code
+  calls coredll's software floating-point helpers (_adds, _addd, _dtoi...)
+  and passes doubles to sin/pow/atof in general registers; the SH-4 coredll
+  has the same names built for the FPU convention (fr4/dr4 in, fr0/dr0
+  out), so SH-3 callers got garbage (Math Xpander's math keyboard never hit
+  a key). `SRC/APPS/SH3CRT` exports them with the SH-3 convention and
+  `tools/sh3imports.py` (run by stage.py) points the SH-3 modules there.
 
 ## Applying in the VM
 
