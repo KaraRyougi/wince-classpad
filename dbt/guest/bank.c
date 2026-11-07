@@ -114,7 +114,8 @@ void guest_main(void)
     }
 
     /* Guest MD is shadowed even though the host stays privileged. Both
-     * transitions must leave the same-mode SR fast path and update shadow MD. */
+     * transitions must update shadow MD; they leave the same-mode SR fast
+     * path unless it handles MD itself (DBT_FAST_LDC_SR_MD). */
     if (hc_getstat(63) & 1) {
         unsigned old, user, restored, fast = hc_getstat(31);
         __asm__ volatile (
@@ -124,7 +125,10 @@ void guest_main(void)
             ".align 2\n1:\t.long 0x40000000\n2:\n"
             : "=r"(old), "=r"(user), "=r"(restored) :: "r0", "r1", "memory");
         check("SR privilege transitions update shadow MD", user == (old ^ 0x40000000u) && restored == old);
-        check("SR privilege transitions take the full helper", hc_getstat(31) == fast);
+        if (hc_getstat(63) & 2)         /* DBT_FAST_LDC_SR_MD: the shadow MD is updated on the fast path */
+            check("SR privilege transitions stay on the fast path", hc_getstat(31) == fast + 2);
+        else
+            check("SR privilege transitions take the full helper", hc_getstat(31) == fast);
     }
 
     /* many exceptions: nothing drifts */

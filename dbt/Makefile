@@ -138,6 +138,14 @@ HASH_ENTRIES  ?= 8192
 # exactly that handler.
 TLB_REFILL    ?= 1
 HOST_CFLAGS  += $(if $(filter 1,$(TLB_REFILL)),-DDBT_TLB_REFILL,)
+# FAST_HELPERS=1: common helper calls without C. Control-register loads run
+# natively inline (DBT_INLINE_DEVICE_READ; stores keep the C helper, PTEH and
+# MMUCR have side effects); ldc sr with unchanged bank and ASID, including
+# a change of the shadowed MD (DBT_FAST_LDC_SR, _MD); ldtlb on a page without
+# translated user code (DBT_FAST_LDTLB); rte to a target in the lookup hash
+# (DBT_FAST_RTE). docs/04 has the measurements.
+FAST_HELPERS  ?= 1
+HOST_CFLAGS  += $(if $(filter 1,$(FAST_HELPERS)),-DDBT_INLINE_DEVICE_READ -DDBT_FAST_LDC_SR -DDBT_FAST_LDC_SR_MD -DDBT_FAST_LDTLB -DDBT_FAST_RTE,)
 HOST_CFLAGS  += $(if $(filter 1,$(HASH_TAG)),-DDBT_HASH_ASID_TAG -DDBT_HASH_ASID_MIX -DDBT_USER_IC_HASH_HIT,) -DDBT_HASH_ENTRIES=$(HASH_ENTRIES)
 NK_PADDED = $(BUILD)/nk-flash.bin
 NK_OFF_FILE = $(BUILD)/nk-flash.off
@@ -193,7 +201,7 @@ DEVALL_STAMP := $(BUILD)/.devall-$(if $(filter 1,$(DEVALL)),1,0)
 $(DEVALL_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.devall-*
 	touch $@
-LAYOUT_STAMP := $(BUILD)/.layout-$(GUEST_RAM_LO)-$(HHK_PAYLOAD)-$(GUEST_RAM_HI)-$(IMAGE_BASE)-$(CACHE_BASE)-$(CACHE_SIZE)-$(BLOCKS)-$(ARENA_KB)-$(NK_FLASH)-$(NK_FLASH_MAX)-$(DEVICE)-$(CONSOLE)-$(IRQPINS)-$(LAZY_META)$(SECOND_CHANCE)$(KDEV)$(HASH_TAG)$(TLB_REFILL)-$(HASH_ENTRIES)
+LAYOUT_STAMP := $(BUILD)/.layout-$(GUEST_RAM_LO)-$(HHK_PAYLOAD)-$(GUEST_RAM_HI)-$(IMAGE_BASE)-$(CACHE_BASE)-$(CACHE_SIZE)-$(BLOCKS)-$(ARENA_KB)-$(NK_FLASH)-$(NK_FLASH_MAX)-$(DEVICE)-$(CONSOLE)-$(IRQPINS)-$(LAZY_META)$(SECOND_CHANCE)$(KDEV)$(HASH_TAG)$(TLB_REFILL)$(FAST_HELPERS)-$(HASH_ENTRIES)
 $(LAYOUT_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.layout-*
 	touch $@

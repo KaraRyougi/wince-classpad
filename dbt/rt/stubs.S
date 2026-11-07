@@ -84,6 +84,15 @@
 .Lintevt\sfx:       .long 0xFF000028
 .Lctx_sw\sfx:       .long _dbt_ctx_rt + CTX_SWSPC
 .Ltramp\sfx:        .long _dbt_bank_tramp
+#ifdef DBT_FAST_RTE
+.Lrte_pteh\sfx:     .long 0xFF000000
+.Lrte_asid\sfx:     .long _dbt_current_asid
+.Lrte_md\sfx:       .long _dbt_shadow_md
+.Lrte_mdmask\sfx:   .long 0x40000000
+.Lrte_force\sfx:    .long 0x40001000      /* MD | DSP */
+.Lrte_srsave\sfx:   .long _dbt_rte_sr_save
+.Lrte_count\sfx:    .long _dbt_fast_rte_calls
+#endif
         .endm
 
 /* Save the guest context into dbt_ctx_rt with descending stores.
@@ -678,6 +687,90 @@ _dbt_rte_stub:
         mov.l   .LimaskC, r2
         or      r1, r2
         ldc     r2, sr
+#ifdef DBT_FAST_RTE
+        /* Common case without C (DBT_FAST_RTE): the hardware ASID is the one
+         * the translator tracks and the target is in the lookup hash. Then do
+         * what dbt_rte_c does (shadow MD from SSR, SSR gets MD|DSP, SPC the
+         * host address) and rte from here. r1 (the SR at entry, which
+         * SAVE_CTX_RT stores) is parked in dbt_rte_sr_save, so any miss
+         * falls through to the C path with everything as it was. IRQs are
+         * masked and only P1 data is read: nothing can trap in between. */
+        mov.l   .Lrte_srsaveC, r0
+        mov.l   r1, @r0
+        mov.l   .Lrte_ptehC, r0
+        mov.l   @r0, r0
+        extu.b  r0, r0
+        mov.l   .Lrte_asidC, r2
+        mov.l   @r2, r2
+        cmp/eq  r0, r2
+        bf      8f                     /* ASID switch pending: note_asid in C */
+        stc     spc, r0                /* r0 = guest target */
+        mov     r0, r1
+        shlr    r1
+        swap.w  r0, r2
+        xor     r2, r1                 /* hidx(), as in the lookup stubs */
+#ifdef DBT_HASH_ASID_MIX
+        cmp/pz  r0
+        bf      5f
+        mov.l   .Lrte_asidC, r2
+        mov.l   @r2, r2
+        extu.b  r2, r2
+        shll2   r2
+        shll2   r2
+        shll    r2
+        xor     r2, r1                 /* user keys: ^ (ASID << 5) */
+5:
+#endif
+        mov.l   .LhmaskC, r2
+        and     r2, r1
+#ifdef DBT_HASH_ASID_TAG
+        mov     r1, r2
+        shll    r1
+        add     r2, r1
+        shll2   r1                     /* index * 12 */
+#else
+        shll2   r1
+        shll    r1                     /* index * 8 */
+#endif
+        mov.l   .LhashC, r2
+        add     r2, r1
+        mov.l   @r1, r2
+        cmp/eq  r0, r2
+        bf      8f
+#ifdef DBT_HASH_ASID_TAG
+        cmp/pz  r0
+        bf      4f                     /* kernel keys are global */
+        mov.l   @(8, r1), r2
+        mov.l   .Lrte_asidC, r0
+        mov.l   @r0, r0
+        cmp/eq  r0, r2
+        bf      8f
+4:
+#endif
+        mov.l   @(4, r1), r1           /* host address */
+        tst     r1, r1
+        bt      8f
+        ldc     r1, spc
+        stc     ssr, r0
+        mov.l   .Lrte_mdmaskC, r2
+        and     r0, r2
+        mov.l   .Lrte_mdC, r1
+        mov.l   r2, @r1                /* dbt_shadow_md = SSR & MD */
+        mov.l   .Lrte_forceC, r2
+        or      r2, r0
+        ldc     r0, ssr                /* the host runs privileged with DSP */
+        mov.l   .Lrte_countC, r1
+        mov.l   @r1, r0
+        add     #1, r0
+        mov.l   r0, @r1
+        STSX    SLOT_Y0, 0
+        STSX    SLOT_Y1, 1
+        STSX    SLOT_A0, 2
+        rte
+        nop                            /* never touch r0-r7 in an rte slot: the bank may switch */
+8:      mov.l   .Lrte_srsaveC, r0
+        mov.l   @r0, r1                /* the C path as before */
+#endif
         SAVE_CTX_RT C
         stc     spc, r4                /* arg0 = guest spc */
         mov.l   .Lctx_rtC, r5

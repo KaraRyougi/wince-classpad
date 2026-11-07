@@ -3087,3 +3087,42 @@ results).
 | --- | ---: | --- |
 | before (HASH_TAG=1 commit) | 15.31 s | 14.81 15.51 15.60 |
 | TLB_REFILL=1 | 13.56 s | 13.51 13.78 13.40 |
+
+### Common helper calls without C (2026-11-07)
+
+`FAST_HELPERS=1` (Makefile, default) turns on four paths that stay in
+assembly or generated code:
+
+- `DBT_INLINE_DEVICE_READ`: a control-register load in device-aware code
+  runs natively and unswapped in the block (reads have no side effects);
+  stores keep the C helper (PTEH changes the ASID, MMUCR.TI flushes).
+- `DBT_FAST_LDC_SR` + `_MD`: `ldc sr` with unchanged register bank and
+  ASID loads the new SR in the stub, updating the shadowed guest MD there
+  too. The bank guest now checks for the MD variant (HC_GETSTAT 63 bit 1)
+  that both privilege transitions stay on the fast path.
+- `DBT_FAST_LDTLB`: ldtlb with unchanged ASID on a 4 KiB page without
+  translated user code, in the stub.
+- `DBT_FAST_RTE` (new): the rte stub checks that the hardware ASID is the
+  one the translator tracks and probes the lookup hash for SPC (the same
+  index, ASID mix and tag check as the lookup stubs); on a hit it sets the
+  shadow MD from SSR, forces MD|DSP into SSR, puts the host address in SPC
+  and rtes. The SR it needs for the C path is parked in `dbt_rte_sr_save`,
+  so any miss continues into the unchanged C path. HC_GETSTAT 432 counts
+  the fast returns (the tmu guest takes it 4317 times).
+
+`DBT_DYNAMIC_P4_STORE` (native control-register stores except PTEH and
+MMUCR) was measured too and gave nothing (13.37 -> 13.49 s), with longer
+blocks and no bounded retry under second chance, so it stays off.
+
+Load counters on the old image (TLB_REFILL on in both): `ldc sr` through
+C 309362 -> 53179, rte through C 41188 -> 10179 (29493 fast), C fallback
+calls 100442 -> 60874 (the remaining 58025 device accesses are stores).
+
+| 8 MiB image, mean of taps 7.5M/8.0M/8.5M | mean | runs |
+| --- | ---: | --- |
+| TLB_REFILL commit | 13.56 s | 13.51 13.78 13.40 |
+| + inline device reads | 13.37 s | 13.54 13.56 13.00 |
+| + native P4 stores (not kept) | 13.49 s | 13.46 13.51 13.50 |
+| reads + stores + fast ldc sr (MD) | 12.92 s | 12.98 13.15 12.65 |
+| ... + fast ldtlb | 12.71 s | 12.96 13.03 12.13 |
+| FAST_HELPERS=1 (reads, ldc sr, ldtlb, rte; no stores) | 12.61 s | 12.78 12.51 12.55 |

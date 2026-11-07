@@ -81,6 +81,10 @@ void *memset(void *d, int c, dbt_size_t n)
 
 volatile sf_u32 dbt_shadow_vbr = 0;
 volatile sf_u32 dbt_shadow_md = SR_MD;
+#ifdef DBT_FAST_RTE
+sf_u32 dbt_rte_sr_save;                  /* rt/stubs.S rte fast path: the SR its C fallback needs */
+volatile sf_u32 dbt_fast_rte_calls;      /* rtes completed by that fast path */
+#endif
 #ifdef DBT_STAT_IN_RAM
 dbt_stats dbt_stat;            /* diagnostics: where the emulator's counter snapshot can read it */
 #else
@@ -2653,6 +2657,9 @@ static void print_stats(void)
 #ifdef DBT_TLB_REFILL
     dbt_puts(" tlb_refills="); dbt_puthex(dbt_stat.tlb_refills);
 #endif
+#ifdef DBT_FAST_RTE
+    dbt_puts(" fast_rte="); dbt_puthex(dbt_fast_rte_calls);
+#endif
 #ifdef DBT_INVAL_DIAG
     {
         int o;
@@ -2910,7 +2917,11 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
         case 26: v = dbt_stat.ldc_sr_calls + FAST_LDC_SR_CALLS; break;
         case 31: v = FAST_LDC_SR_CALLS; break;
 #ifdef DBT_FAST_LDC_SR
+#ifdef DBT_FAST_LDC_SR_MD
+        case 63: v = 3; break;          /* bit 1: MD changes stay on the fast path */
+#else
         case 63: v = 1; break;
+#endif
 #endif
         case 27: v = dbt_stat.lookups_c; break;
         case 28: v = dbt_stat.tlb_hooks; break;
@@ -2975,6 +2986,10 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
 #endif
             break;
         case 60: v = 0x44425453u; break; /* DBTS */
+#ifdef DBT_FAST_RTE
+        case 432: v = dbt_fast_rte_calls; break;
+        case 433: v = 1; break;          /* DBT_FAST_RTE built in */
+#endif
 #ifdef DBT_TLB_REFILL
         case 430: v = dbt_stat.tlb_refills; break;
         case 431: v = 1; break;          /* TLB_REFILL built in */
