@@ -28,5 +28,6 @@ this folder of the VM package, where `platform.bib` expects them.
 Outside dependencies, all in NK: `mfcce300.dll` (`FILES/legacy-mfc`, XIP),
 `DocList.dll` (`SRC/APPS/DOCLIST`), coredll, aygshell, ole32. The NK side also
 copies the link to the Start menu (`platform.dat`) and registers `.mwb`
-workbooks (`platform.reg`). Not done: registering `MathKeyPad.dll`, the
-keypad input method (the cab ran `regsvrce.exe` on it).
+workbooks (`platform.reg`). `platform.reg` also registers `MathKeyPad.dll`,
+the math keyboard, as a SIP input method (what its DllRegisterServer writes;
+the cab ran `regsvrce.exe` on it), and the fx-CP400 Keyboard key shows it.

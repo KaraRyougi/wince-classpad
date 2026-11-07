@@ -382,17 +382,27 @@ Since 2026-11-06 the other strip icons work the same way: the DDSI sets
 `ClassPadIconMenu`, `ClassPadIconMain`, `ClassPadIconEsc` or
 `ClassPadIconSettings` on release (seven icons of 320/7 pixels: Settings,
 Menu, Main, Resize, Swap, Rotate, Esc; Resize and Swap do nothing), and the
-same service acts on them: Menu sends the Windows key (VK_LWIN, Start menu,
-like the fx-CG100's HOME), Main brings Math Xpander to the front or starts
-`\Windows\MathXpander.exe`, Esc sends VK_ESCAPE, Settings the Menu key
-(VK_APPS, like the fx-CG100's SETTINGS).
+same service acts on them as HP Xpander's keys (the calculator Math Xpander
+was written for: HOME, MATH, MENU, ESC): Menu is HOME, the Windows key
+(VK_LWIN, Start menu); Main is MATH, it brings Math Xpander to the front or
+starts `\Windows\MathXpander.exe`; Settings is MENU, it opens the foreground
+program's menu bar with a tap on its first menu (`SHFindMenuBar`, else a
+command bar; Alt when there is none); Esc sends VK_ESCAPE. Math Xpander's own
+code handles none of HOME, MATH or MENU (HP's firmware did), only the editing
+keys its math keyboard sends: VK_CLEAR, 0xCB cut, 0xCC copy, 0xCD paste.
+
+The fx-CP400 Keyboard key shows Math Xpander's math keyboard: the layout's
+remap sets `ClassPadKeyboardKey` (the key itself types nothing), and the
+service selects MathKeyPad as the SIP input method (softkb.dll; registered
+in `platform.reg` as its DllRegisterServer would) and shows it, or hides it
+when it is already showing.
 
 Keypad operators (`kbd_layout.cpp`) type what Math Xpander's own math
 keyboard sends, as a US keyboard's main block types it: `= . , -` and `/`
 directly, `+ * ( ) ^` as Shift + `= 8 9 0 6` (pseudo VKs expanded by the
 device layout's remap function; no Shift is added while SHIFT is held).
 Before, `( )` typed `[ ]`, `^` a backquote, and `+ - * /` were the numeric
-keypad's VKs.
+keypad's VKs. x, y and z type the letters (upper case with SHIFT).
 `python3 tools/test_rotate_key.py` tests the actual GetPoint routing with stubbed
 hardware, including hold, drag cancellation, adjacent icon, bus failure,
 every icon's event and normal desktop contacts. `test_rotation_emulator.py --soft-key` tests four

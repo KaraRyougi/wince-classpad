@@ -75,10 +75,23 @@
     "BattSuspend"=dword:b4
 ; @CESYSGEN ENDIF CE_MODULES_PM
 
-; Handle the touch-strip icons (Rotate, Menu, Main, Esc, Settings) outside GWES.
+; Handle the touch-strip icons (Rotate, Menu, Main, Esc, Settings) and the
+; fx-CP400 Keyboard key outside GWES.
 [HKEY_LOCAL_MACHINE\init]
     "Launch94"="classpad_rotatekey.exe"
     "Depend94"=hex:14,00,1e,00,32,00
+
+; Math Xpander's math keyboard as a SIP input method, what its DllRegisterServer
+; writes (the cab ran regsvrce.exe on it). The fx-CP400 Keyboard key shows it
+; (classpad_rotatekey.exe); the SIP is softkb.dll.
+[HKEY_CLASSES_ROOT\CLSID\{D8183B68-05D1-11d4-80D9-001083023057}]
+    @="MathKeyPad"
+[HKEY_CLASSES_ROOT\CLSID\{D8183B68-05D1-11d4-80D9-001083023057}\InprocServer32]
+    @="\\Windows\\MathKeyPad.dll"
+[HKEY_CLASSES_ROOT\CLSID\{D8183B68-05D1-11d4-80D9-001083023057}\IsSIPInputMethod]
+    @="1"
+[HKEY_CLASSES_ROOT\CLSID\{D8183B68-05D1-11d4-80D9-001083023057}\DefaultIcon]
+    @="\\Windows\\MathKeyPad.dll,0"
 
 ; Math Xpander workbooks (.mwb), as its Pocket PC cab registers them, with the
 ; program at its ROM path in the EXT region (FILES\xpander).

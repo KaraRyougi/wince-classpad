@@ -20,7 +20,12 @@
 //  types them, never the numeric keypad's VKs or [ ] `. The ones a US
 //  keyboard types with Shift are pseudo VKs here (VKX_*, unassigned codes);
 //  ClassPadRemapVKey turns each into Shift + the base key, unless SHIFT is
-//  already held.
+//  already held. x, y and z type the letters (VK 'X' 'Y' 'Z': lower case,
+//  upper case with SHIFT).
+//
+//  The fx-CP400 Keyboard key types nothing: its press sets the named event
+//  ClassPadKeyboardKey, and classpad_rotatekey.exe shows or hides Math
+//  Xpander's math keyboard (MathKeyPad, a SIP input method) outside GWES.
 //------------------------------------------------------------------------------
 #include <windows.h>
 #include <keybddr.h>
@@ -38,6 +43,7 @@ typedef struct { UINT8 code; UINT8 vk; } KEYSC_KEY;
 #define VKX_LPAREN      0x8A    // (  Shift + '9'
 #define VKX_RPAREN      0x8B    // )  Shift + '0'
 #define VKX_CARET       0x8C    // ^  Shift + '6'
+#define VKX_KEYBOARD    0x8D    // fx-CP400 Keyboard: sets ClassPadKeyboardKey, types nothing
 
 static UINT32 ShiftedBase(UINT32 vk)
 {
@@ -103,7 +109,7 @@ static const KEYSC_KEY g_keysCg100[] = {
 static const KEYSC_KEY g_keysCp400[] = {
     { 20, VK_ESCAPE },      // Clear
     { 81, VK_SHIFT },       // Shift
-    { 85, VK_APPS },        // Keyboard (soft keyboard)
+    { 85, VKX_KEYBOARD },   // Keyboard: Math Xpander's math keyboard
     { 73, VK_LEFT }, { 84, VK_UP }, { 74, VK_DOWN }, { 83, VK_RIGHT },
     { 76, 'X' }, { 75, 'Y' }, { 63, 'Z' },
     { 86, VK_EQUAL },       // =
@@ -138,12 +144,15 @@ static ScanCodeToVKeyData g_scvk = {
 static ScanCodeToVKeyData *g_rgpscvk[] = { &g_scvk };
 
 static BOOL g_shiftHeld;    // the SHIFT key is down (its own events pass through)
+static BOOL g_keyboardHeld; // the Keyboard key is down (auto-repeat sets no event)
+static HANDLE g_keyboardEvent;
 
 // A VKX_* event becomes Shift + its base key: Shift down before the base key
 // goes down, Shift up after it comes up; an auto-repeat (down again) repeats
 // both. While SHIFT itself is held no Shift events are added. Everything else
-// passes through. The Layout Manager first asks for the buffer size with a
-// NULL buffer: two events per input event at most.
+// passes through; VKX_KEYBOARD only sets its event. The Layout Manager first
+// asks for the buffer size with a NULL buffer: two events per input event at
+// most.
 static UINT WINAPI ClassPadRemapVKey(const KEYBD_EVENT *pKbdEvents, UINT cKbdEvents,
                                      KEYBD_EVENT *pRmpKbdEvents, UINT cMaxRmpKbdEvents)
 {
@@ -153,6 +162,14 @@ static UINT WINAPI ClassPadRemapVKey(const KEYBD_EVENT *pKbdEvents, UINT cKbdEve
         const KEYBD_EVENT *e = &pKbdEvents[i];
         UINT32 base = ShiftedBase(e->uiVk);
         BOOL down = (e->KeyStateFlags & KeyStateDownFlag) != 0;
+        if (e->uiVk == VKX_KEYBOARD) {
+            if (down && !g_keyboardHeld) {
+                if (!g_keyboardEvent) g_keyboardEvent = CreateEvent(NULL, FALSE, FALSE, TEXT("ClassPadKeyboardKey"));
+                if (g_keyboardEvent) SetEvent(g_keyboardEvent);
+            }
+            g_keyboardHeld = down;
+            continue;
+        }
         if (n + (base && !g_shiftHeld ? 2 : 1) > cMaxRmpKbdEvents) return 0;
         if (!base) {
             if (e->uiVk == VK_SHIFT || e->uiVk == VK_LSHIFT || e->uiVk == VK_RSHIFT) g_shiftHeld = down;

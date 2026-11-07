@@ -91,5 +91,7 @@ boots). Things to look at:
   - the OAL's line "CLASSPAD OAL: EXT ROM region 80ee0000..., N files"
     (console builds / debug ring), then Start > Programs > Math Xpander
     (\Windows\MathXpander.exe, loaded from the hole; its DLLs run in place).
-    Its keypad input method (MathKeyPad.dll) is in the region but not
-    registered (the cab ran regsvrce.exe; COM self-registration is not done).
+    The Keyboard key shows its math keyboard (MathKeyPad.dll, a SIP input
+    method registered in platform.reg); the strip icons act as HP Xpander's
+    keys: Menu = HOME (Start menu), Main = MATH (Math Xpander), Settings =
+    MENU (the program's menu bar), Esc = ESC.
