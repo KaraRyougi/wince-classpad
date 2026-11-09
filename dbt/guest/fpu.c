@@ -92,6 +92,75 @@ static unsigned test_double(unsigned *t_out)
     return r0;
 }
 
+/* The register-only moves the translator does in line (translate.c
+ * tr_fpu_inline): fmov frm,frn, fldi0/1, flds/fsts, lds/sts fpscr/fpul,
+ * with the FR bank switched by frchg, T kept across them, and the SZ=1
+ * pair move left to the helper. */
+static unsigned test_inline_moves(unsigned *out)
+{
+    register unsigned r0 __asm__("r0");
+    register unsigned r1 __asm__("r1");
+    register unsigned r2 __asm__("r2");
+    register unsigned r3 __asm__("r3");
+    __asm__ volatile (
+        "mov.l 1f, r1\n\t"
+        ".word 0x416A\n\t"      /* lds r1,fpscr : PR=0, SZ=0, FR=0 */
+        ".word 0xF09D\n\t"      /* fldi1 fr0 */
+        ".word 0xF18D\n\t"      /* fldi0 fr1 */
+        "sett\n\t"
+        ".word 0xF20C\n\t"      /* fmov fr0,fr2 (1.0) */
+        "movt r2\n\t"           /* T must still be 1 */
+        ".word 0xF21D\n\t"      /* flds fr2,fpul */
+        ".word 0x005A\n\t"      /* sts fpul,r0 -> 0x3F800000 */
+        ".word 0xFBFD\n\t"      /* frchg: bank 1 */
+        ".word 0xF29D\n\t"      /* fldi1 fr2 (bank 1) */
+        ".word 0xF28D\n\t"      /* fldi0 fr2 (bank 1): overwrites with 0 */
+        ".word 0xF21D\n\t"      /* flds fr2,fpul -> 0 (bank 1) */
+        ".word 0x015A\n\t"      /* sts fpul,r1 -> 0 */
+        ".word 0xFBFD\n\t"      /* frchg: bank 0 again */
+        ".word 0xF21D\n\t"      /* flds fr2,fpul -> 1.0 (bank 0 untouched) */
+        ".word 0x035A\n\t"      /* sts fpul,r3 -> 0x3F800000 */
+        "bra 2f\n\t"
+        "nop\n\t"
+        ".align 2\n"
+        "1: .long 0x00040000\n"
+        "2:\n\t"
+        : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3) :: "memory", "t");
+    out[0] = r1; out[1] = r2; out[2] = r3;
+    return r0;
+}
+/* SZ=1: fmov dr0,dr2 is a pair move (both words), through the helper */
+static unsigned test_pair_move(unsigned *out)
+{
+    register unsigned r0 __asm__("r0");
+    register unsigned r1 __asm__("r1");
+    __asm__ volatile (
+        "mov.l 1f, r1\n\t"
+        ".word 0x416A\n\t"      /* lds r1,fpscr : SZ=0 */
+        ".word 0xF09D\n\t"      /* fldi1 fr0 */
+        ".word 0xF19D\n\t"      /* fldi1 fr1 */
+        ".word 0xF28D\n\t"      /* fldi0 fr2 */
+        ".word 0xF38D\n\t"      /* fldi0 fr3 */
+        "mov.l 3f, r1\n\t"
+        ".word 0x416A\n\t"      /* lds r1,fpscr : SZ=1 */
+        ".word 0xF20C\n\t"      /* fmov dr0,dr2 (pair) */
+        "mov.l 1f, r1\n\t"
+        ".word 0x416A\n\t"      /* SZ=0 */
+        ".word 0xF21D\n\t"      /* flds fr2,fpul */
+        ".word 0x005A\n\t"      /* sts fpul,r0 -> 1.0 */
+        ".word 0xF31D\n\t"      /* flds fr3,fpul */
+        ".word 0x015A\n\t"      /* sts fpul,r1 -> 1.0 */
+        "bra 2f\n\t"
+        "nop\n\t"
+        ".align 2\n"
+        "1: .long 0x00040000\n"
+        "3: .long 0x00140000\n" /* SZ=1 */
+        "2:\n\t"
+        : "=r"(r0), "=r"(r1) :: "memory", "t");
+    out[0] = r1;
+    return r0;
+}
+
 void guest_main(void)
 {
     unsigned buf[2] = { 0, 0 };
@@ -107,6 +176,15 @@ void guest_main(void)
     set_fpscr(0x00040000u);
     v = test_double(&t);
     check("double 3.0-0.5 -> 2, fcmp/gt T=1", v == 2 && t == 1);
+    {
+        unsigned o[3] = { 0, 0, 0 };
+        v = test_inline_moves(o);
+        check("fmov/flds/fldi in line, banks, T kept", v == 0x3F800000u && o[0] == 0 && o[1] == 1 && o[2] == 0x3F800000u);
+        v = test_pair_move(o);
+        check("fmov pair with SZ=1", v == 0x3F800000u && o[0] == 0x3F800000u);
+        check("lds fpscr masks to 22 bits", set_fpscr(0xFFFFFFFFu) == 0x003FFFFFu);
+        set_fpscr(0x00040000u);
+    }
     hc_stats();
     hc_puts(fails ? "RESULT: FAIL\n" : "RESULT: PASS\n");
     hc_exit(fails);

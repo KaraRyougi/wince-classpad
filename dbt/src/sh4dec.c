@@ -71,7 +71,7 @@ void sh4_decode(sf_u32 op, sh_insn *d)
         /* GPR operands of FPU instructions: lds/sts and fmov address registers */
         switch (op >> 12) {
         case 0x0: d->defs |= R(n); d->touched |= R(n); break;          /* sts fpul/fpscr,rn */
-        case 0x4: d->touched |= R(m); if ((op & 0xF) == 0x6 || (op & 0xF) == 0x2) d->defs |= R(m); break;
+        case 0x4: d->touched |= R(n); if ((op & 0xF) == 0x6 || (op & 0xF) == 0x2) d->defs |= R(n); break;   /* lds rm,fpul/fpscr and lds.l @rm+: the register is in bits 8-11 (fixed 2026-11-09: the in-line moves pick scratch registers by these bits) */
         case 0xF:
             switch (op & 0xF) {
             case 0x6: d->touched |= R(0) | R(m); break;                   /* fmov @(r0,rm),frn */

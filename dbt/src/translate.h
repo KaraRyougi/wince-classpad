@@ -27,6 +27,7 @@ typedef struct {
     sf_u32 rt_lookup_ic;     /* X0 = guest target, X1 = address of the site's inline-cache literal pair */
     sf_u32 rt_rte;           /* guest rte: SPC is the guest PC */
     sf_u32 rt_fpu;           /* X0 = opcode, X1 = return address */
+    sf_u32 fpu_fr, fpu_fpscr, fpu_fpul;  /* fpuemu's register file (fr[32]: bank 1 at +64 bytes), FPSCR and FPUL, for the in-line FPU moves (tr_fpu_inline); 0 = none */
     sf_u32 rt_fallback;      /* X0 = opcode, X1 = return address */
     sf_u32 rt_ldc_sr;        /* X0 = new SR, X1 = return address */
     sf_u32 shadow_vbr_addr;  /* host word holding the guest VBR */

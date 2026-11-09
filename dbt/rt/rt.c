@@ -2112,6 +2112,7 @@ void dbt_rt_init(const dbt_rt_config *cfg)
     g_env.rt_lookup_ic = (sf_u32)&dbt_lookup_ic;
     g_env.rt_rte = (sf_u32)&dbt_rte_stub;
     g_env.rt_fpu = (sf_u32)&dbt_fpu_stub;
+    g_env.fpu_fr = (sf_u32)g_fpu.fr; g_env.fpu_fpscr = (sf_u32)&g_fpu.fpscr; g_env.fpu_fpul = (sf_u32)&g_fpu.fpul;
     g_env.rt_fallback = (sf_u32)&dbt_fallback_stub;
     g_env.rt_ldc_sr = (sf_u32)&dbt_ldc_sr_stub;
     g_env.shadow_vbr_addr = (sf_u32)&dbt_shadow_vbr;

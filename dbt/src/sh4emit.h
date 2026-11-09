@@ -63,6 +63,7 @@ static inline int emit_lits_bytes(const emitter *e) { return e->nlits * 4 + 2; }
 #define OP_MOVL_PC(d,n)    (0xD000u | ((n) << 8) | ((d) & 0xFF))
 #define OP_MOVT(n)         (0x0029u | ((n) << 8))
 #define OP_TST_RR(m,n)     (0x2008u | ((n) << 8) | ((m) << 4))
+#define OP_AND_RR(m,n)     (0x2009u | ((n) << 8) | ((m) << 4))
 #define OP_NOT_RR(m,n)     (0x6007u | ((n) << 8) | ((m) << 4))
 #define OP_NEG_RR(m,n)     (0x600Bu | ((n) << 8) | ((m) << 4))
 #define OP_SHLR8(n)        (0x4019u | ((n) << 8))

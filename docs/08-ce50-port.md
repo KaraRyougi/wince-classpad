@@ -395,6 +395,22 @@ FPU 模拟（`fpuemu_exec` + 辅助 stub + `dbt_fpu_c`）16%、GWES 字形 0%（
 `ps.rcPaint` 的矩形逐行转换（一字节四像素）并只 BitBlt 那块、进度条只失效
 自己的矩形。预期 Recalc 剩下的主要是 FPU 模拟。待重建测量。
 
+**FPU 寄存器搬运就地翻译（`translate.c tr_fpu_inline`，默认开，
+`-DDBT_NO_FPU_INLINE` 关）。** `-DDBT_FPU_HIST` 统计 Recalc 期间的 FPU 指令：
+73.5 万条里 `fmov FRm,FRn` 占 31%、`lds/sts fpscr/fpul` 占 30%（CE 编译器每做
+一次双精度就切一次 PR）、fldi0/1 和 flds/fsts 再占 5%，算术只有约 10%。这些搬运
+不碰内存、不出异常，原来每条都走辅助 stub（保存整套 guest 上下文、解码、
+约 650 条宿主指令）。现在在 SR.FD 清零（否则仍由 stub 抛 FPU-disable 异常，
+内核的惰性 FPU 上下文切换靠它）且 fmov 的 FPSCR.SZ 清零时，直接对 fpuemu 的
+寄存器文件操作，约 15 条宿主指令；FR 位选 bank（+64 字节），T 经 DSP 槽保存
+恢复，慢路径重新登记 spill 记录以便中断时恢复。顺带修了解码器的一个老问题：
+`lds Rm,FPSCR/FPUL` 的寄存器在 bit 8–11，解码器一直按 bit 4–7 记 touched/defs
+（辅助路径保存全部寄存器所以没出事；就地翻译选临时寄存器时撞上了，导致启动
+黑屏）。guest 测试 `fpu`（加了 bank 切换、T 保持、SZ=1 成对搬运的用例）和
+`fpudis` 通过。Recalc 的总指令数从约 19.2 亿降到约 18.8 亿（按 10 s 一帧的
+分辨率估计，差异在噪声边缘）；真正的大头还是 Plotter-Z 的重绘，等重建后的
+镜像量。
+
 ## 九、还没做的
 
 - 在 VM 里构建（第一次构建会暴露 SDK 的差异：头文件、`WARNISERROR`）。

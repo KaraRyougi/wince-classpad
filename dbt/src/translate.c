@@ -1216,6 +1216,160 @@ static void trace_prologue(tctx *t)
     restore(t, rU, SB(t)); restore(t, rT, SA(t));
 }
 
+/* ------------------------------------------- FPU moves done in line
+ * Every FPU instruction went to fpuemu through the helper stub: the whole
+ * guest context saved and restored, the decode, ~650 host instructions.
+ * In Plotter-Z's recalculation 60% of the FPU instructions were register
+ * moves: fmov FRm,FRn (31%), lds/sts fpscr/fpul (30%, the CE compiler
+ * switches PR for every double), fldi0/1, flds/fsts (docs/08 section 10).
+ * Those touch no memory and raise nothing, so they are done here against
+ * fpuemu's register file (env->fpu_fr/fpscr/fpul), in about 15 host
+ * instructions, when SR.FD is clear (the kernel's lazy FPU context switch
+ * needs the 0x800 exception, which only the helper raises) and, for fmov,
+ * FPSCR.SZ is clear (pair moves stay with fpuemu). Layout:
+ *   spill a, v ; save SR (T) ; FD test -> slow ; [SZ test -> slow] ;
+ *   FR bank test ; body ; SR back ; restore ; bra done
+ *   slow: SR back ; restore ; the helper call as before
+ *   done:
+ * The slow region reopens the spill records so an interrupt there still
+ * finds a, v and T in their slots. -DDBT_NO_FPU_INLINE keeps the helper
+ * for everything. */
+#ifndef DBT_NO_FPU_INLINE
+static int spill_t_save(tctx *t, int v)          /* stc sr,v ; v -> SC: SR.T saved, as tr_p4_store does */
+{
+    dbt_block *b = t->blk;
+    int idx;
+    emit16(&t->em, OP_STC_SR(v));
+    if (b->nspills >= DBT_MAX_BLOCK_SPILLS) { t->err = DBT_ERR_OVERFLOW; return -1; }
+    idx = b->nspills++;
+#ifndef DBT_COMPACT_SPILL6
+    b->spills[idx].insn = (sf_u8)(t->cur - b->meta);
+    b->spills[idx].pad = 0;
+#endif
+    b->spills[idx].gpr = DBT_SPILL_T; b->spills[idx].slot = (sf_u8)SC(t);
+    b->spills[idx].start = (sf_u16)emit_pos(&t->em); b->spills[idx].end = 0xFFFF;
+    emit16(&t->em, op_lds_slot(v, SC(t)));
+    return idx;
+}
+static void spill_reopen(tctx *t, int gpr, int slot)   /* a record only: the slot already holds the value */
+{
+    dbt_block *b = t->blk;
+    if (b->nspills >= DBT_MAX_BLOCK_SPILLS) { t->err = DBT_ERR_OVERFLOW; return; }
+#ifndef DBT_COMPACT_SPILL6
+    b->spills[b->nspills].insn = (sf_u8)(t->cur - b->meta);
+    b->spills[b->nspills].pad = 0;
+#endif
+    b->spills[b->nspills].gpr = (sf_u8)gpr; b->spills[b->nspills].slot = (sf_u8)slot;
+    b->spills[b->nspills].start = (sf_u16)emit_pos(&t->em); b->spills[b->nspills].end = 0xFFFF;
+    b->nspills++;
+}
+static void spill_t_restore(tctx *t, int v)     /* SC -> v ; ldc v,sr: T back, record closed */
+{
+    dbt_block *b = t->blk;
+    int i;
+    emit16(&t->em, op_sts_slot(SC(t), v));
+    for (i = b->nspills - 1; i >= 0; i--)
+        if (b->spills[i].gpr == DBT_SPILL_T && b->spills[i].slot == SC(t) && b->spills[i].end == 0xFFFF) {
+            b->spills[i].end = (sf_u16)emit_pos(&t->em);
+            break;
+        }
+    emit16(&t->em, OP_LDC_SR(v));
+}
+
+static int tr_fpu_inline(tctx *t, const sh_insn *d, int in_slot)
+{
+    emitter *e = &t->em;
+    sf_u32 op = d->op;
+    int n = (op >> 8) & 15, m = (op >> 4) & 15;
+    int kind, a, v, bf_fd, bf_sz = -1, bra_done, slow, done, skip;
+    if (!t->env->fpu_fr) return 0;
+    switch (op & 0xF0FFu) {
+    case 0x405A: kind = 1; break;                 /* lds rm,fpul */
+    case 0x406A: kind = 2; break;                 /* lds rm,fpscr */
+    case 0x005A: kind = 3; break;                 /* sts fpul,rn */
+    case 0x006A: kind = 4; break;                 /* sts fpscr,rn */
+    case 0xF08D: kind = 5; break;                 /* fldi0 frn */
+    case 0xF09D: kind = 6; break;                 /* fldi1 frn */
+    case 0xF00D: kind = 7; break;                 /* fsts fpul,frn */
+    case 0xF01D: kind = 8; break;                 /* flds frm,fpul */
+    default:
+        if ((op & 0xF00Fu) == 0xF00Cu) kind = 9;  /* fmov frm,frn */
+        else return 0;
+    }
+    if (t->blk->nspills + 6 > DBT_MAX_BLOCK_SPILLS) return 0;
+    a = pick_scratch(t, d->touched);
+    v = pick_scratch(t, d->touched | (a >= 0 ? R(a) : 0));
+    if (a < 0 || v < 0) return 0;
+    spill(t, a, SA(t)); spill(t, v, SB(t));
+    if (spill_t_save(t, v) < 0) return 0;
+    /* SR.FD (bit 15): set -> the helper raises the FPU-disable exception */
+    emit_mov_lit(e, a, 0x8000u, TAG_NONE);
+    emit16(e, OP_TST_RR(a, v));
+    bf_fd = emit_pos(e); emit16(e, OP_BF(0));
+    switch (kind) {
+    case 1: emit_mov_lit(e, a, t->env->fpu_fpul, TAG_NONE);  emit16(e, OP_MOVL_STORE(n, a)); break;   /* lds/sts name the register in bits 8-11 */
+    case 2: emit_mov_lit(e, v, 0x003FFFFFu, TAG_NONE);       /* FPSCR_MASK, as fpuemu's lds */
+            emit16(e, OP_AND_RR(n, v));
+            emit_mov_lit(e, a, t->env->fpu_fpscr, TAG_NONE); emit16(e, OP_MOVL_STORE(v, a)); break;
+    case 3: emit_mov_lit(e, a, t->env->fpu_fpul, TAG_NONE);  emit16(e, OP_MOVL_LOAD(a, n)); break;
+    case 4: emit_mov_lit(e, a, t->env->fpu_fpscr, TAG_NONE); emit16(e, OP_MOVL_LOAD(a, n)); break;
+    default:
+        /* the bank: FPSCR.FR (bit 21) adds 64 bytes; fmov also needs SZ (bit 20) clear */
+        emit_mov_lit(e, a, t->env->fpu_fpscr, TAG_NONE); emit16(e, OP_MOVL_LOAD(a, v));
+        if (kind == 9) {
+            emit_mov_lit(e, a, 0x00100000u, TAG_NONE); emit16(e, OP_TST_RR(a, v));
+            bf_sz = emit_pos(e); emit16(e, OP_BF(0));
+        }
+        emit_mov_lit(e, a, 0x00200000u, TAG_NONE); emit16(e, OP_TST_RR(a, v));   /* T = bank 0 */
+        switch (kind) {
+        case 5: case 6:                                                             /* fldi0/1 frn */
+            emit_mov_lit(e, a, t->env->fpu_fr + 4u * n, TAG_NONE);
+            skip = emit_pos(e); emit16(e, OP_BT(0)); emit16(e, OP_ADD_IMM(64, a));
+            emit_patch16(e, skip, OP_BT((emit_pos(e) - skip - 4) / 2));
+            if (kind == 5) emit16(e, OP_MOV_IMM(0, v)); else emit_mov_lit(e, v, 0x3F800000u, TAG_NONE);
+            emit16(e, OP_MOVL_STORE(v, a));
+            break;
+        case 7:                                                                     /* fsts fpul,frn */
+            emit_mov_lit(e, a, t->env->fpu_fr + 4u * n, TAG_NONE);
+            skip = emit_pos(e); emit16(e, OP_BT(0)); emit16(e, OP_ADD_IMM(64, a));
+            emit_patch16(e, skip, OP_BT((emit_pos(e) - skip - 4) / 2));
+            emit_mov_lit(e, v, t->env->fpu_fpul, TAG_NONE); emit16(e, OP_MOVL_LOAD(v, v));
+            emit16(e, OP_MOVL_STORE(v, a));
+            break;
+        case 8:                                                                     /* flds frm,fpul: the register is in bits 8-11 */
+            emit_mov_lit(e, a, t->env->fpu_fr + 4u * n, TAG_NONE);
+            skip = emit_pos(e); emit16(e, OP_BT(0)); emit16(e, OP_ADD_IMM(64, a));
+            emit_patch16(e, skip, OP_BT((emit_pos(e) - skip - 4) / 2));
+            emit16(e, OP_MOVL_LOAD(a, a));
+            emit_mov_lit(e, v, t->env->fpu_fpul, TAG_NONE); emit16(e, OP_MOVL_STORE(a, v));
+            break;
+        default:                                                                    /* fmov frm,frn, SZ = 0 */
+            emit_mov_lit(e, a, t->env->fpu_fr + 4u * m, TAG_NONE);
+            emit_mov_lit(e, v, t->env->fpu_fr + 4u * n, TAG_NONE);
+            skip = emit_pos(e); emit16(e, OP_BT(0)); emit16(e, OP_ADD_IMM(64, a)); emit16(e, OP_ADD_IMM(64, v));
+            emit_patch16(e, skip, OP_BT((emit_pos(e) - skip - 4) / 2));
+            emit16(e, OP_MOVL_LOAD(a, a)); emit16(e, OP_MOVL_STORE(a, v));
+            break;
+        }
+        break;
+    }
+    spill_t_restore(t, v);
+    restore(t, v, SB(t)); restore(t, a, SA(t));
+    bra_done = emit_pos(e); emit16(e, OP_BRA(0)); emit16(e, OP_NOP);
+    /* slow: everything as the helper expects, then the helper */
+    slow = emit_pos(e);
+    emit_patch16(e, bf_fd, OP_BF((slow - bf_fd - 4) / 2));
+    if (bf_sz >= 0) emit_patch16(e, bf_sz, OP_BF((slow - bf_sz - 4) / 2));
+    spill_reopen(t, a, SA(t)); spill_reopen(t, v, SB(t)); spill_reopen(t, DBT_SPILL_T, SC(t));
+    spill_t_restore(t, v);
+    restore(t, v, SB(t)); restore(t, a, SA(t));
+    call_helper(t, t->env->rt_fpu, 0, 2, d->op | (in_slot ? 0x10000u : 0), d->touched);
+    done = emit_pos(e);
+    emit_patch16(e, bra_done, OP_BRA((done - bra_done - 4) / 2));
+    return t->err == 0;
+}
+#endif
+
 /* ------------------------------------------------------------- dispatcher */
 
 static void tr_insn(tctx *t, const sh_insn *d, int in_slot)
@@ -1228,7 +1382,11 @@ static void tr_insn(tctx *t, const sh_insn *d, int in_slot)
         emit16(&t->em, d->op); break;
     case K_MEM:   tr_mem(t, d); break;
     case K_PCREL: tr_pcrel(t, d); break;
-    case K_FPU:   call_helper(t, t->env->rt_fpu, 0, 2, d->op | (in_slot ? 0x10000u : 0), d->touched); break;   /* bit 16: delay slot (FPU-disable raises 0x820 there) */
+    case K_FPU:
+#ifndef DBT_NO_FPU_INLINE
+        if (tr_fpu_inline(t, d, in_slot)) break;
+#endif
+        call_helper(t, t->env->rt_fpu, 0, 2, d->op | (in_slot ? 0x10000u : 0), d->touched); break;   /* bit 16: delay slot (FPU-disable raises 0x820 there) */
     case K_FALLBACK: call_helper(t, t->env->rt_fallback, 0, 2, d->op, d->touched); break;
     case K_PRIV:  tr_priv(t, d); break;
     case K_BRANCH: /* handled by caller */ break;
