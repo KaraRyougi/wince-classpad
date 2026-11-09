@@ -806,6 +806,9 @@ static void unchain(dbt_block *o, int k)
  * which the next lookup restores). Nothing outlives the batch, so bank
  * recycling and second chance need not know about it. */
 #define DBT_INVAL_PENDING 1
+#ifndef DBT_EAGER_DETACH
+#define DBT_LAZY_DETACH 1        /* -DDBT_EAGER_DETACH: detach after every kill, as before 2026-11-09 */
+#endif
 #define PEND_RANGES 4                  /* beyond this the 32-byte map: pend_dead runs for every IC and link target in the span */
 static sf_u32 g_pend_lo[PEND_RANGES], g_pend_len[PEND_RANGES];
 static unsigned g_npend, g_pend_over, g_pend_banks;
@@ -902,7 +905,20 @@ static void verify_sources(unsigned banks)
 #endif
 
 /* Make block b unreachable: hash entry, inline caches and chained jumps that
- * lead into it. Its cache memory stays dead until the next full flush. */
+ * lead into it. Its cache memory stays dead until the next full flush.
+ * DBT_LAZY_DETACH (default since 2026-11-09): the ICs and links are not
+ * detached here, only recorded (pend_add); the block's first 28 bytes
+ * become the sequence a block's exit stub uses to enter the plain lookup
+ * stub (X0 = the block's guest pc, X1 = 0, r1 through Y0, all guest
+ * registers intact), so a stale link, IC or hash entry that still leads
+ * into it costs one hash lookup and lands on the live translation. No
+ * exception is involved: a trap would reset the CPU when the guest runs
+ * with SR.BL set, as the kernel does during init. The two passes over all
+ * block headers (finish_invalidations) then run once per bank recycle and
+ * full flush, before dead memory is reused, instead of once per ldtlb or
+ * TLB flush that killed something (13% of the shell's boot). Blocks are
+ * allocated in 32-byte units, so the 28 bytes fit whatever the block's
+ * length (not with DBT_CODE_ALIGN4). */
 #ifdef DBT_INVAL_DIAG
 /* -DDBT_INVAL_DIAG: calls and blocks killed per origin (0 range, 1 all but ROM, 2 TLB, 3 revalidated user blocks) */
 static unsigned g_inval_origin;
@@ -947,6 +963,19 @@ static void invalidate_block(dbt_block *b)
 #endif
 #ifdef DBT_INVAL_PENDING
     pend_add(lo, hi, bank_mask);
+#ifdef DBT_LAZY_DETACH
+    {
+        volatile sf_u16 *c = (volatile sf_u16 *)lo;
+        volatile sf_u32 *l = (volatile sf_u32 *)(lo + 16);
+        l[0] = b->guest_pc; l[1] = 0; l[2] = g_env.rt_lookup;
+        c[1] = 0xD103; c[2] = 0x418A;          /* mov.l @(3,pc), r1 (= guest pc); lds r1, X0 */
+        c[3] = 0xD103; c[4] = 0x419A;          /* mov.l @(3,pc), r1 (= 0);        lds r1, X1 */
+        c[5] = 0xD103; c[6] = 0x412B;          /* mov.l @(3,pc), r1 (= lookup);   jmp @r1 */
+        c[7] = 0x01AA;                         /*   sts Y0, r1 (delay slot: r1 back) */
+        c[0] = 0x41AA;                         /* lds r1, Y0: written last, the entry is live until then */
+        dbt_sync_code(lo, 28);
+    }
+#endif
     (void)i; (void)k;
 #else
     {
@@ -1054,6 +1083,15 @@ static void finish_invalidations(void)
 #endif
 }
 
+/* After killing blocks: detach now, or (DBT_LAZY_DETACH) leave it to the
+ * next bank recycle or full flush; until then the dead entries redirect. */
+static void finish_or_defer(void)
+{
+#ifndef DBT_LAZY_DETACH
+    finish_invalidations();
+#endif
+}
+
 /* Drop every live block overlapping guest range [lo, hi); user_only skips P1-P3 code. */
 static void invalidate_range(sf_u32 lo, sf_u32 hi, int user_only)
 {
@@ -1097,7 +1135,7 @@ static void invalidate_range(sf_u32 lo, sf_u32 hi, int user_only)
         if (b->guest_pc < hi && b->guest_pc + b->guest_len > lo) invalidate_block(b);
     }
     INVAL_END(0);
-    finish_invalidations();
+    finish_or_defer();
 #ifdef DBT_BATCH_RANGES
     g_range_batch = 0;
 #endif
@@ -1193,7 +1231,7 @@ static void tlb_hook(void)
         }
     }
     INVAL_END(2);
-    finish_invalidations();
+    finish_or_defer();
     __asm__ volatile ("ldtlb" ::: "memory");
 }
 
@@ -1425,6 +1463,9 @@ static void cache_flush_all(void)
     sf_u32 cache_was = g_cache_used, arena_was = g_arena_used;
 #endif
     sf_u32 i, sr;
+#ifdef DBT_INVAL_PENDING
+    finish_invalidations();        /* pending ranges and the dead map must not outlive the cache they describe */
+#endif
     /* Interrupts land in the translator's C code and abandon it (the guest
      * resumes at the pc being translated). Clearing 8192 hash slots takes
      * about one tick, so an unmasked flush was restarted by every tick and
@@ -1795,6 +1836,9 @@ static unsigned keep_survivors(unsigned bank, unsigned count, sf_u32 *code, sf_u
 static void cache_next_bank(void)
 {
     sf_u32 sr, i, lo, hi;
+#ifdef DBT_INVAL_PENDING
+    finish_invalidations();        /* dead ranges must be detached before their memory is reused */
+#endif
 #ifdef DBT_KERNEL_BANKS
     unsigned stream = g_bank >= DBT_KERNEL_BANKS;
     unsigned bank = stream ? DBT_KERNEL_BANKS + (g_bank - DBT_KERNEL_BANKS + 1) % (CACHE_BANKS - DBT_KERNEL_BANKS)
@@ -2547,7 +2591,7 @@ static void invalidate_all_but_rom(void)
         invalidate_block(b);
     }
     INVAL_END(1);
-    finish_invalidations();
+    finish_or_defer();
 #ifdef DBT_BATCH_RANGES
     g_range_batch = 0;
 #endif
@@ -3909,7 +3953,7 @@ static int tlb_reval5(void)
         }
     }
     INVAL_END(3);
-    finish_invalidations();
+    finish_or_defer();
 #ifdef DBT_BATCH_RANGES
     g_range_batch = 0;
 #endif

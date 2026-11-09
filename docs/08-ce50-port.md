@@ -280,6 +280,26 @@ shell 阶段的翻译器剩余热点：`finish_invalidations` 13%（每批失效
 (pc, ASID) 的条目互相挤出，退到 C 的块表查找）、`dbt_translate_block` 7%
 （bank 回收 27 次/128 s 引起的重翻）、ldtlb 钩子 4%。
 
+**死块入口改成转发，摘链接推迟到 bank 回收（`DBT_LAZY_DETACH`，默认开，
+2026-11-09）。** 杀块时只记下死区间（原来的 pend_add），并把块开头 28 字节改写成
+块出口 stub 进入查找 stub 的那套序列（r1 存进 Y0，X0 = 块的 guest pc，X1 = 0，
+`jmp` 到 `dbt_lookup`，延迟槽里恢复 r1）；指向它的 IC、直接链接、哈希项都不动。
+谁跳进死块，就多付一次哈希查找落到活的翻译上。不能用 trap：guest 在 SR.BL=1
+下跑（内核初始化期间就有）时任何异常都会复位 CPU，第一版用 `trapa` 就是这样
+在 2.5 s 死掉的。两遍全表扫描（`finish_invalidations`）只在 bank 回收和整表
+清空前跑一次，因为那时死区间的内存要被重用。`-DDBT_EAGER_DETACH` 恢复旧行为。
+
+| | run18 | run22 |
+|---|---|---|
+| first idle | 13.6 s | 13.8 s |
+| 桌面首帧 | 30.1 s | 29.2 s |
+| Explorer 任务栏 | 38.2 s | 36.7 s |
+
+shell 阶段（16–45 s）翻译器 C 代码从 64% 降到 57%，`finish_invalidations`
+从榜首消失；剩下的是查找退到 C（`lookup_or_translate` 8%，哈希冲突）、翻译本身
+（`dbt_translate_block` 7% + `sh4_decode` 3% + `emit_flush_lits` 2%，bank 回收
+19 次/100 s）和查找 stub 本身（`_dbt_lki_ts` 7%，这是正常的快路径）。
+
 ## 九、还没做的
 
 - 在 VM 里构建（第一次构建会暴露 SDK 的差异：头文件、`WARNISERROR`）。
