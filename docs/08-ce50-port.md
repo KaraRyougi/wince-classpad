@@ -108,7 +108,93 @@ Frequency`、`curridlelow/high`、`idleconv`、`dwNKDrWatsonSize`。
   OAL 的热路径只有定时器 ISR 和中断胶水，可以接受。KDEV（shell-performance
   分支）要为 nk.exe 重做特征码后才能启用。
 
-## 七、还没做的
+## 七、第一次启动（2026-11-09，casio-emu fx-cp400 配置）
+
+VM 里 Sysgen + Build and Sysgen Current BSP + makeimg（两次 romimage）得到
+NK.bin 4.87 MB、EXT.bin 4.03 MB。`make -C dbt NK_WINDOW=eact NKBIN=… EXTBIN=…
+nkshot` 的时间线（墙钟，M5 Max）：
+
+| 翻译器 | POSTINIT | 显示驱动起 | 桌面首帧 | Explorer 任务栏 |
+|---|---|---|---|---|
+| 合并 shell-performance 前（4 MiB 缓存、14400 块头，无二次机会/ASID 哈希/FAST_HELPERS） | — | < 15 min | 约 20–25 min（按帧文件时间推算） | — |
+| 合并后（3.25 MiB、19200 块头、二次机会、ASID 哈希、FAST_HELPERS；KDEV/TLB_REFILL 对 nk.exe 自动关闭） | 3.4 s | 45 s | 111 s | 129 s |
+
+截图 `notes/ce/desktop-cp400-ce50.png`（notes/ce 下的图片按 .gitignore 不入库，
+与 CE 6.0 的截图一样只在本地）：Windows CE v5.00 Build 1400 的桌面，
+My Device / Recycle Bin / WordPad / My Documents，任务栏时钟和 SIP 图标。
+日志里内核签名、`CCR=0105`、EXT 区 31 模块 14 文件、三个驱动的启动行都在；
+桌面空闲 5 分钟后 Power Manager 按 platform.reg 的超时挂起，翻译器进入
+R-standby（`[dbt] R-standby`），属预期行为。CE 6.0 用合并前那代翻译器到桌面
+约 5 分钟，所以 CE 5.0 不比 6.0 慢；合并后的翻译器对两者都是数量级的改善，
+其中多少归功于 CE 5.0 更简单的地址空间模型，要用同一翻译器跑 CE 6.0 镜像才
+能分开。
+
+同一镜像的后续两轮（模拟触笔 `HLE_CB_TOUCHSEQ`）：
+
+- tick 2.0M 双击 My Device（35,40）：触摸驱动报 `down raw (862,501)`，Explorer
+  打开 My Device 窗口（`notes/ce/mydevice-cp400-ce50.png`）。
+- 点图标条的 Main（114,552）：`CLASSPAD TOUCH: Main released` →
+  `ROTATEKEY: Math Xpander started`（rotatekey 自己在 EXT 里）→ 36 s 后 Math
+  Xpander 的工作簿出现（`notes/ce/xpander-cp400-ce50.png`：Preferences、
+  Angular Units、Display Precision，底部 Pocket PC 命令栏和工具栏）。这一步
+  同时证明：EXT 区的 XIP 模块能加载和运行；**SH3 的 XIP 模块不需要 loader
+  补丁**（romimage 的 P 标志 + 内核对 ROM 模块不查 CPU 类型，VM 里还没打
+  ce50-loader-sh3-images.patch），补丁只有把 SH3 程序当普通文件装进来时才
+  需要；mfcce300 + DocList + SH3CRT 的导入链在 CE 5.0 下解析并运行。
+
+还没验证：SH3CRT 的浮点结果（数学键盘点按）、开始菜单和 Plotter-Z、键盘、
+真机。
+
+## 八、KDEV 与 TLB_REFILL 的 CE 5.0 版本（2026-11-09）
+
+`claude/shell-performance-issue-6298c3` 的两项优化绑定 CE 6.0 的内核二进制，
+合并进来后对 nk.exe 自动关闭（docs/04）。为 CE 5.0 重做：
+
+- **KDEV**：`tools/kernel_devfuncs.py` 现在在模块表里没有 kernel.dll 时取
+  nk.exe，规则不变（0xFF 开头的字面量、banked 寄存器、`mov #-1` 移位、异常向量
+  区），`--table kdev_funcs50 -o dbt/rt/kernel_dev50.h` 从 kern.exe 的
+  NK.bin + kern.map 生成第二张表：25 个函数，5384 字节（nk.exe .text 共
+  204 KB），其中 TLBMissHandler、APICall、InterruptExceptionHandler、
+  SetCPUASID、LoadKPage、SH3Init、DoSetRAMMode、DumpFrame 是真正碰 P4 的内核
+  函数，`_OEMCacheRangeFlush` 是 OAL 的 MMUCR.TI 写（`P4_*` 宏），其余几个
+  （`__stod`、`___SH3Raise`、`_SC_CreateThread`、`_Rtlp*`）是规则的保守命中，
+  多付几条指令无害。`rt/kdev.c` 两张表都编进去，`kdev_locate(..., is_nk)` 按
+  `nkbin.c` 判出的内核模块选表；找不到或有歧义仍退回整模块设备感知。
+- **TLB_REFILL**：`rt.c` 增加 `tlbr5_code`（CE 5.0 `TLBMissHandler` 从第一条
+  指令到 `rte` 的 46 个字，无 fixup，只有一个 `mov.w` 字面量 BLOCK_MASK=0x1FF，
+  一并核对）和 `tlb_refill5`：TEA ≥ 2 GiB 交回 guest；TTB → `SectionTable
+  [TEA>>25]` → `SECTION[(TEA>>16)&0x1FF]` → MEMBLOCK（必须是内核指针，
+  NULL_BLOCK/RESERVED_BLOCK 交回）→ `aPages[(TEA>>12)&15]`，bit 0（WT 位，
+  内核用作 valid）为 1；访问锁 `MEMBLOCK.alk` 与当前线程的 `aky`
+  （`pCurThread`=r4_bank1，`ctx->b1[4]`，+0x14）要有公共位，否则交回 guest
+  走 tlb50 的访问违例；然后 PTEA=(entry>>29)|((entry>>9)&1)<<3、
+  PTEL=entry&~1，`ldtlb`，出错的宿主指令重跑。CE 6.0 的路径不变，
+  `tlbr_check` 先比对 6.0 的字节，不符再比对 5.0 的。
+
+验证：`make KDEV=0 TLB_REFILL=0 EXTRA_CFLAGS="-DDBT_DEV_SITES
+-DDBT_STATS_EVERY=20000"` 跑一次启动加 My Device 双击，收集到 14 个
+`[devsite]`（TLBMissHandler+0x4e/0x50 各 43k 次、_SetCPUASID+0x52 23k、
+GeneralException+0x138 12k、_OEMCacheRangeFlush+0xda 98、_LoadKPage 与
+_SH3Init 各 1），`kernel_devfuncs.py … --table kdev_funcs50 --check NK.bin
+sites.txt`：25 个函数全部定位到，14 个访问点全在其中。
+
+结果（同一镜像、同一双击，墙钟）：
+
+| | KDEV/TLB_REFILL 关 | 开（CE 5.0 表 + 回填） |
+|---|---|---|
+| first idle / 显示驱动 | 45 s | 32 s |
+| 桌面首帧 | 112 s | 73 s |
+| Explorer 任务栏 | 129 s | 84 s |
+| tlb_refills（到 131 s） | — | 24,914 |
+
+启动日志里 `[kdev] device-aware nk.exe ranges: …`（9 段）和 `[dbt] TLB
+refill in the translator: CE 5.0 handler (SectionTable walk)` 确认两者生效；
+My Device 照常打开。代价是启动时按特征码扫描 nk.exe 的 .text：在 casio-emu 里
+5.6 s，加了首字预过滤（`kdev.c`，原始首字不在表里的位置直接跳过）后 3.8 s，
+剩下的是模拟器逐字节读 NOR 的开销，真机上应是几十毫秒量级；POSTINIT 因此从
+3.4 s 变成 7.3 s，但后面全部赚回来。
+
+## 九、还没做的
 
 - 在 VM 里构建（第一次构建会暴露 SDK 的差异：头文件、`WARNISERROR`）。
 - `tools/windows/claude-build` 的 CE 5.0 版本（现在是 C:\WINCE600 的路径和

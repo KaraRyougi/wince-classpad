@@ -1,5 +1,10 @@
 /*
- * kdev.c - which parts of kernel.dll need the device-aware translation.
+ * kdev.c - which parts of the kernel module need the device-aware translation.
+ *
+ * CE 6.0: kernel.dll (rt/kernel_dev.h). CE 5.0: nk.exe, kernel and OAL in one
+ * module (rt/kernel_dev50.h, generated from the CE 5.0 kern.exe/kern.map with
+ * the same script; the OAL's OEMCacheRangeFlush is among its functions). The
+ * caller says which from the module table (nkbin.c kernel_is_nk).
  *
  * Every 32-bit kernel.dll access used to test its address for P4 at run
  * time (translate.c tr_mem_dev), about 2-2.5 s of a 26 s My Device load,
@@ -22,7 +27,11 @@
 typedef __SIZE_TYPE__ kdev_size_t;
 void *memset(void *d, int c, kdev_size_t n);
 
-#include "kernel_dev.h"
+#include "kernel_dev.h"          /* CE 6.0 kernel.dll: kdev_funcs[KDEV_FUNCS] */
+#include "kernel_dev50.h"        /* CE 5.0 nk.exe (kernel + OAL): kdev_funcs50[KDEV_FUNCS50] */
+
+/* both generated tables have this layout */
+typedef struct { sf_u16 w[4]; sf_u32 len, crc; } kdev_func_t;
 
 #define KDEV_MAX_WORDS 2048          /* the generator refuses longer functions */
 
@@ -34,6 +43,7 @@ static unsigned rd16(sf_u32 a)           /* guest halfword (little-endian), any 
 
 static sf_u16 g_raw[KDEV_MAX_WORDS], g_out[KDEV_MAX_WORDS];
 static sf_u8 g_lit[KDEV_MAX_WORDS];
+static sf_u8 g_w0set[65536 / 8];       /* first words of the table being searched */
 
 /* n words at base, masked as for a function [lo, hi), into g_out */
 static void kmask(sf_u32 base, unsigned n, sf_u32 lo, sf_u32 hi)
@@ -79,32 +89,50 @@ static sf_u32 crc32_words(unsigned n)      /* zlib CRC-32 of g_out as big-endian
     return ~crc;
 }
 
-unsigned kdev_locate(sf_u32 text, sf_u32 len, sf_u32 *ranges, unsigned max)
+unsigned kdev_locate(sf_u32 text, sf_u32 len, sf_u32 *ranges, unsigned max, int is_nk)
 {
-    sf_u32 at[KDEV_FUNCS], pos, end = text + len;
-    unsigned hits[KDEV_FUNCS], f, n = 0, i;
-    if (max < KDEV_FUNCS) return 0;
-    for (f = 0; f < KDEV_FUNCS; ++f) hits[f] = 0;
+    const kdev_func_t *tab = is_nk ? (const kdev_func_t *)kdev_funcs50 : (const kdev_func_t *)kdev_funcs;
+    const unsigned nf = is_nk ? KDEV_FUNCS50 : KDEV_FUNCS;
+    const char *mod = is_nk ? "nk.exe" : "kernel.dll";
+    sf_u32 at[KDEV_MAX_RANGES], pos, end = text + len;
+    unsigned hits[KDEV_MAX_RANGES], f, n = 0, i, any_zero = 0, any_br = 0;
+    if (max < nf || nf > KDEV_MAX_RANGES) return 0;
+    /* Cheap pre-filter on the raw first word (the 4-word masking took 7 s of
+     * a CE 5.0 boot when done at every position): masked word 0 is the raw
+     * word, or 0 for an aligned P1/P2 address pair (a literal inside the
+     * window can only mask words 1-3), or the bare bra/bsr opcode. */
+    memset(g_w0set, 0, sizeof g_w0set);
+    for (f = 0; f < nf; ++f) {
+        unsigned w0 = tab[f].w[0];
+        hits[f] = 0;
+        g_w0set[w0 >> 3] |= (sf_u8)(1u << (w0 & 7));
+        if (w0 == 0) any_zero = 1;
+        if (w0 == 0xA000 || w0 == 0xB000) any_br = 1;
+    }
     for (pos = text; pos + 8 <= end; pos += 2) {
         sf_u16 m0, m1, m2, m3;
+        unsigned raw0 = rd16(pos), cand = (g_w0set[raw0 >> 3] >> (raw0 & 7)) & 1;
+        if (!cand && any_zero && !(pos & 3)) { unsigned raw1 = rd16(pos + 2); cand = raw1 >= 0x8000 && raw1 < 0xC000; }
+        if (!cand && any_br && ((raw0 >> 12) == 0xA || (raw0 >> 12) == 0xB)) cand = (g_w0set[(raw0 & 0xF000) >> 3] >> ((raw0 & 0xF000) & 7)) & 1;
+        if (!cand) continue;
         kmask(pos, 4, pos, pos);
         m0 = g_out[0]; m1 = g_out[1]; m2 = g_out[2]; m3 = g_out[3];
-        for (f = 0; f < KDEV_FUNCS; ++f) {
-            if (kdev_funcs[f].w[0] != m0 || kdev_funcs[f].w[1] != m1 || kdev_funcs[f].w[2] != m2 ||
-                kdev_funcs[f].w[3] != m3 || pos + kdev_funcs[f].len > end) continue;
-            kmask(pos, kdev_funcs[f].len / 2, pos, pos + kdev_funcs[f].len);
-            if (crc32_words(kdev_funcs[f].len / 2) == kdev_funcs[f].crc) { ++hits[f]; at[f] = pos; }
+        for (f = 0; f < nf; ++f) {
+            if (tab[f].w[0] != m0 || tab[f].w[1] != m1 || tab[f].w[2] != m2 ||
+                tab[f].w[3] != m3 || pos + tab[f].len > end) continue;
+            kmask(pos, tab[f].len / 2, pos, pos + tab[f].len);
+            if (crc32_words(tab[f].len / 2) == tab[f].crc) { ++hits[f]; at[f] = pos; }
         }
     }
-    for (f = 0; f < KDEV_FUNCS; ++f)
+    for (f = 0; f < nf; ++f)
         if (hits[f] != 1) {
-            dbt_puts("[kdev] kernel function "); dbt_puthex(f); dbt_puts(" found "); dbt_puthex(hits[f]);
-            dbt_puts(" times: the whole kernel.dll stays device-aware\n");
+            dbt_puts("[kdev] "); dbt_puts(mod); dbt_puts(" function "); dbt_puthex(f); dbt_puts(" found "); dbt_puthex(hits[f]);
+            dbt_puts(" times: the whole module stays device-aware\n");
             return 0;
         }
     /* sorted, P1/P2 folded like the translator's test, adjacent ones merged */
-    for (f = 0; f < KDEV_FUNCS; ++f) {
-        sf_u32 lo = at[f] & 0x1FFFFFFFu, hi = lo + kdev_funcs[f].len;
+    for (f = 0; f < nf; ++f) {
+        sf_u32 lo = at[f] & 0x1FFFFFFFu, hi = lo + tab[f].len;
         for (i = n; i > 0 && ranges[2 * (i - 1)] > lo; --i) {
             ranges[2 * i] = ranges[2 * (i - 1)]; ranges[2 * i + 1] = ranges[2 * (i - 1) + 1];
         }

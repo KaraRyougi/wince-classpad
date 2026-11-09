@@ -118,17 +118,16 @@ void dbt_main(void)
     cfg.dev_lo = info.kernel_lo; cfg.dev_hi = info.kernel_hi;      /* the kernel (kernel.dll, or CE 5.0's nk.exe) reaches the CCN registers directly */
     cfg.dev_ranges = 0; cfg.ndev_ranges = 0;
 #ifdef DBT_KDEV
-    /* ...but only in a few of its functions (rt/kdev.c). The signatures are
-     * CE 6.0 kernel.dll's: a CE 5.0 nk.exe (kernel + OAL) stays device-aware
-     * as a whole, which its OAL relies on for its P4 accesses. */
-    if (info.kernel_is_nk) dbt_puts("[kdev] nk.exe is the kernel: the whole module stays device-aware\n");
-    else if (info.kernel_text_len) {
+    /* ...but only in a few of its functions (rt/kdev.c): kernel.dll's table
+     * for CE 6.0, nk.exe's for CE 5.0 (kernel + OAL; the OAL's P4 accesses,
+     * OEMCacheRangeFlush, are in that table) */
+    if (info.kernel_text_len) {
         static sf_u32 ranges[2 * KDEV_MAX_RANGES];
-        cfg.ndev_ranges = kdev_locate(info.kernel_text, info.kernel_text_len, ranges, KDEV_MAX_RANGES);
+        cfg.ndev_ranges = kdev_locate(info.kernel_text, info.kernel_text_len, ranges, KDEV_MAX_RANGES, (int)info.kernel_is_nk);
         if (cfg.ndev_ranges) {
             cfg.dev_ranges = ranges;
             unsigned i;
-            dbt_puts("[kdev] device-aware kernel.dll ranges:");
+            dbt_puts(info.kernel_is_nk ? "[kdev] device-aware nk.exe ranges:" : "[kdev] device-aware kernel.dll ranges:");
             for (i = 0; i < cfg.ndev_ranges; ++i) { dbt_puts(" "); dbt_puthex(ranges[2 * i]); dbt_puts("-"); dbt_puthex(ranges[2 * i + 1]); }
             dbt_puts("\n");
         }

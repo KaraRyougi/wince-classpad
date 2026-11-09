@@ -124,10 +124,13 @@ HOST_CFLAGS  += $(if $(filter 1,$(DEVICE)),-DDBT_NO_DEBUG_PORT -DDBT_IRQPIN_GUAR
 LAZY_META     ?= 0
 SECOND_CHANCE ?= 1
 HOST_CFLAGS  += $(if $(filter 1,$(LAZY_META)),-DDBT_LAZY_META,) $(if $(filter 1,$(SECOND_CHANCE)),-DDBT_SECOND_CHANCE,)
-# KDEV=1: only the kernel.dll functions listed in rt/kernel_dev.h (found by
-# signature at boot, rt/kdev.c) get the device-aware P4 test; the rest of
-# kernel.dll is translated like any other code. Regenerate the list with
-# tools/kernel_devfuncs.py NK.bin kern.map -o rt/kernel_dev.h.
+# KDEV=1: only the kernel functions listed in rt/kernel_dev.h (CE 6.0
+# kernel.dll) or rt/kernel_dev50.h (CE 5.0 nk.exe = kernel + OAL), found by
+# signature at boot (rt/kdev.c), get the device-aware P4 test; the rest of
+# the kernel module is translated like any other code. Regenerate the lists
+# with tools/kernel_devfuncs.py NK.bin kern.map -o rt/kernel_dev.h (CE 6.0:
+# kern.dll's map) and ... --table kdev_funcs50 -o rt/kernel_dev50.h (CE 5.0:
+# kern.exe's map).
 KDEV          ?= 1
 HOST_CFLAGS  += $(if $(filter 1,$(KDEV)),-DDBT_KDEV,)
 # HASH_TAG=1: lookup hash entries carry their ASID and user keys mix the ASID
@@ -139,9 +142,10 @@ HOST_CFLAGS  += $(if $(filter 1,$(KDEV)),-DDBT_KDEV,)
 HASH_TAG      ?= 1
 HASH_ENTRIES  ?= 32768
 # TLB_REFILL=1: UTLB misses in translated code are refilled by the translator
-# with CE6's own page-table walk (rt.c tlb_refill) instead of an exception
-# round trip into the guest's TLBMissHandler; only while VBR + 0x400 holds
-# exactly that handler.
+# with the kernel's own page-table walk (rt.c tlb_refill: CE 6.0's page
+# directories, or CE 5.0's SectionTable/MEMBLOCK walk) instead of an
+# exception round trip into the guest's TLBMissHandler; only while VBR +
+# 0x400 holds exactly one of those two handlers.
 TLB_REFILL    ?= 1
 HOST_CFLAGS  += $(if $(filter 1,$(TLB_REFILL)),-DDBT_TLB_REFILL,)
 # FAST_HELPERS=1: common helper calls without C. Control-register loads run
@@ -235,7 +239,7 @@ $(BUILD)/extrom-test.bin: guest/extrom.txt guest/extrom-data.txt ../tools/mkextr
 
 # --- translator image (big-endian) ---
 # image files are named after the guest so that switching GUEST= relinks
-$(IMG).elf: $(RT_SRC) $(wildcard src/*.h) rt/guest_blob.S rt/image.ld rt/rt.h rt/nkbin.h rt/kdev.h rt/kernel_dev.h rt/ctx_offsets.h rt/lcdcon.h rt/lcdfont.h $(BUILD)/$(GUEST).bin $(LAYOUT_STAMP)
+$(IMG).elf: $(RT_SRC) $(wildcard src/*.h) rt/guest_blob.S rt/image.ld rt/rt.h rt/nkbin.h rt/kdev.h rt/kernel_dev.h rt/kernel_dev50.h rt/ctx_offsets.h rt/lcdcon.h rt/lcdfont.h $(BUILD)/$(GUEST).bin $(LAYOUT_STAMP)
 	$(CC) $(HOST_CFLAGS) $(LAYOUT_LD) -DGUEST='"$(BUILD)/$(GUEST).bin"' -T rt/image.ld -o $@ $(RT_SRC) rt/guest_blob.S -lgcc
 
 $(IMG).bin: $(IMG).elf

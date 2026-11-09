@@ -3495,8 +3495,9 @@ int dbt_exc_c(dbt_gctx *ctx)
 }
 
 #ifdef DBT_TLB_REFILL
-/* CE6's SH TLB refill (shexcept.src TLBMissHandler, at VBR + 0x400) done
- * here instead of in translated guest code. Delivering a UTLB miss to the
+/* The CE kernel's SH TLB refill (shexcept.src TLBMissHandler, at VBR +
+ * 0x400) done here instead of in translated guest code; CE 6.0's walk first,
+ * CE 5.0's (tlbr5_code, tlb_refill5) below. Delivering a UTLB miss to the
  * guest cost an exception round trip, the handler's control-register
  * accesses through the C fallback (TEA, TTB, EXPEVT, PTEA, PTEL), an ldtlb
  * and an rte in C: ~32k times per My Device load. The walk below is the
@@ -3522,10 +3523,39 @@ static const sf_u16 tlbr_code[57] = {          /* TLBMissHandler up to its bra T
     0x8900, 0x7108, 0x171d, 0x1701, 0x0038, 0x0009, 0x0009, 0x002b,
     0x0009
 };
+/* CE 5.0's handler (PRIVATE\WINCEOS\COREOS\NK\KERNEL\SH\shexcept.src, SH4,
+ * no NKPROF), from its first instruction to its rte: TEA, TTB -> SectionTable
+ * [TEA >> 25] -> SECTION[(TEA >> 16) & 0x1FF] -> MEMBLOCK (a kernel pointer;
+ * NULL_BLOCK 0 and RESERVED_BLOCK 1 are "unmapped") -> aPages[(TEA >> 12) &
+ * 15]: an entry whose bit 0 (the WT bit, used as "valid") is set, allowed to
+ * the current thread when its access key (pCurThread->aky, r4_bank1 + 0x14)
+ * shares a bit with the block's lock (MEMBLOCK + 0). Then PTEA from bits 9
+ * and 29-31, PTEL = entry & ~1, ldtlb, rte. Its one PC-relative literal is
+ * BLOCK_MASK (0x1FF, mov.w); it has no fixups, so the words are compared as
+ * they are. Anything the handler would refuse (addresses >= 2 GiB, an
+ * unmapped block, an invalid entry, an access-key mismatch: the exception
+ * paths tlb50/55/60) is left to the guest. */
+static const sf_u16 tlbr5_code[46] = {
+    0x5173, 0x5072, 0x4111, 0x8b3b, 0x4119, 0x6213, 0x4129, 0x4101,
+    0x4108, 0x001e, 0x6123, 0x932e, 0x4119, 0x2139, 0x4108, 0x011e,
+    0x5345, 0x4111, 0x8d53, 0x6023, 0x4009, 0xc93c, 0x700c, 0x5210,
+    0x001e, 0xc801, 0x894b, 0x2328, 0x8910, 0x6103, 0x70ff, 0xe3f7,
+    0x413d, 0xe301, 0x2138, 0xe3ec, 0x413d, 0x8900, 0x7108, 0x171d,
+    0x1701, 0x0038, 0x0009, 0x0009, 0x002b, 0x0009
+};
 static sf_u32 g_tlbr_vbr = 1, g_tlbr_heap, g_tlbr_nkprc;    /* VBR last checked (1: none), literals */
-static int g_tlbr_ok;
+static int g_tlbr_ok;                                        /* 0 none, 6 CE 6.0's handler, 5 CE 5.0's */
 static int p12_word(sf_u32 a) { return a >= 0x80000000u && a < 0xC0000000u && !(a & 3); }
 static sf_u32 rd32le(sf_u32 a) { return bswap32(*(volatile sf_u32 *)a); }
+static int tlbr5_check(sf_u32 h)
+{
+    unsigned i;
+    for (i = 0; i < sizeof tlbr5_code / sizeof tlbr5_code[0]; ++i)
+        if (bswap16(*(volatile sf_u16 *)(h + 2 * i)) != tlbr5_code[i]) return 0;
+    if (bswap16(*(volatile sf_u16 *)(h + 0x16 + 4 + 2 * (tlbr5_code[0x16 / 2] & 0xFF))) != 0x01FF) return 0;   /* BLOCK_MASK */
+    dbt_puts("[dbt] TLB refill in the translator: CE 5.0 handler (SectionTable walk)\n");
+    return 5;
+}
 static void tlbr_check(sf_u32 vbr)
 {
     sf_u32 h = vbr + 0x400, a;
@@ -3533,24 +3563,60 @@ static void tlbr_check(sf_u32 vbr)
     g_tlbr_vbr = vbr; g_tlbr_ok = 0;
     if (!p12_word(h) || !p12_word(h + 0x200)) return;
     for (i = 0; i < sizeof tlbr_code / sizeof tlbr_code[0]; ++i)
-        if (bswap16(*(volatile sf_u16 *)(h + 2 * i)) != tlbr_code[i]) return;
+        if (bswap16(*(volatile sf_u16 *)(h + 2 * i)) != tlbr_code[i]) { g_tlbr_ok = tlbr5_check(h); return; }
     a = ((h + 0x06 + 4) & ~3u) + 4 * (tlbr_code[0x06 / 2] & 0xFF); g_tlbr_heap = rd32le(a);   /* VM_SHARED_HEAP_BASE */
     a = ((h + 0x24 + 4) & ~3u) + 4 * (tlbr_code[0x24 / 2] & 0xFF); g_tlbr_nkprc = rd32le(a);  /* &g_pprcNK */
     if (bswap16(*(volatile sf_u16 *)(h + 0x2A + 4 + 2 * (tlbr_code[0x2A / 2] & 0xFF))) != 0x0FFC ||
         bswap16(*(volatile sf_u16 *)(h + 0x48 + 4 + 2 * (tlbr_code[0x48 / 2] & 0xFF))) != 0x0100 ||
         !p12_word(g_tlbr_nkprc)) return;
-    g_tlbr_ok = 1;
-    dbt_puts("[dbt] TLB refill in the translator: shared heap "); dbt_puthex(g_tlbr_heap);
+    g_tlbr_ok = 6;
+    dbt_puts("[dbt] TLB refill in the translator: CE 6.0 handler, shared heap "); dbt_puthex(g_tlbr_heap);
     dbt_puts(", g_pprcNK at "); dbt_puthex(g_tlbr_nkprc); dbt_puts("\n");
+}
+/* the new entry must leave the faulting block alive (it runs again) */
+static int tlbr_load(const dbt_gctx *ctx, sf_u32 pte)
+{
+    static const sf_u8 shift_of_sz[4] = { 10, 12, 16, 20 };
+    sf_u32 pteh, sz, pmask, vpn;
+    dbt_block *b = block_of_host(ctx->host_spc);
+    if (!b) return 0;
+    pteh = REG_PTEH;
+    sz = ((pte >> 4) & 1) | ((pte >> 6) & 2); pmask = ~((1u << shift_of_sz[sz]) - 1);
+    vpn = pteh & 0xFFFFFC00u & pmask;
+    if (tlb_drops_block((unsigned)(b - g_blocks), vpn, pmask, pte, pteh & 0xFF, (pte >> 1) & 1)) return 0;
+    REG_PTEA = (pte >> 29) | (((pte >> 9) & 1) << 3);
+    REG_PTEL = pte;
+    tlb_hook();                                          /* ASID, stale blocks, ldtlb */
+    return 1;
+}
+static int tlb_refill5(const dbt_gctx *ctx)
+{
+    sf_u32 tea = ctx->tea, ttb, sect, blk, entry, a, th;
+    if (tea & 0x80000000u) return 0;                     /* tlb55: the guest's error path */
+    ttb = REG_TTB;
+    a = ttb + ((tea >> 25) << 2);
+    if (!p12_word(ttb) || !p12_word(a)) return 0;
+    sect = rd32le(a);                                    /* SectionTable[tea >> 25] */
+    a = sect + (((tea >> 16) & 0x1FFu) << 2);
+    if (!p12_word(sect) || !p12_word(a)) return 0;
+    blk = rd32le(a);                                     /* MEMBLOCK *, or NULL_BLOCK / RESERVED_BLOCK */
+    if (!(blk & 0x80000000u)) return 0;                  /* tlb60 */
+    a = blk + 12 + ((tea >> 12) & 15) * 4;               /* aPages[page] */
+    if (!p12_word(blk) || !p12_word(a)) return 0;
+    entry = rd32le(a);
+    if (!(entry & 1)) return 0;                          /* not valid: tlb60 */
+    th = ctx->b1[4];                                     /* pCurThread: r4_bank1 (bank_normalize ran) */
+    if (!p12_word(th) || !p12_word(th + 0x14)) return 0;
+    if (!(rd32le(blk) & rd32le(th + 0x14))) return 0;    /* access lock vs the thread's key: tlb50 */
+    return tlbr_load(ctx, entry & ~1u);
 }
 static int tlb_refill(const dbt_gctx *ctx)
 {
-    static const sf_u8 shift_of_sz[4] = { 10, 12, 16, 20 };
-    sf_u32 tea = ctx->tea, mask = 0xFFFFFFFFu, dir, pde, pte, a, pteh, sz, pmask, vpn;
-    dbt_block *b;
+    sf_u32 tea = ctx->tea, mask = 0xFFFFFFFFu, dir, pde, pte, a;
     if (dbt_shadow_vbr != g_tlbr_vbr) tlbr_check(dbt_shadow_vbr);
     if (!g_tlbr_ok || ctx->host_spc - g_cfg.cache_base >= g_cfg.cache_size) return 0;
     if (ctx->expevt != 0x040 && ctx->expevt != 0x060) return 0;
+    if (g_tlbr_ok == 5) return tlb_refill5(ctx);
     dir = REG_TTB;
     if (tea >= g_tlbr_heap) {
         if (!(dbt_shadow_md & SR_MD)) {                  /* user mode: shared heap, reads only */
@@ -3568,18 +3634,7 @@ static int tlb_refill(const dbt_gctx *ctx)
     if (!p12_word(pde) || !p12_word(a)) return 0;     /* a page table outside P1/P2 is the guest's business */
     pte = rd32le(a);
     if (!(pte & 0x100)) return 0;
-    pte &= mask;
-    /* the block that faulted must survive the new entry (it runs again) */
-    b = block_of_host(ctx->host_spc);
-    if (!b) return 0;
-    pteh = REG_PTEH;
-    sz = ((pte >> 4) & 1) | ((pte >> 6) & 2); pmask = ~((1u << shift_of_sz[sz]) - 1);
-    vpn = pteh & 0xFFFFFC00u & pmask;
-    if (tlb_drops_block((unsigned)(b - g_blocks), vpn, pmask, pte, pteh & 0xFF, (pte >> 1) & 1)) return 0;
-    REG_PTEA = (pte >> 29) | (((pte >> 9) & 1) << 3);
-    REG_PTEL = pte;
-    tlb_hook();                                          /* ASID, stale blocks, ldtlb */
-    return 1;
+    return tlbr_load(ctx, pte & mask);
 }
 #endif
 
