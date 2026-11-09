@@ -5,18 +5,6 @@ void emit_init(emitter *e, sf_u16 *buf, int cap)
     e->buf = buf; e->cap = cap; e->len = 0; e->overflow = 0; e->nlits = 0;
 }
 
-void emit16(emitter *e, sf_u32 op)
-{
-    if (e->len >= e->cap) { e->overflow = 1; return; }
-    e->buf[e->len++] = (sf_u16)op;
-}
-
-int emit_pos(const emitter *e) { return e->len * 2; }
-
-void emit_patch16(emitter *e, int byte_off, sf_u32 op)
-{
-    if (byte_off / 2 < e->cap) e->buf[byte_off / 2] = (sf_u16)op;
-}
 
 int emit_mov_lit(emitter *e, int rn, sf_u32 value, int tag)
 {
@@ -37,7 +25,6 @@ void emit_mov_imm(emitter *e, int rn, sf_u32 value)
     else emit_mov_lit(e, rn, value, -1);
 }
 
-int emit_lits_bytes(const emitter *e) { return e->nlits * 4 + 2; }
 
 int emit_flush_lits(emitter *e)
 {
@@ -84,8 +71,3 @@ int emit_lit_offset(const emitter *e, int tag)
     return -1;
 }
 
-/* lds Rm,{A0,X0,X1,Y0,Y1} = 0100mmmm 0111/1000/1001/1010/1011 1010 */
-static const sf_u32 slot_code[SLOT_COUNT] = { 0x7, 0x8, 0x9, 0xA, 0xB };
-
-sf_u32 op_lds_slot(int rm, int slot) { return 0x400Au | ((sf_u32)rm << 8) | (slot_code[slot] << 4); }
-sf_u32 op_sts_slot(int slot, int rn) { return 0x000Au | ((sf_u32)rn << 8) | (slot_code[slot] << 4); }

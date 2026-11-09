@@ -687,6 +687,20 @@ int main(void)
             expect("dev slow path calls the fallback helper", found);
 #endif
         }
+        {
+            /* rt/kdev.c narrows the device-aware range to listed functions:
+             * outside every listed pair the access is a plain one, inside
+             * one it keeps the test */
+            static const sf_u32 outside[] = { (GBASE & 0x1FFFFFFFu) + 0x100, (GBASE & 0x1FFFFFFFu) + 0x200 };
+            static const sf_u32 inside[] = { (GBASE & 0x1FFFFFFFu) - 0x10, (GBASE & 0x1FFFFFFFu) + 0x10,
+                                             (GBASE & 0x1FFFFFFFu) + 0x100, (GBASE & 0x1FFFFFFFu) + 0x200 };
+            env.dev_ranges = outside; env.ndev_ranges = 1;
+            expect("listed ranges: access outside them is plain", translate(ops, 1, 0) == DBT_OK && blk.code_len < 22);
+            env.dev_ranges = inside; env.ndev_ranges = 2;
+            expect("listed ranges: access inside one keeps the test",
+                   translate(ops, 1, 0) == DBT_OK && blk.code_len >= 22 && hbuf[0] == exp[0] && hbuf[prefix - 1] == exp[prefix - 1]);
+            env.dev_ranges = 0; env.ndev_ranges = 0;
+        }
         env.dev_lo = env.dev_hi = 0;
         expect("plain load again without the range", translate(ops, 1, 0) == DBT_OK && blk.code_len < 22);
     }

@@ -34,7 +34,7 @@ static void parse_rom(sf_u32 start, sf_u32 lo, sf_u32 hi, nkbin_info *out)
                 sf_u32 i, toc = out->romhdr + 84;
                 static const char kname[] = "kernel.dll";
                 static const char nkname[] = "nk.exe";
-                sf_u32 nk_lo = 0, nk_hi = 0;
+                sf_u32 nk_lo = 0, nk_hi = 0, nk_text = 0, nk_text_len = 0;
                 for (i = 0; i < out->nummods && i < 256 && toc + 32 <= hi; i++, toc += 32) {
                     const sf_u8 *te = (const sf_u8 *)toc;
                     sf_u32 name = le32(te + 16), e32 = le32(te + 20), load = le32(te + 28), k, is_nk, is_kdll;
@@ -50,17 +50,18 @@ static void parse_rom(sf_u32 start, sf_u32 lo, sf_u32 hi, nkbin_info *out)
                          * IMAGE_SCN_CNT_CODE 0x20): ROMIMAGE places them
                          * anywhere, a Release kernel.dll's text starts below
                          * its load address. Fallback: load .. load+e32_vsize */
-                        sf_u32 o32 = le32(te + 24), nobj = le16((const sf_u8 *)e32), j, clo = 0xFFFFFFFF, chi = 0;
+                        sf_u32 o32 = le32(te + 24), nobj = le16((const sf_u8 *)e32), j, clo = 0xFFFFFFFF, chi = 0, tlo = 0, tlen = 0;
                         for (j = 0; j < nobj && j < 32 && o32 >= lo && o32 + 24 <= hi; j++, o32 += 24) {
                             const sf_u8 *o = (const sf_u8 *)o32;
                             sf_u32 vsize = le32(o), real = le32(o + 16), flags = le32(o + 20);
                             if (!(flags & 0x20) || !vsize) continue;
+                            if (vsize > tlen) { tlo = real; tlen = vsize; }      /* the largest code section: .text */
                             if (real < clo) clo = real;
                             if (real + vsize > chi) chi = real + vsize;
                         }
                         if (!chi) { clo = load; chi = load + le32((const sf_u8 *)e32 + 20); }
-                        if (is_kdll) { out->kernel_lo = clo; out->kernel_hi = chi; out->kernel_is_nk = 0; }
-                        else { nk_lo = clo; nk_hi = chi; }
+                        if (is_kdll) { out->kernel_lo = clo; out->kernel_hi = chi; out->kernel_is_nk = 0; out->kernel_text = tlo; out->kernel_text_len = tlen; }
+                        else { nk_lo = clo; nk_hi = chi; nk_text = tlo; nk_text_len = tlen; }
                     }
                 }
                 /* CE 6.0: kernel.dll is the kernel and reaches the CCN registers;
@@ -68,7 +69,7 @@ static void parse_rom(sf_u32 start, sf_u32 lo, sf_u32 hi, nkbin_info *out)
                  * kernel.dll, nk.exe is kernel + OAL in one module, so the
                  * device-aware range is its code (the OAL inside it must then
                  * access P4 registers unswapped: bsp/classpad50 P4_* macros). */
-                if (!out->kernel_hi && nk_hi) { out->kernel_lo = nk_lo; out->kernel_hi = nk_hi; out->kernel_is_nk = 1; }
+                if (!out->kernel_hi && nk_hi) { out->kernel_lo = nk_lo; out->kernel_hi = nk_hi; out->kernel_is_nk = 1; out->kernel_text = nk_text; out->kernel_text_len = nk_text_len; }
             }
         }
     }

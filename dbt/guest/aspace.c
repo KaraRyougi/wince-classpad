@@ -15,6 +15,7 @@
 #define V_LAZY  0x00420000u
 #define V_LAZY2 0x00430000u
 #define V_X     0x00440000u            /* two pages: a bra from the first into the second */
+#define V_LAZY3 0x00460000u
 
 #define P_A  0x8C300000u               /* returns 1 */
 #define P_B  0x8C301000u               /* returns 2 */
@@ -211,6 +212,23 @@ void guest_main(void)
     tlb_map(V_LAZY, P_C2, 1, 0);
     r = call_counted((fn_t)V_LAZY, &n);
     check("V_LAZY -> page C2 after HC_TLB_INVAL", r == 4 && n >= 1);
+
+    /* 3b. HC_TLB_INVAL alone (no TI, no new mapping) drops the blocks in its
+     * range (the runtime walks its page index) and, with length 0, every
+     * user block (its user list); the next call translates again */
+    tlb_map(V_LAZY3, P_C1, 1, 0);
+    r = call_counted((fn_t)V_LAZY3, &n);
+    r += call_counted((fn_t)V_LAZY3, &n2);
+    check("V_LAZY3 translated once", r == 6 && n >= 1 && n2 == 0);
+    hc_tlb_inval(V_LAZY3 + 2, 2);                       /* the block is mov, rts, nop: 6 bytes */
+    r = call_counted((fn_t)V_LAZY3, &n);
+    check("HC_TLB_INVAL of part of the page drops its block", r == 3 && n >= 1);
+    hc_tlb_inval(V_LAZY3 + 0x1000, 0x1000);
+    r = call_counted((fn_t)V_LAZY3, &n);
+    check("...a range on the next page does not", r == 3 && n == 0);
+    hc_tlb_inval(0, 0);
+    r = call_counted((fn_t)V_LAZY3, &n);
+    check("HC_TLB_INVAL of all user space drops it", r == 3 && n >= 1);
 
     /* 4. remap noticed at ldtlb alone (no hypercall); a second entry for the
      * same VPN would be a TLB multiple hit, so the old one is flushed first */

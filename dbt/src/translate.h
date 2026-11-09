@@ -39,6 +39,10 @@ typedef struct {
      * code that reaches device registers directly, i.e. the CE kernel.dll;
      * our own code uses pre-swapped accessors instead. 0,0 = off. */
     sf_u32 dev_lo, dev_hi;
+    /* Optional: only these [lo, hi) pairs (P1/P2 folded, sorted) inside
+     * [dev_lo, dev_hi) are device-aware; NULL = the whole range. */
+    const sf_u32 *dev_ranges;
+    unsigned ndev_ranges;
     /* Execution trace (-DDBT_TRACE_EXEC): every block starts by appending
      * its guest pc to a 64 KiB ring. exec_ctl = address of the byte index
      * (16-bit wrap), exec_ring = the ring. 0 = off. */
@@ -48,7 +52,13 @@ typedef struct {
     sf_u32 current_asid_addr; /* native runtime word; never a guest address */
 #endif
     int no_borrow;
+    /* Optional relocation output (moving a block, rt.c DBT_SECOND_CHANCE):
+     * the pool's byte offset, and one bit per 4-byte pool word that holds
+     * an address inside the block. NULL = not wanted. */
+    sf_u8 *reloc_map;        /* DBT_RELOC_BYTES */
+    sf_u16 *reloc_pool;
 } dbt_env;
+#define DBT_RELOC_BYTES ((EMIT_MAX_LITS + 7) / 8)
 
 enum { DBT_SPILL_T = 16 }; /* saved SR.T, not a GPR index */
 

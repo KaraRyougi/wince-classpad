@@ -41,9 +41,11 @@ void sh4_decode(sf_u32 op, sh_insn *d)
 #endif
 {
     int n = (op >> 8) & 0xF, m = (op >> 4) & 0xF;
-#ifdef DBT_DECODE_TEMPLATE
+#ifndef DBT_DECODE_MEMSET
     /* Fixed-size assignment lets the target compiler emit direct stores,
-     * avoiding the freestanding memset loop on every decoded opcode. */
+     * avoiding the freestanding memset loop on every decoded opcode
+     * (DBT_DECODE_TEMPLATE until 2026-11-07; -DDBT_DECODE_MEMSET for the old
+     * form, which tools/test_decode_template.py compares against). */
     static const sh_insn empty = {
         .kind = K_PASS, .ctrl = CR_NONE, .data = -1, .base = -1,
         .br_reg = -1
@@ -57,9 +59,10 @@ void sh4_decode(sf_u32 op, sh_insn *d)
     d->kind = K_PASS;
 #endif
 
-#ifdef DBT_DECODE_FPU_GATE
+#ifndef DBT_DECODE_NO_FPU_GATE
     /* Only 0xxx/4xxx control transfers and Fxxx arithmetic can be FPU
-     * instructions. Most memory/ALU opcodes need none of the subdecoding. */
+     * instructions. Most memory/ALU opcodes need none of the subdecoding,
+     * nor the call into fpuemu (DBT_DECODE_FPU_GATE until 2026-11-07). */
     if (((op & 0xB000u) == 0 || (op >> 12) == 15) && fpuemu_is_fpu_op(op)) {
 #else
     if (fpuemu_is_fpu_op(op)) {

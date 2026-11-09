@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Exhaustively compare the optional decoder initializer with the baseline."""
+"""Exhaustively compare the decoder (template initialiser, FPU gate) with the
+original memset / ungated form (-DDBT_DECODE_MEMSET -DDBT_DECODE_NO_FPU_GATE)."""
 import pathlib
 import subprocess
 import tempfile
@@ -10,7 +11,7 @@ fields = ('kind op size is_store am base data disp ctrl ctrl_bank movca br '
           'br_disp br_reg has_slot pcrel pc_reg priv_mem writes_t touched defs').split()
 with tempfile.TemporaryDirectory(prefix='decode-template-') as directory:
     tmp = pathlib.Path(directory)
-    for name, defines in [('baseline', []), ('candidate', ['-DDBT_DECODE_TEMPLATE', *sys.argv[1:]])]:
+    for name, defines in [('baseline', ['-DDBT_DECODE_MEMSET', '-DDBT_DECODE_NO_FPU_GATE']), ('candidate', [*sys.argv[1:]])]:
         subprocess.run(['cc', '-std=c99', '-O2', '-I', str(root),
                         '-Dsh4_decode=decode_' + name,
                         '-Dsh4_slot_legal=slot_' + name, *defines, '-c',

@@ -18,6 +18,7 @@ typedef struct {
     sf_u32 kernel_flags, cpu_type;    /* usCPUType: 0x01A6 = SH4 */
     sf_u32 kernel_lo, kernel_hi;      /* the kernel's code range from the module table: kernel.dll (CE 6.0), else nk.exe (CE 5.0: kernel + OAL); 0 if absent */
     sf_u32 kernel_is_nk;              /* 1 when the range is nk.exe's (no kernel.dll in the image) */
+    sf_u32 kernel_text, kernel_text_len; /* that module's largest code section (.text), 0 if absent; KDEV's signatures apply to kernel.dll's only */
     sf_u32 nk_entry;                  /* nk.exe's entry point from its e32 header, 0 if absent */
     sf_u32 fail_off;                  /* source offset where parsing stopped (diagnostics) */
     int    xip;                       /* 1: executes in place from flash (nothing was copied) */

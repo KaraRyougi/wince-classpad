@@ -2654,3 +2654,513 @@ HC_GETSTAT 400/401). The display driver pushes at most four rows per trap
 (1280-2112 pixels), below one 4096-pixel strip, so CE never overlapped CPU
 conversion with DMA: each push converted, started DMA and waited. Its only
 speed evidence was the emulator, whose DMA completes instantly.
+
+### Shell working set (2026-11-06)
+
+Question: the Standard Shell is very slow while Solitaire runs normally.
+`-DDBT_TRACE_XLATE` (rt.c) prints one `[xl] gpc asid phys guest_len` line per
+translation. One My Device run (HEAD of main, 3 MiB / 14400 / 2624 KiB, normal
+power NK bec974fc...) classified every translation between the second release
+and the matched frame:
+
+| | count |
+| --- | ---: |
+| translations | 48185 |
+| of those: same (gpc, ASID) translated earlier, evicted since | 37595 (78%) |
+| first translation of that code | 10569 |
+| same code under another ASID | 21 |
+| distinct blocks | 27964 |
+| bank recycles (12 banks) | 40 |
+| PROFILE translate share of TMU1 time | ~40% (trace output inflates it) |
+
+Blocks translated 1/2/3/4 times inside that one load: 14226/8400/4239/1090.
+The most retranslated modules are gwes (11560 of 14295), kernel.dll
+(6495/7446), coredll (3086/3499), k.coredll, commctrl, mgtt_o (fonts),
+ceshell, classpad_ddi, filesys and fsdmgr. Opening one folder touches about
+twice as much code as the cache holds, and FIFO banks evict GWES/kernel
+code that is in constant use. A game's working set fits and stops
+translating after its first frames (inferred, not traced).
+
+Re-translating the 27944 blocks offline with the same translator sources
+(host harness over the flattened NOR, kernel.dll device-aware) gives the
+footprint per guest byte:
+
+| | non-kernel blocks | kernel.dll (device-aware) |
+| --- | ---: | ---: |
+| blocks | 24172 | 3772 |
+| guest bytes per block | 22.9 | 24.9 |
+| host bytes per block (code + literals) | 141 (84 + 57) | 366 (266 + 100) |
+| metadata + spills + links per block | 139 | 223 |
+| host + metadata per guest byte | 12.2 | 23.6 |
+
+Plus 36 bytes of header and ~25 bytes of side tables per block, and 32-byte
+code alignment. Across all blocks, 37% of host bytes are literal pools and
+another ~19% are prologues, exits and IC sequences; memory operations are
+the largest instruction share (6.7 host bytes per guest byte, three swaps
+per 32-bit access), and a device-aware 32-bit access is ~30 host words.
+Overlapping blocks (entries into the middle of existing code) cover the
+455 KB of distinct guest code 1.43 times (648 KB). The shell's folder-open
+working set would need roughly 9 MB of cache, headers and arena.
+
+Cache-size sweep, same NK and launch tick, ram-layout sources, main's RAM
+window (all matched the frame):
+
+| code cache / headers / arena | load ticks | modeled s |
+| --- | ---: | ---: |
+| 2 MiB / 9600 / 1752 KiB (ram-layout default) | 1111524 | 33.921 |
+| 3 MiB / 14400 / 2624 KiB (main default) | 895854 | 27.339 |
+| 3.1875 MiB / 17280 / 2528 KiB | 867462 | 26.473 |
+
+Capacity below the working set gives diminishing returns (FIFO over a
+cyclic working set larger than the cache): the 11.3 MiB CE layout cost
+24% on this load, and more capacity alone will not reach the target. The
+layout therefore returns to 8 MiB of CE RAM (0x8C000000-0x8C7FFFFF) and
+gives the reclaimed first MiB to the translator as code cache: 4 MiB cache,
+14400 headers, 2624 KiB arena (495a3cf; the 3.625 MiB / 20160 / 2944 KiB
+split sized from the per-block ratios above was slower, see the 8 MiB table
+below). The larger lever is density: metadata is half the footprint,
+literals a third of the code.
+
+### Metadata on demand, second chance (2026-11-06)
+
+Two cache policies, both measured on the same My Device load (NK built for
+the 9 MiB window, so the translator has 7 MiB; exact frame match in every
+run).
+
+**Second chance** (`SECOND_CHANCE=1`, `-DDBT_SECOND_CHANCE`). After a bank is
+recycled, the next bank to be recycled goes on probation: hash entries,
+inline caches and direct chains into it are dropped (`detach_bank`), so its
+blocks are reached only through the C lookup, which marks every block it
+finds (`find_block_by_gpc`); exceptions and timer ticks inside a block mark
+it too. When that bank's turn comes, the marked blocks (at most
+1/`DBT_SECOND_CHANCE_SHARE` of the bank, default 1/2) are moved to its start
+in order, so headers stay sorted by host address (`keep_survivors`), and the
+bank fills after them. Translated code holds absolute addresses of itself in its
+literal pool (helper return addresses, the exit stubs' link-literal
+addresses, the IC pair's address; `TAG_RET`, `TAG_STUB_L`, `TAG_IC_A`), so
+the translator now reports which pool words those are (`dbt_env.reloc_map`)
+and each block keeps a relocation record (pool offset plus one bit per pool
+word, ~4 bytes) after its links. A moved block is rebased, fully
+unchained (original jump words, link literals back at its own stubs) and
+its IC reset; incoming links come back through the normal lookup. With
+14400 headers about 20% of a bank's blocks survive (234 of 1200 per
+probation, 213 bytes of code each), and the whole run (boot included)
+translates about a fifth less: its last 8192-translation stats checkpoint
+before the frame is 106k against the baseline's 131k.
+
+**Metadata on demand** (`LAZY_META=1`, `-DDBT_LAZY_META`, opt-in). A ROM
+block (its guest bytes, including folded PC-relative literals, physically
+contiguous inside the image's ROM range; `lazy_eligible`) is committed
+with links only. When recovery needs its metadata (an exception or tick
+inside it, a helper fault, a stub window), the block is translated again
+at its own host address from the recorded physical address through P1/P2
+(no TLB), the copy is checked against the live code outside the link
+windows, and the packed metadata is kept at the top of the block's bank
+arena (`ensure_meta`). A hashed per-pc hint keeps metadata resident from
+the next translation on for blocks that needed it once.
+`-DDBT_LAZY_META_ALL` drops the ROM condition, for the RAM-resident test
+guests (exc, tmu, tlbdata, fpudis and bank rebuild metadata there).
+
+| build (code cache / headers / arena) | modeled s |
+| --- | ---: |
+| baseline, 3 MiB / 14400 / 2624 KiB | 27.356 |
+| second chance (cap 1/2) | 26.606 |
+| second chance (cap 1/3) | 26.623 |
+| second chance (cap 1/4) | 27.306 |
+| metadata on demand, no hint | 34.221 |
+| metadata on demand with the hint | 28.639 |
+| both | 27.039 |
+| both, 4.0625 MiB / 21600 / 1408 KiB (no hint) | 34.821 |
+| on demand only, same layout (no hint) | 33.571 |
+| both, 3.625 MiB / 18000 / 2048 KiB | 28.089 |
+
+Metadata on demand loses on this load. Without the hint, 48.6k rebuilds per
+128k translations: about 38% of blocks take an exception or tick in their
+lifetime, and 78% of translations redo evicted code, so the same blocks
+rebuild in every life. The hint cuts that to 21k but the cost remains, and
+the capacity it frees is worth little: capacity below the working set gives
+diminishing returns (sweep above), and moving the freed arena into ~50% more headers and
+a third more code made it slower still. Second chance is the default; metadata
+on demand stays as an opt-in (it is the right tool only where capacity is
+the binding limit and exceptions inside blocks are rare).
+
+Device-aware accesses (the other density item): the hot path adds ~15
+instructions per 32-bit kernel.dll access and the whole sequence, with its
+inline slow path (helper call, three literals, its own metadata range), ~56
+bytes. 4339 of the 12618 candidates in the traced kernel blocks (34%) use
+r15 as base (pushes, pops, frame slots); the stack never points into P4, so
+those could take the plain access.
+
+Where the load's time goes (emulator host PC samples from the tap to the
+frame, one per tick; runtime samples grouped by function family, so
+attribution near function boundaries is approximate):
+
+| ticks (modeled s) | baseline 27.36 s | second chance 26.61 s |
+| --- | ---: | ---: |
+| translation (decode, emit, memset/memcpy, pack) | 312k (9.5) | 258k (7.9) |
+| translated code | 251k (7.7) | 249k (7.6) |
+| invalidation and UTLB reads (`invalidate_*`, `utlb_translate`) | 118k (3.6) | 130k (4.0) |
+| lookup and linking (C side) | 89k (2.7) | 101k (3.1) |
+| stubs, vectors (IL memory, "other") | 65k (2.0) | 65k (2.0) |
+| helpers, exceptions, LCD | 52k (1.6) | 58k (1.8) |
+
+Translation is about a third of the load, not all of it. Second chance cut it
+by 17%, and about half of that came back as probation lookups and more
+invalidation work over the larger number of live blocks. `utlb_translate`
+alone is 56k ticks (1.7 s), and `memset` inside translation 50k (1.5 s).
+With the same 14400 headers, a 3.25 MiB cache gave 26.973 s against 3 MiB's
+27.356 s, so at 3 MiB the code space, not the header count, still limits.
+
+On the 8 MiB layout (VM image claude-rstandby-fix NK.bin 62ac46d2..., CE RAM
+to 0x8C7FFFFF, translator 0x8C800000-0x8CFFFFFF; same tap and reference
+frame, all matched). The frame check runs per 60 Hz frame, so load times are
+quantized to 546 ticks (16.7 ms):
+
+| code cache / headers / arena | second chance | modeled s |
+| --- | --- | ---: |
+| 4 MiB / 14400 / 2624 KiB (495a3cf) | off | 26.973 |
+| 4 MiB / 14400 / 2624 KiB | on | 25.806 |
+| 4 MiB / 16800 / 2624 KiB | on | 27.539 |
+| 3.625 MiB / 20160 / 2944 KiB | on | 26.223 |
+
+More headers is slower here even with the same or more code space: more
+live blocks make every invalidation scan longer (invalidation is already
+3.6 s of the load, above). 4 MiB / 14400 with second chance is the best of
+these.
+
+What the translated code spends its time on (second chance, 3 MiB layout,
+26.61 s; host opcode and guest-block residency samples from the tap to the
+frame, `HLE_DBT_SAMPLE_OPS`/`HLE_DBT_SAMPLE_BLOCKS`; kern.map from the VM
+release directory). 248786 generated-code samples (7.59 s):
+
+- by module: kernel.dll 73.1%, classpad_ddi 10.3% (almost all
+  `GPE::EmulatedBlt_Internal`), gwes 7.1%, k.coredll 4.7%. The hot kernel
+  code is CE's thread/system-call machinery: KCNextThread 6.4%, KCall 4.6%,
+  NKHandleCall 4.3%, InterruptExceptionHandler 2.9%, GeneralException 2.6%,
+  then CRITEnter, RunqDequeue, handle locking, waits, SetCPUASID,
+  TLBMissHandler, ObjectCall, SwitchActiveProcess.
+- by host opcode: shifts 17.7% (1.35 s), byte swaps 17.2% (1.31 s), DSP
+  slot transfers 9.9%, nops 6.5%, braf 2.8%; the top opcodes are the
+  device test (`not`, `shlr16`, `shlr8`, `neg`, `add #1`, `shll2`, `braf`,
+  `bra` over the slow path). The device test is roughly 2-2.5 s of the 7.6.
+
+Exact counts over the same window (`-DDBT_STAT_IN_RAM`, the emulator's
+`HLE_DBT_COUNTER_BASE` snapshot; that build also records device sites and
+took 29.39 s): 39665 translations, 11767 system calls (synthetic
+instruction-address faults), 22162 ASID switches, 76302 exceptions, 35646
+ldtlb hooks, 87799 rte, 391385 `ldc sr` helper calls, 239050 device
+accesses through the C fallback, 305986 C lookups (160067 of them blocks
+missing from the hash), 186240 IC misses.
+
+`-DDBT_DEV_SITES` records every guest pc whose device-aware access really
+reached P4. Over the whole run (boot and load) that is 23 sites in 9
+kernel.dll functions: TLBMissHandler (5 sites, 305886 accesses),
+InterruptExceptionHandler (1, 240925), SHSetASID (1, 75638), MDSetCPUASID
+(1, 49670), APICall (1, 17513), GeneralException (2, 300), MDSwitchVM,
+SHInit, LoadKPage. Every other kernel.dll access pays the test for nothing.
+A literal-pool scan for P4 constants finds some of these functions
+(InterruptExceptionHandler, SHSetASID, MDSetCPUASID, MDSwitchVM, SHInit) and
+also non-code false positives, but misses TLBMissHandler, APICall,
+GeneralException and LoadKPage, so a narrower device-aware range needs a
+fixed function list for this kernel.dll, not a scan alone.
+
+### Device-aware translation only where kernel.dll can reach P4 (2026-11-06)
+
+`KDEV=1` (`-DDBT_KDEV`) narrows the device-aware range from all of
+kernel.dll to the functions that may access P4. tools/kernel_devfuncs.py
+reads an NK.bin and its kern.map and keeps a function when its own words
+hold a mov.l literal with the top byte 0xFF (below 0xFFFF0000), when it
+moves to or from a banked register (CE keeps the SH3CTL base, 0xFF000000,
+in r5_bank1), when it builds such a value with `mov #-1` and shifts, or
+when it lies in the exception vector area (ExceptionBase to
+_ExceptionEndAddress: those handlers run with RB=1, where r0-r7 are the
+banked registers, so their P4 base leaves no trace). That keeps 25 of 1090
+functions, 5932 of 190060 code bytes: the vector-area handlers
+(GeneralException, TLBMissHandler, InterruptExceptionHandler, APICall,
+SHSetASID, LoadKPage, ZeroPage, ...), CaptureContext, SyscallHandler,
+NKPerformCallBack, DoSetRAMMode, DumpFrame, SHInit, MDSwitchVM,
+MDSetCPUASID, NKQueryInstructionSet and a few with P4-looking constants.
+
+kernel.dll is relinked into every image (other address, the 2026-11-06
+image's text is 20 bytes longer), so rt/kernel_dev.h holds a
+relocation-insensitive signature per function instead of addresses: the
+length, the first four words and a CRC-32 over the function, with
+PC-relative literals, outward bra/bsr displacements and aligned words
+holding P1/P2 addresses masked out. rt/kdev.c scans kernel.dll's text at
+boot (nkbin's largest code section) and needs every function exactly once;
+otherwise it prints which one and the whole of kernel.dll stays
+device-aware. The translator (`dbt_env.dev_ranges`) then binary-searches
+the merged ranges (12 for both images measured). `--check NK.bin SITES`
+runs the same search on another image and checks recorded P4 sites
+against it. The table was generated from the VM's ClasspadUI release
+(NK.bin 62ac46d2..., kern.map) and locates in the older benchmark image too.
+
+Checks: every P4 access recorded with `-DDBT_DEV_SITES` lies inside the
+located functions (23 sites in each image, boot and load); host
+translator test (an access outside the listed ranges is plain, inside one
+it keeps the test); 14 guests pass; both images match the reference frame
+and their boot logs list exactly the ranges the script predicts.
+
+| image, layout (second chance on) | whole kernel.dll | KDEV=1 |
+| --- | ---: | ---: |
+| old benchmark NK, 3 MiB / 14400 / 2624 KiB | 26.606 s | 21.457 s |
+| 2026-11-06 8 MiB NK, 4 MiB / 14400 / 2624 KiB | 25.806 s | 23.540 s |
+
+Risk: a kernel.dll function outside the list that reaches P4 only through
+a pointer it was given, on a path neither the rules nor the recorded runs
+saw, would get swapped values. KDEV=1 is the default; `KDEV=0` restores
+the old behavior. Regenerate the table when kernel.dll's sources change
+(a new CE update): `tools/kernel_devfuncs.py NK.bin kern.map -o
+dbt/rt/kernel_dev.h`; an unchanged kernel only moves, which the
+signatures absorb.
+
+### Translation copies, UTLB lookups and invalidation scans (2026-11-07)
+
+Runtime profile of the My Device load (second chance + KDEV, old 9 MiB NK,
+host samples from the tap to the frame): besides translation proper,
+`memset` 1.10 s and `memcpy` 0.86 s, `utlb_translate` 1.18 s,
+`invalidate_block` 1.24 s and `invalidate_range` 0.66 s. Their causes and
+what changed (each old form stays behind a switch):
+
+- **Per-instruction clearing and copying.** `sh4_decode` cleared a whole
+  `sh_insn` with `memset` per decoded opcode, `begin_meta_kind` a 16-byte
+  recovery record per instruction, and `fetch` copied each pre-decoded
+  instruction out of `g_pre`. The fixed-size template initialiser
+  (formerly opt-in `DBT_DECODE_TEMPLATE`; `-DDBT_DECODE_MEMSET` restores
+  the old one, `tools/test_decode_template.py` compares both for all 65536
+  opcodes) and the four-word record write (formerly `DBT_META_WORD_INIT`;
+  `-DDBT_META_MEMSET`) are now the default, and `fetch` returns a pointer
+  into `g_pre` (which nothing writes during the translation) instead of a
+  copy.
+- **UTLB lookups.** Every translation of user or P3 code, cross-ASID
+  lookups and the tick classifier read all 64 UTLB array entries (two P4
+  reads each). The slot hint (formerly `DBT_UTLB_HINT`; `-DDBT_UTLB_SCAN`
+  restores the scan) remembers the slot that matched last for a hashed
+  page and ASID and re-reads that slot's hardware words on every use, so
+  it never returns a stale mapping; a mismatch falls back to the scan.
+- **One detach pass per flush.** `invalidate_block` used to walk all
+  headers for the ICs and direct links into each block it killed: a flush
+  killing k blocks made k passes over 14400 headers. Over boot and load,
+  the range flushes killed 2635 blocks in 7 calls, the HC_FLUSH-all
+  teardowns 322 in 46, ldtlb replacements 486 in 16k hooks (counters from
+  `-DDBT_INVAL_DIAG`). Now `invalidate_block` records the dead host range
+  and `finish_invalidations`, which every caller already runs before the
+  guest continues, detaches the ICs and links into all recorded ranges in
+  one pass: up to 16 ranges compared directly, beyond that a 32-byte
+  granule map that is cleared after the pass. Nothing survives the batch,
+  so unlike `DBT_BATCH_INVALIDATE` it needs nothing from bank recycling
+  and works with second chance. `-DDBT_INVAL_IMMEDIATE` restores the
+  per-block scan.
+- **User range flushes without a full scan.** CE's HC_TLB_INVAL (229 calls
+  during the load, none killing anything) walked every header. User blocks
+  are already in the page index under their first and last 1 KiB page
+  (blocks are shorter than 1 KiB, so one of the two lies within any range
+  they overlap) and in `g_user_idx`; a range of up to 256 KiB now walks
+  the index chains of its pages, a larger one the user list.
+  `-DDBT_INVAL_RANGE_SCAN` restores the scan. The aspace guest gained
+  checks that HC_TLB_INVAL alone drops a block for a partial range on its
+  page, keeps it for a range on the next page, and drops it for a
+  whole-space flush; they pass on both the old and the new path.
+
+Results, My Device load, second chance + KDEV, all exact frame matches.
+On the 2026-11-06 8 MiB image (4 MiB / 14400 / 2624 KiB), changes added
+one at a time:
+
+| build | modeled s |
+| --- | ---: |
+| a589323 | 23.507 |
+| + no per-instruction clear/copy | 21.491 |
+| + UTLB slot hint | 19.858 |
+| + one detach pass per flush | 19.058 |
+| + user range flushes via the page index | 18.341 |
+
+The same changes on the old benchmark image (9 MiB window, 3 MiB / 14400 /
+2624 KiB, host-sampled): 21.707 s -> 13.559 s. Sampled seconds, a589323
+-> now: memset 1.17 -> 0.07, memcpy 0.72 -> 0.12, utlb_translate 1.39 ->
+0.43, invalidate_block + invalidate_range 1.50 -> 0.06 plus 0.69 in the
+single detach pass, translated code 4.51 -> 2.50 (less waiting work in the
+changed schedule; not attributable to one change).
+
+Single runs move with the schedule: a diagnostic build of a589323 that only
+adds counters and prints (`-DDBT_INVAL_DIAG -DDBT_STATS_EVERY=2000`)
+finished in 21.691 s against 23.507 s. Steps under ~2 s in the table are
+therefore not individually established; the sampled per-function times
+are the firmer evidence. Host tests (179 checks), the decode comparison
+and all 15 guests (extrom with NK_WINDOW=eact) pass.
+
+### Lookup hash per address space, owner cache, cheaper detach pass (2026-11-07)
+
+Load-window counters of d4091fa (old benchmark image, `-DDBT_STAT_IN_RAM`
+snapshot): 35873 translations, 207160 C lookups, 107076 of them for a block
+that existed but was not in the hash. `-DDBT_HASH_DIAG` records what last
+emptied each hash slot and classifies those lookups: ASID switch 67006
+(72%), another pc in the slot 18611, bank recycle 4899, second-chance
+probation 3013. CE6 processes share virtual addresses, and untagged entries
+had to leave the hash at every address-space switch.
+
+- `HASH_TAG=1` (Makefile, default): `DBT_HASH_ASID_TAG` (12-byte entries
+  with the ASID; a switch keeps them), `DBT_HASH_ASID_MIX` (user keys mix
+  the ASID into the index; tagging alone put every process's code at the
+  same addresses into the same slots: 276k C lookups, slower) and
+  `DBT_USER_IC_HASH_HIT` (an IC miss on a user target jumps from a hash
+  hit in the stub instead of refilling in C). These were measured opt-ins
+  of earlier work; together they take C lookups from 278k to 148k at the
+  same workload. `HASH_ENTRIES` sets the size (8192; 16384 gave 131k and
+  ~0.24 s for 96 KiB more, within the run-to-run spread).
+- `block_of_host` keeps its last answers in 256 slots by host address. A
+  hit needs a live block whose host range holds the address; live blocks
+  never overlap, so it is the block the binary search finds, and dead
+  owners still come from the search. Cleared on full flush and bank
+  recycle. 49% of 211k calls hit. `-DDBT_OWNER_SEARCH` disables it.
+- The one-pass detach reads the IC addresses from a dense per-header array
+  (`g_ic_site`, written at translation and survivor moves; stale for dead
+  headers, which are checked) and the link masks in a separate loop with a
+  local bound.
+- The emitter's per-halfword helpers (`emit16`, `emit_pos`, slot opcodes)
+  are inline in sh4emit.h; the FPU opcode gate (formerly
+  `DBT_DECODE_FPU_GATE`, `-DDBT_DECODE_NO_FPU_GATE` restores it) skips the
+  call into fpuemu for opcode groups that cannot be FPU instructions; the
+  exhaustive decoder comparison now covers both.
+
+Single runs vary with the system state at the tap: the same changes took
+the old image from 13.71 s to 16.43 s in one run because the guest did
+more work in it (`ldc sr` 97k -> 323k, ASID switches 13.5k -> 21k,
+translated code 2.56 -> 4.34 s), while the translator's own C time stayed
+at ~10 s. Comparisons below are therefore means over three tap ticks
+(7.5M, 8.0M, 8.5M) on the 2026-11-06 8 MiB image, all exact frame matches:
+
+| build | mean | runs |
+| --- | ---: | --- |
+| d4091fa | 18.30 s | 18.34 18.30 18.25 |
+| owner cache, detach arrays, inline emitter, FPU gate | 16.98 s | 17.11 17.06 16.77 |
+| + HASH_TAG=1 | 15.69 s | 15.69 15.86 15.52 |
+| + HASH_ENTRIES=16384 | 15.45 s | 15.24 15.41 15.68 |
+| final default (HASH_TAG=1, 8192, local loop bound) | 15.31 s | 14.81 15.51 15.60 |
+
+Sampled on the old image at the same (busier) workload, items without vs
+with HASH_TAG: translator C 10.26 -> 9.25 s, C lookups 278k -> 148k,
+`block_of_host` 0.60 -> 0.28 s, the detach pass 0.60 -> 0.52 s. Remaining
+leaders: `dbt_translate_block` 1.50 s, `lookup_or_translate` 1.12 s,
+`sh4_decode` 0.74 s (36.4k translations); translated guest code 4.3 s and
+the assembly stubs 1.8 s in that run. Host tests, the decoder comparison,
+all 15 guests (aspace runs its 9 tagged-hash checks too) and the HHK check
+pass.
+
+### Where the guest's time goes, and CE's TLB refill in the translator (2026-11-07)
+
+Guest-block profile of the 8 MiB image at three tap ticks (3 MiB-cache
+build, so the sampler's 256 KiB banks apply; maps from the VM release
+directory): 15.49 / 14.68 / 15.45 s, translated guest code 4.34 / 3.87 /
+4.38 s. classpad_ddi (0.75 s, `GPE::EmulatedBlt_Internal` 0.56 s), gwes
+(0.5 s) and the rest are the same in all three; the difference is
+kernel.dll (2.25 / 1.86 / 2.28 s: KCall, GeneralException, KCNextThread,
+NKHandleCall), i.e. how many system calls and thread switches happen. No
+polling loop or background job stands out. The quiet 13.71 s run of the
+old image (kernel.dll 0.86 s) was the outlier, not the rule.
+
+`TLB_REFILL=1` (Makefile, default): a UTLB miss taken in the code cache
+is refilled by the translator (rt.c `tlb_refill`) with the walk of CE6's
+`TLBMissHandler` (shexcept.src): page directory from TTB, or
+`g_pprcNK->ppdir` for addresses from the shared heap base up (user mode
+there: reads only, PR write bit masked), page table, valid bit 0x100,
+PTEA from PTEL bits 9 and 29-31; then the translator's ldtlb hook and the
+faulting host instruction runs again (`RT_ACT_RESUME`). It applies only
+while VBR + 0x400 holds that handler word for word (57 words up to its
+`bra TLBMissError`, checked once per VBR; shared-heap base and &g_pprcNK
+come from its literal pool; both measured images match). Anything else
+leaves the state untouched and delivers the exception as before: a
+failing walk (the guest then reaches TLBMissError itself), a directory or
+table outside P1/P2, a fault outside the code cache or during nested
+exception handling, and a new mapping that would drop the faulting block.
+
+Before, each miss was an exception into C, the guest handler in
+translated code with TEA/TTB/EXPEVT/PTEA/PTEL through the C fallback, an
+ldtlb hook and an rte in C. Counters over the load (old image): 26234
+refills; device-access fallbacks 236718 -> 100442, rte 69031 -> 41188.
+New guest `tlbrefill`: CE's handler at its VBR + 0x400 with its own page
+directories and fake g_pprcNK; process-directory read, write miss,
+shared-heap lookup and a missing valid bit (TLBMissError path), with and
+without TLB_REFILL (the handler as translated guest code gives the same
+results).
+
+| 8 MiB image, mean of taps 7.5M/8.0M/8.5M | mean | runs |
+| --- | ---: | --- |
+| before (HASH_TAG=1 commit) | 15.31 s | 14.81 15.51 15.60 |
+| TLB_REFILL=1 | 13.56 s | 13.51 13.78 13.40 |
+
+### Common helper calls without C (2026-11-07)
+
+`FAST_HELPERS=1` (Makefile, default) turns on four paths that stay in
+assembly or generated code:
+
+- `DBT_INLINE_DEVICE_READ`: a control-register load in device-aware code
+  runs natively and unswapped in the block (reads have no side effects);
+  stores keep the C helper (PTEH changes the ASID, MMUCR.TI flushes).
+- `DBT_FAST_LDC_SR` + `_MD`: `ldc sr` with unchanged register bank and
+  ASID loads the new SR in the stub, updating the shadowed guest MD there
+  too. The bank guest now checks for the MD variant (HC_GETSTAT 63 bit 1)
+  that both privilege transitions stay on the fast path.
+- `DBT_FAST_LDTLB`: ldtlb with unchanged ASID on a 4 KiB page without
+  translated user code, in the stub.
+- `DBT_FAST_RTE` (new): the rte stub checks that the hardware ASID is the
+  one the translator tracks and probes the lookup hash for SPC (the same
+  index, ASID mix and tag check as the lookup stubs); on a hit it sets the
+  shadow MD from SSR, forces MD|DSP into SSR, puts the host address in SPC
+  and rtes. The SR it needs for the C path is parked in `dbt_rte_sr_save`,
+  so any miss continues into the unchanged C path. HC_GETSTAT 432 counts
+  the fast returns (the tmu guest takes it 4317 times).
+
+`DBT_DYNAMIC_P4_STORE` (native control-register stores except PTEH and
+MMUCR) was measured too and gave nothing (13.37 -> 13.49 s), with longer
+blocks and no bounded retry under second chance, so it stays off.
+
+Load counters on the old image (TLB_REFILL on in both): `ldc sr` through
+C 309362 -> 53179, rte through C 41188 -> 10179 (29493 fast), C fallback
+calls 100442 -> 60874 (the remaining 58025 device accesses are stores).
+
+| 8 MiB image, mean of taps 7.5M/8.0M/8.5M | mean | runs |
+| --- | ---: | --- |
+| TLB_REFILL commit | 13.56 s | 13.51 13.78 13.40 |
+| + inline device reads | 13.37 s | 13.54 13.56 13.00 |
+| + native P4 stores (not kept) | 13.49 s | 13.46 13.51 13.50 |
+| reads + stores + fast ldc sr (MD) | 12.92 s | 12.98 13.15 12.65 |
+| ... + fast ldtlb | 12.71 s | 12.96 13.03 12.13 |
+| FAST_HELPERS=1 (reads, ldc sr, ldtlb, rte; no stores) | 12.61 s | 12.78 12.51 12.55 |
+
+### Layout by what fills a bank (2026-11-07)
+
+`-DDBT_HASH_DIAG` now also counts why a bank is full when translation
+moves on (headers, code space or metadata) and what the full bank held.
+My Device load, 4 MiB / 14400 / 2624 KiB: 34 banks filled, 33 by their
+1200 headers and 1 by metadata; a full bank held on average 192 KiB of
+its 341 KiB code space (56%) and 180 KiB of its 218 KiB metadata. A block
+averages ~160 bytes of host code and ~150 bytes of metadata. So a quarter
+of the code cache was idle while blocks were evicted for want of headers.
+
+Layouts within the same 8 MiB (tap-averaged on the 2026-11-06 image, all
+exact frame matches):
+
+| code cache / headers / arena / hash entries | mean | runs |
+| --- | ---: | --- |
+| 4 MiB / 14400 / 2624 KiB / 8192 (ae8e567) | 12.61 s | 12.78 12.51 12.55 |
+| 4 MiB / 16800 / 2624 KiB / 8192 | 12.59 s | 12.96 12.43 12.38 |
+| 3.5 MiB / 18000 / 2720 KiB / 8192 | 12.11 s | 11.91 12.16 12.25 |
+| 3 MiB / 18000 / 2720 KiB / 8192 | 11.73 s | 11.99 11.78 11.40 |
+| 3.25 MiB / 19200 / 2900 KiB / 8192 | 11.19 s | 11.23 10.86 11.47 |
+| 3 MiB / 19200 / 2900 KiB / 8192 | 10.98 s | 10.48 10.93 11.53 |
+| 3.25 MiB / 20400 / 3100 KiB / 8192 | 10.86 s | 10.84 10.71 11.03 |
+| 3 MiB / 20400 / 3100 KiB / 16384 | 10.70 s | 10.28 11.01 10.82 |
+| 3.25 MiB / 19200 / 2900 KiB / 16384 | 10.51 s | 10.64 10.55 10.34 |
+| 3.25 MiB / 20400 / 3000 KiB / 16384 | 10.48 s | 10.83 10.36 10.25 |
+| **3.25 MiB / 19200 / 2900 KiB / 32768** | **10.21 s** | 9.94 10.26 10.42 |
+
+The last one is the default since 2026-11-07 (Makefile, rt/main.c,
+docs/05); at taps 9.0M/9.5M/10.0M it gives 10.41 10.38 9.76, so 10.20 s
+over six. The image ends at 0x8CC970D0, 36 KiB below its 128 KiB stack
+(rt/image.ld asserts the bound); a 65536-entry hash no longer fits.
+
+Tried and dropped: a dense copy of every inline cache's target (a pool
+word after the IC pair pointing into the copy, written by the stub's
+refill, the C refill, resets and survivor moves), so that the
+invalidation pass and the recycle scans stop reading ICs from code
+memory. Over six tap ticks it was slower, 10.49 s against 10.20 s.

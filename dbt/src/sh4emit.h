@@ -21,9 +21,18 @@ typedef struct {
 } emitter;
 
 void emit_init(emitter *e, sf_u16 *buf, int cap);
-void emit16(emitter *e, sf_u32 op);
-int  emit_pos(const emitter *e);                 /* current offset in bytes */
-void emit_patch16(emitter *e, int byte_off, sf_u32 op);
+/* The per-halfword helpers are inline: as out-of-line calls from
+ * translate.c they cost about a tenth of translation (2026-11-07). */
+static inline void emit16(emitter *e, sf_u32 op)
+{
+    if (e->len >= e->cap) { e->overflow = 1; return; }
+    e->buf[e->len++] = (sf_u16)op;
+}
+static inline int emit_pos(const emitter *e) { return e->len * 2; }   /* current offset in bytes */
+static inline void emit_patch16(emitter *e, int byte_off, sf_u32 op)
+{
+    if (byte_off / 2 < e->cap) e->buf[byte_off / 2] = (sf_u16)op;
+}
 
 /* mov.l @(disp,PC),Rn with a 32-bit literal to be placed by emit_flush_lits.
  * `tag` is returned by emit_lit_find so the caller can locate the literal's
@@ -38,7 +47,7 @@ int  emit_flush_lits(emitter *e);
 /* Byte offset of the literal with the given tag, valid after flushing. -1 if none. */
 int  emit_lit_offset(const emitter *e, int tag);
 /* Worst-case bytes the pool will need (for block size budgeting). */
-int  emit_lits_bytes(const emitter *e);
+static inline int emit_lits_bytes(const emitter *e) { return e->nlits * 4 + 2; }
 
 /* --- encodings (n = Rn, m = Rm) --- */
 #define OP_NOP             0x0009u
@@ -98,7 +107,9 @@ int  emit_lits_bytes(const emitter *e);
 
 /* DSP transfer registers used as spill slots (SH-DSP encodings). */
 enum { SLOT_A0 = 0, SLOT_X0, SLOT_X1, SLOT_Y0, SLOT_Y1, SLOT_COUNT };
-sf_u32 op_lds_slot(int rm, int slot);   /* lds Rm,<slot> */
-sf_u32 op_sts_slot(int slot, int rn);   /* sts <slot>,Rn */
+/* lds Rm,{A0,X0,X1,Y0,Y1} = 0100mmmm 0111/1000/1001/1010/1011 1010 */
+static inline sf_u32 slot_code(int slot) { return slot == SLOT_A0 ? 0x7u : 0x7u + (sf_u32)slot; }
+static inline sf_u32 op_lds_slot(int rm, int slot) { return 0x400Au | ((sf_u32)rm << 8) | (slot_code(slot) << 4); }  /* lds Rm,<slot> */
+static inline sf_u32 op_sts_slot(int slot, int rn) { return 0x000Au | ((sf_u32)rn << 8) | (slot_code(slot) << 4); }  /* sts <slot>,Rn */
 
 #endif
