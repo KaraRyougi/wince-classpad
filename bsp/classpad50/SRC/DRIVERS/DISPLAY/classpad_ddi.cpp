@@ -98,7 +98,7 @@ public:
     SCODE           WrappedLine(GPELineParms *pParms);
     SCODE           WrappedBlt(GPEBltParms *pParms);
     SCODE           ConvertedCopyBlt16(GPEBltParms *pParms);
-    SCODE           RotatedMonoBlt16(GPEBltParms *pParms);
+    SCODE           RotatedLookupBlt16(GPEBltParms *pParms);
     void            Dirty(int top, int bottom);
     void            PushRows(int top, int bottom);
     static DWORD WINAPI PushThread(LPVOID pThis);
@@ -336,29 +336,42 @@ SCODE ClasspadGPE::BltPrepare(GPEBltParms *pParms)
         pParms->prclSrc->bottom - pParms->prclSrc->top == pParms->prclDst->bottom - pParms->prclDst->top &&
         !pParms->pSrc->IsRotate() && !pParms->pDst->IsRotate())
         pParms->pBlt = (SCODE (GPE::*)(GPEBltParms *))&ClasspadGPE::ConvertedCopyBlt16;
-    // A 1 bpp source through a lookup onto the rotated primary: GWES draws
-    // icons as SRCAND of the mono mask followed by SRCPAINT of the image, and
-    // on a rotated screen GPE's generic rotated path left the AND without
-    // effect (icons came out OR-ed with the background, 2026-11-09; the
-    // SRCPAINT goes through emulrotate's 1616 routine and is fine). Done here
-    // pixel by pixel through GPESurf::GetPtr(x, y).
+    // Sources that need a colour translation onto the rotated primary: a 1,
+    // 4 or 8 bpp source through a lookup table, a 16 bpp source through a
+    // converter, or a transparent blit. emulrotate declines all of these
+    // (pLookup, pConvert, BLT_TRANSPARENT) and GPE's generic rotated path
+    // gets them wrong: GWES draws icons as SRCAND of the mono mask followed
+    // by SRCPAINT of the image, and on a rotated screen the desktop icons
+    // came out OR-ed with the background (the 1 bpp AND, 2026-11-09), then
+    // the Start menu's icons came out as black silhouettes (the image blit
+    // through a lookup or converter). Done here pixel by pixel through
+    // GPESurf::GetPtr(x, y); a 16 bpp copy without translation stays with
+    // emulrotate's own routines.
     else if (pParms->pSrc && pParms->pDst && pParms->pDst->IsRotate() && !pParms->pSrc->IsRotate() &&
-        pParms->pSrc->Format() == gpe1Bpp && pParms->pDst->Format() == gpe16Bpp &&
-        pParms->pLookup && !pParms->pConvert && !pParms->pMask &&
-        !(pParms->bltFlags & (BLT_STRETCH | BLT_TRANSPARENT | BLT_ALPHABLEND)) &&
+        pParms->pDst->Format() == gpe16Bpp && !pParms->pMask &&
+        !(pParms->bltFlags & (BLT_STRETCH | BLT_ALPHABLEND)) &&
         pParms->prclSrc && pParms->prclDst &&
-        (pParms->rop4 == 0x8888 || pParms->rop4 == 0xEEEE || pParms->rop4 == 0x6666 || pParms->rop4 == 0xCCCC))
-        pParms->pBlt = (SCODE (GPE::*)(GPEBltParms *))&ClasspadGPE::RotatedMonoBlt16;
+        (pParms->rop4 == 0x8888 || pParms->rop4 == 0xEEEE || pParms->rop4 == 0x6666 || pParms->rop4 == 0xCCCC) &&
+        (((pParms->pSrc->Format() == gpe1Bpp || pParms->pSrc->Format() == gpe4Bpp || pParms->pSrc->Format() == gpe8Bpp) &&
+          pParms->pLookup && !pParms->pConvert) ||
+         (pParms->pSrc->Format() == gpe16Bpp && !pParms->pLookup &&
+          ((pParms->pConvert && pParms->pColorConverter) || (pParms->bltFlags & BLT_TRANSPARENT)))))
+        pParms->pBlt = (SCODE (GPE::*)(GPEBltParms *))&ClasspadGPE::RotatedLookupBlt16;
     return S_OK;
 }
 
-SCODE ClasspadGPE::RotatedMonoBlt16(GPEBltParms *pParms)
+SCODE ClasspadGPE::RotatedLookupBlt16(GPEBltParms *pParms)
 {
     RECTL dst = *pParms->prclDst;
     int sx = pParms->prclSrc->left, sy = pParms->prclSrc->top, x, y, w, h;
     const BYTE *srcBase = (const BYTE *)pParms->pSrc->Buffer();
     int sstride = pParms->pSrc->Stride();
-    USHORT lut0 = (USHORT)pParms->pLookup[0], lut1 = (USHORT)pParms->pLookup[1];
+    EGPEFormat sfmt = pParms->pSrc->Format();
+    const ULONG *lut = pParms->pLookup;
+    ColorConverter *cvt = pParms->pColorConverter;
+    unsigned long (ColorConverter::*convert)(unsigned long) = pParms->pConvert;
+    int transparent = (pParms->bltFlags & BLT_TRANSPARENT) != 0;
+    ULONG transparentColor = pParms->solidColor;             // in the source's own pixel format (GPE swblt.cpp)
     if (pParms->prclClip) {
         RECTL *c = pParms->prclClip;
         if (c->left > dst.left)     { sx += c->left - dst.left; dst.left = c->left; }
@@ -379,7 +392,18 @@ SCODE ClasspadGPE::RotatedMonoBlt16(GPEBltParms *pParms)
         const BYTE *srow = srcBase + (sy + y) * sstride;
         for (x = 0; x < w; x++) {
             int bx = sx + x;
-            USHORT v = ((srow[bx >> 3] >> (7 - (bx & 7))) & 1) ? lut1 : lut0;     // 1 bpp DIBs: the leftmost pixel is the high bit
+            ULONG raw;
+            USHORT v;
+            switch (sfmt) {
+            case gpe1Bpp: raw = (srow[bx >> 3] >> (7 - (bx & 7))) & 1; break;        // the leftmost pixel is the high bit
+            case gpe4Bpp: raw = (bx & 1) ? (srow[bx >> 1] & 0xF) : (srow[bx >> 1] >> 4); break;
+            case gpe8Bpp: raw = srow[bx]; break;
+            default:      raw = ((const USHORT *)srow)[bx]; break;
+            }
+            if (transparent && raw == transparentColor) continue;
+            if (lut) v = (USHORT)lut[raw];
+            else if (convert) v = (USHORT)(cvt->*convert)(raw);
+            else v = (USHORT)raw;
             USHORT *d = (USHORT *)pParms->pDst->GetPtr(dst.left + x, dst.top + y);
             switch (pParms->rop4) {
             case 0x8888: *d &= v; break;
@@ -450,8 +474,21 @@ SCODE ClasspadGPE::ConvertedCopyBlt16(GPEBltParms *pParms)
 
 SCODE ClasspadGPE::WrappedBlt(GPEBltParms *pParms)
 {
-    static int logged;
+    static int logged, rotLogged;
     SCODE sc = EmulatedBlt(pParms);
+    // Diagnostic (2026-11-09): what still reaches GPE's generic path on a
+    // rotated screen (the Start menu's icons were wrong there).
+    if (pParms->pDst == m_pPrimarySurface && m_pPrimarySurface->IsRotate() && rotLogged < 64) {
+        rotLogged++;
+        RETAILMSG(1, (TEXT("CLASSPAD DDI: rotated blt rop4=%04X dst=%d,%d-%d,%d src=%d lookup=%d convert=%d mask=%d brush=%d flags=%08X -> %08X\r\n"),
+                      (UINT)pParms->rop4,
+                      pParms->prclDst ? pParms->prclDst->left : -1, pParms->prclDst ? pParms->prclDst->top : -1,
+                      pParms->prclDst ? pParms->prclDst->right : -1, pParms->prclDst ? pParms->prclDst->bottom : -1,
+                      pParms->pSrc ? (int)pParms->pSrc->Format() : -1, pParms->pLookup != NULL, pParms->pConvert != NULL,
+                      pParms->pMask ? (int)pParms->pMask->Format() : -1,
+                      pParms->pBrush ? (int)pParms->pBrush->Format() : -1,
+                      (UINT)pParms->bltFlags, (UINT)sc));
+    }
     if (pParms->pDst == m_pPrimarySurface) {
         if (pParms->prclDst) {
             RECTL physical = *pParms->prclDst;

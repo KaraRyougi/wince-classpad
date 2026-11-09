@@ -418,6 +418,19 @@ logo 都对。GPE 的 sysgen 版 gpe.lib 已经包含 emulrotate（gperotate.lib
 （`RotatedMonoBlt16`，经 `GPESurf::GetPtr(x, y)` 寻址，处理裁剪，标脏行）。
 重建后验证：转屏后 "My Device" 图标的 181 种颜色与未转屏时完全一致。
 
+**转屏之后开始菜单的图标是黑色剪影**（真机反馈，模拟器里 Rotate 条图标 →
+横屏 → 点开始复现，`scratchpad/rot`）。菜单项左边的小图标只剩掩码 AND 出来的
+黑影，图像那一步没画上；桌面图标和 Start 按钮的 logo 正常。和上一条同源：
+菜单图标来自 commctrl 的 image list，图像位图不是 16 bpp 直拷（带 lookup 的
+4/8 bpp 或带 converter 的 16 bpp），emulrotate 的 `EmulatedBltSelect16` 凡带
+lookup/convert/BLT_TRANSPARENT 的都不接，GPE 的通用旋转路径又画错。驱动里把
+`RotatedMonoBlt16` 扩成 `RotatedLookupBlt16`：旋转的 16 bpp 目标 + 未旋转的
+1/4/8 bpp 源经 lookup，或 16 bpp 源经 converter 或带 BLT_TRANSPARENT（透明色
+按源格式比较原始像素，与 GPE swblt.cpp 一致），rop SRCAND/SRCPAINT/SRCINVERT/
+SRCCOPY，逐像素经 `GetPtr`；不带转换的 16 bpp 拷贝仍交给 emulrotate。另外给
+转屏后仍走通用路径的前 64 次 blit 加了日志（`rotated blt rop4=…`），重建后
+用它确认菜单图标走的到底是哪种源，再决定删不删。待重建验证。
+
 **重建镜像上 Recalc 的剩余分布（Render 到 100% 约 60 s，采样 398 个）：**
 Plotter-Z 自己的 `PaintCanvas16Bpp` 52%、驱动的 `ConvertedCopyBlt16` 8%、
 FPU 模拟（`fpuemu_exec` + 辅助 stub + `dbt_fpu_c`）16%、GWES 字形 0%（字形
