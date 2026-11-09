@@ -365,6 +365,23 @@ HTML 子集，peghelp.c 用 GDI 画）搬进 `bsp/classpad50`，`platform.bib` �
 `make test` 的 `test_peghelp` 在宿主上解析 Xpander 的 6 个帮助文件、217 个链接。
 同样要重建镜像。
 
+**重建后的镜像（2026-11-09 10:30 的 NK.bin/EXT.bin）在模拟器里：** 触摸条
+Rotate 转屏成功（`ROTATEKEY: mode=1 result=0 size=528x320`，桌面横过来了）；
+Math Xpander 的 ? 按钮打开 PegHelp 的 "Workbook and Notes help"；Plotter-Z 的
+Saddle Surface：新镜像从 Render 到 100% 约 54 s，旧镜像同一时刻才 60%（估计
+全程 160 s 以上），快路径加字形缓存把 Recalc 缩到三分之一左右（宿主这一小时
+比早上慢了约 1.5 倍，两次都在同一条件下跑）。开始菜单多了 Help 一项（有了
+peghelp.exe 之后 shell 自己加的），Programs 从 y=371 挪到 349。
+
+**转屏之后桌面图标颜色不对。** 像素比对：图标内部的颜色 = 图标颜色 OR 桌面
+底色（(123,125,123)|(57,109,164) = (123,125,255)），即画图标的两步
+（SRCAND 掩码、SRCPAINT 图像）里 AND 这一步没起作用；文字、填充、Windows CE
+logo 都对。GPE 的 sysgen 版 gpe.lib 已经包含 emulrotate（gperotate.lib 只是
+它的拷贝），1616 的 emul 例程和 `GPESurf::GetPtr` 的旋转寻址也核对过没问题，
+剩下的嫌疑是 `EmulatedBltRotate_Internal` 通用路径里 1 bpp 源的取位。驱动里
+加了转屏后前 96 次 blit 的日志（rop4、源/掩码格式、lookup/convert、裁剪），
+等下一次重建拿数据。
+
 ## 九、还没做的
 
 - 在 VM 里构建（第一次构建会暴露 SDK 的差异：头文件、`WARNISERROR`）。
