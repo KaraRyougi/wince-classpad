@@ -98,6 +98,7 @@ public:
     SCODE           WrappedLine(GPELineParms *pParms);
     SCODE           WrappedBlt(GPEBltParms *pParms);
     SCODE           ConvertedCopyBlt16(GPEBltParms *pParms);
+    SCODE           RotatedMonoBlt16(GPEBltParms *pParms);
     void            Dirty(int top, int bottom);
     void            PushRows(int top, int bottom);
     static DWORD WINAPI PushThread(LPVOID pThis);
@@ -335,6 +336,65 @@ SCODE ClasspadGPE::BltPrepare(GPEBltParms *pParms)
         pParms->prclSrc->bottom - pParms->prclSrc->top == pParms->prclDst->bottom - pParms->prclDst->top &&
         !pParms->pSrc->IsRotate() && !pParms->pDst->IsRotate())
         pParms->pBlt = (SCODE (GPE::*)(GPEBltParms *))&ClasspadGPE::ConvertedCopyBlt16;
+    // A 1 bpp source through a lookup onto the rotated primary: GWES draws
+    // icons as SRCAND of the mono mask followed by SRCPAINT of the image, and
+    // on a rotated screen GPE's generic rotated path left the AND without
+    // effect (icons came out OR-ed with the background, 2026-11-09; the
+    // SRCPAINT goes through emulrotate's 1616 routine and is fine). Done here
+    // pixel by pixel through GPESurf::GetPtr(x, y).
+    else if (pParms->pSrc && pParms->pDst && pParms->pDst->IsRotate() && !pParms->pSrc->IsRotate() &&
+        pParms->pSrc->Format() == gpe1Bpp && pParms->pDst->Format() == gpe16Bpp &&
+        pParms->pLookup && !pParms->pConvert && !pParms->pMask &&
+        !(pParms->bltFlags & (BLT_STRETCH | BLT_TRANSPARENT | BLT_ALPHABLEND)) &&
+        pParms->prclSrc && pParms->prclDst &&
+        (pParms->rop4 == 0x8888 || pParms->rop4 == 0xEEEE || pParms->rop4 == 0x6666 || pParms->rop4 == 0xCCCC))
+        pParms->pBlt = (SCODE (GPE::*)(GPEBltParms *))&ClasspadGPE::RotatedMonoBlt16;
+    return S_OK;
+}
+
+SCODE ClasspadGPE::RotatedMonoBlt16(GPEBltParms *pParms)
+{
+    RECTL dst = *pParms->prclDst;
+    int sx = pParms->prclSrc->left, sy = pParms->prclSrc->top, x, y, w, h;
+    const BYTE *srcBase = (const BYTE *)pParms->pSrc->Buffer();
+    int sstride = pParms->pSrc->Stride();
+    USHORT lut0 = (USHORT)pParms->pLookup[0], lut1 = (USHORT)pParms->pLookup[1];
+    if (pParms->prclClip) {
+        RECTL *c = pParms->prclClip;
+        if (c->left > dst.left)     { sx += c->left - dst.left; dst.left = c->left; }
+        if (c->top > dst.top)       { sy += c->top - dst.top;   dst.top = c->top; }
+        if (c->right < dst.right)   dst.right = c->right;
+        if (c->bottom < dst.bottom) dst.bottom = c->bottom;
+    }
+    if (dst.left < 0)   { sx -= dst.left; dst.left = 0; }
+    if (dst.top < 0)    { sy -= dst.top;  dst.top = 0; }
+    if (sx < 0)         { dst.left -= sx; sx = 0; }
+    if (sy < 0)         { dst.top -= sy;  sy = 0; }
+    if (dst.right > pParms->pDst->Width())   dst.right = pParms->pDst->Width();     // logical (rotated) size
+    if (dst.bottom > pParms->pDst->Height()) dst.bottom = pParms->pDst->Height();
+    w = dst.right - dst.left; h = dst.bottom - dst.top;
+    if (sx + w > pParms->pSrc->Width())  w = pParms->pSrc->Width() - sx;
+    if (sy + h > pParms->pSrc->Height()) h = pParms->pSrc->Height() - sy;
+    for (y = 0; y < h; y++) {
+        const BYTE *srow = srcBase + (sy + y) * sstride;
+        for (x = 0; x < w; x++) {
+            int bx = sx + x;
+            USHORT v = ((srow[bx >> 3] >> (7 - (bx & 7))) & 1) ? lut1 : lut0;     // 1 bpp DIBs: the leftmost pixel is the high bit
+            USHORT *d = (USHORT *)pParms->pDst->GetPtr(dst.left + x, dst.top + y);
+            switch (pParms->rop4) {
+            case 0x8888: *d &= v; break;
+            case 0xEEEE: *d |= v; break;
+            case 0x6666: *d ^= v; break;
+            default:     *d = v;  break;
+            }
+        }
+    }
+    if (pParms->pDst == m_pPrimarySurface && w > 0 && h > 0) {
+        RECTL physical = dst;
+        physical.right = dst.left + w; physical.bottom = dst.top + h;
+        m_pPrimarySurface->RotateRectl(&physical);
+        Dirty(physical.top, physical.bottom);
+    }
     return S_OK;
 }
 

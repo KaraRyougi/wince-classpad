@@ -378,9 +378,14 @@ peghelp.exe 之后 shell 自己加的），Programs 从 y=371 挪到 349。
 （SRCAND 掩码、SRCPAINT 图像）里 AND 这一步没起作用；文字、填充、Windows CE
 logo 都对。GPE 的 sysgen 版 gpe.lib 已经包含 emulrotate（gperotate.lib 只是
 它的拷贝），1616 的 emul 例程和 `GPESurf::GetPtr` 的旋转寻址也核对过没问题，
-剩下的嫌疑是 `EmulatedBltRotate_Internal` 通用路径里 1 bpp 源的取位。驱动里
-加了转屏后前 96 次 blit 的日志（rop4、源/掩码格式、lookup/convert、裁剪），
-等下一次重建拿数据。
+驱动里加了转屏后前 96 次 blit 的日志（rop4、源/掩码格式、lookup/convert、
+裁剪），重建后看到画图标的两步是：`rop4=8888 src=1bpp lookup=1`（掩码 AND，
+经查找表），接着 `rop4=EEEE src=16bpp`（图像 OR）。OR 走 emulrotate 的 1616
+例程没问题；AND 因为带 lookup 被 `EmulatedBltSelect16` 放回 GPE 的通用旋转路径，
+而那条路径对它不起作用。没有再追 GPE 里的具体原因：驱动里对"1 bpp 源 + lookup
++ 旋转的目标 + SRCAND/SRCPAINT/SRCINVERT/SRCCOPY"自己逐像素做
+（`RotatedMonoBlt16`，经 `GPESurf::GetPtr(x, y)` 寻址，处理裁剪，标脏行）。
+待重建验证。
 
 ## 九、还没做的
 
