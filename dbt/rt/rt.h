@@ -142,6 +142,7 @@ typedef struct {
     sf_u32 dev_accesses;           /* device-aware 32-bit accesses taken through the fallback helper */
     sf_u32 tlb_refills;            /* UTLB misses refilled by the translator (DBT_TLB_REFILL) */
     sf_u32 tlb_revals;             /* MMUCR.TI / range-less HC_TLB_INVALs answered by revalidating user blocks (CE 5.0, DBT_TLB_REFILL) */
+    sf_u32 fpu_illegal;            /* FPU ops the emulator refused or that raised an enabled FPU exception, delivered to the guest as exceptions */
     sf_u32 tlb_reval_skips;        /* of those, repeats with no event in between (the OAL's F9 after its TI) */
 } dbt_stats;
 extern dbt_stats dbt_stat;

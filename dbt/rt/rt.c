@@ -2882,7 +2882,7 @@ static void print_stats(void)
     dbt_puts(" lookups_c="); dbt_puthex(dbt_stat.lookups_c);
     dbt_puts(" exceptions="); dbt_puthex(dbt_stat.exceptions);
     dbt_puts(" fpu="); dbt_puthex(dbt_stat.fpu_ops);
-    dbt_puts(" fpudis="); dbt_puthex(dbt_stat.fpu_disabled);
+    dbt_puts(" fpudis="); dbt_puthex(dbt_stat.fpu_disabled); dbt_puts("/"); dbt_puthex(dbt_stat.fpu_illegal);
     dbt_puts(" hcflush="); dbt_puthex(dbt_stat.hc_flush); dbt_puts("/"); dbt_puthex(dbt_stat.hc_flush_all); dbt_puts(" romkept="); dbt_puthex(dbt_stat.rom_kept);
     dbt_puts(" ldcsr="); dbt_puthex(dbt_stat.ldc_sr_calls + FAST_LDC_SR_CALLS); dbt_puts(" fallback="); dbt_puthex(dbt_stat.fallback_calls); dbt_puts(" rte="); dbt_puthex(dbt_stat.rte_calls);
     dbt_puts(" chained="); dbt_puthex(dbt_stat.chained);
@@ -4020,6 +4020,27 @@ static int exc_c_body(dbt_gctx *ctx)
             ctx->vec_off = 0x100;
             goto deliver;
         }
+#ifdef DBT_WATCH_GPC
+        if (nr == 0xEE) {
+            /* the trapa the translator put at DBT_WATCH_GPC (translate.c):
+             * registers, and r4 read as a NUL-terminated UTF-16 string */
+            static unsigned n;
+            sf_u32 a = ctx->r[4], pa, i;
+            if (n++ < 400) {
+                dbt_puts("[watch] r4="); dbt_puthex(ctx->r[4]); dbt_puts(" r5="); dbt_puthex(ctx->r[5]);
+                dbt_puts(" r6="); dbt_puthex(ctx->r[6]); dbt_puts(" pr="); dbt_puthex(ctx->pr); dbt_puts(" \"");
+                pa = (a >= 0x80000000u && a < 0xC0000000u) ? (a & 0x1FFFFFFFu) : utlb_translate(a, REG_PTEH & 0xFF);
+                if (pa != PHYS_UNKNOWN && !(a & 1))
+                    for (i = 0; i < 64; ++i) {
+                        unsigned c = *(volatile sf_u8 *)(0x80000000u + pa + 2 * i) | ((unsigned)*(volatile sf_u8 *)(0x80000000u + pa + 2 * i + 1) << 8);
+                        if (!c || ((pa + 2 * i) & 0xFFF) == 0xFFE) break;      /* stop at the page's end: the next page may be unmapped */
+                        dbt_putc(c >= 32 && c < 127 ? (char)c : '?');
+                    }
+                dbt_puts("\"\n");
+            }
+            return RT_ACT_RESUME;
+        }
+#endif
         if (nr >= 0xF0) return hypercall(ctx, nr);
     }
 #ifndef DBT_NO_TICK_SAMPLING
@@ -4235,11 +4256,27 @@ void dbt_fpu_c(dbt_gctx *ctx, sf_u32 arg)
     r = fpuemu_exec(&g_fpu, ctx->r, &ctx->sr, opcode, &mem);
     g_helper_ret = 0;
     if (r != FPU_OK) {
+        /* Not a reason to stop the machine (2026-11-09: a halt here froze the
+         * calculator on an instruction the emulator merely did not know). An
+         * opcode we do not implement is delivered as the hardware's general
+         * illegal instruction (0x180, 0x1A0 in a delay slot): the kernel
+         * raises an exception in the offending thread and the rest of the
+         * system goes on. An enabled FPU exception (FPSCR cause set, result
+         * not written) is the FPU exception 0x120. A faulting memory
+         * operand (FPU_FAULT) was already delivered by the helper's fault
+         * path before fpuemu_exec returned. */
+        static unsigned printed;
         int insn;
-        dbt_puts("[dbt] fpu op "); dbt_puthex(opcode); dbt_puts(" status "); dbt_puthex((sf_u32)r);
-        dbt_puts(" at guest "); dbt_puthex(helper_guest_pc(hret, &insn)); dbt_puts(" fpscr "); dbt_puthex(g_fpu.fpscr); dbt_puts("\n");
-        if (r != FPU_EXCEPTION) dbt_halt("fpu emulation failed");
-        /* TODO: raise the guest FPU exception (vector 0x100, EXPEVT 0x800/0x820) */
+        sf_u32 gpc = helper_guest_pc(hret, &insn);
+        if (printed < 8) {
+            ++printed;
+            dbt_puts("[dbt] fpu op "); dbt_puthex(opcode); dbt_puts(" status "); dbt_puthex((sf_u32)r);
+            dbt_puts(" at guest "); dbt_puthex(gpc); dbt_puts(" fpscr "); dbt_puthex(g_fpu.fpscr);
+            dbt_puts(r == FPU_EXCEPTION ? ": FPU exception to the guest\n" : ": illegal instruction to the guest\n");
+        }
+        if (!insn) dbt_halt("fpu helper outside an instruction range");
+        dbt_stat.fpu_illegal++;
+        deliver_synthetic(gpc, r == FPU_EXCEPTION ? 0x120 : (arg & 0x10000u) ? 0x1A0 : 0x180);
     }
 }
 

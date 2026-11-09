@@ -324,6 +324,17 @@ shell 阶段（16–45 s）翻译器 C 代码从 64% 降到 57%，`finish_invali
   每次都失败。`classpad_ddi.cpp` 去掉了这个检查（只要 pvOut 非空就写）。
   需要在 VM 里重新 Build and Sysgen Current BSP + Make Run-Time Image。
 
+**还有没有别的 FPU 指令会出事？** 静态扫了 NK.bin 和 EXT.bin 里所有 SH-4 模块的
+.text（`tools/cesym.py` 的模块表），找 fpuemu 不实现的编码：fipr、ftrv、
+fsca、fsrra、fpchg 以及 F?CD/F?DD、F???F 一类保留编码——除了 nk.exe .text 里
+的数据字（异常向量区的字面量）没有命中，frchg/fschg 只在内核的
+Save/RestoreFloatContext 里。剩下的风险是"PR=1 下的奇数寄存器"这类依赖运行
+时模式的组合（float/ftrc/fsqrt/fcnvsd/fcnvds/fmac 和双精度算术），编译器
+不该发它们，但 fneg 的教训是不能笃定。因此翻译器对 FPU_UNIMPL 不再 halt
+整机，而是按硬件的一般非法指令（0x180，延迟槽 0x1A0）交给内核，出事的只是
+那个线程；fpuemu 报告的使能 FPU 异常（FPSCR cause 已置、结果未写）同样作为
+0x120 交给 guest，不再静默丢结果。统计里 `fpudis=a/b` 的 b 是这类投递的次数。
+
 顺带量了 Recalc 为什么慢（模拟器里 20×20 的 Saddle Surface 要约 100 s）：
 按翻译记录把心跳采样的宿主 PC 映射回 guest 符号（`hbguest.py`），计算本身
 （coredll `pow`）只占 0.2%；40% 在显示驱动的 GPE 软件 blit
