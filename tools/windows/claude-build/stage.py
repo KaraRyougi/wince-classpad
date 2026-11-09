@@ -27,6 +27,7 @@ REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 sys.path.insert(0, os.path.join(REPO, "tools"))
 import pe4k
 import sh3imports
+import xpander_widen
 
 # /FIXED EXEs whose relocations pe4k.reconstruct_relocs rebuilds: the SHA-256
 # of the copy checked by hand and its fixup count (Math Xpander 1.0 PPC SH3:
@@ -127,6 +128,11 @@ def main(argv):
                             print("stage: %s imports but never calls %s" % (w[0], ",".join(idle)))
                         new = fixed
                         nfp += 1
+                if not errs and w[0] in xpander_widen.MODULES:
+                    # the graph and geometry planes as wide as the 320-pixel screen (tools/xpander_widen.py)
+                    new, sites = xpander_widen.widen(new, w[0])
+                    if sites:
+                        print("stage: %s: plane width 231 -> 312 at %d sites" % (w[0], len(sites)))
             except pe4k.PEError as e:
                 sys.exit("stage: %s: %s" % (w[0], e))
             if errs:

@@ -515,6 +515,29 @@ SDK 头文件做了语法检查。**还没在 VM 里构建，效果待重建镜�
 曲面区域与之前逐像素一致。对调前的 10.19 亿到现在约十倍。NK.bin 因 trig 表
 涨 2 KB，空洞余量 12 KiB。
 
+**Math Xpander 的函数绘图和几何绘图只用屏幕左边 240 像素**（真机反馈，
+2026-11-09；模拟器复现：Graph 面板的坐标轴到 x≈230 为止，右边 80 像素空白，
+右上角残留一条灰线，`scratchpad/xp1`）。程序按 HP Xpander 的 240×320 屏幕写死了
+三处尺寸，用 `sh-elf-objdump -m sh3` 反汇编加上这些 DLL 导出的 C++ 修饰名
+（`??0GraphicalDomainC@...@NNNNNNGG@Z`、`?OnCreate@RectPlaneViewC@...`，
+coredll 导入按序号经 coredll.def 还原）定位：
+
+- GraphFrame.dll 和 GeometryPane.dll 各 4 处 `mov #127,rN; add #104,rN` = 231：
+  平面视图的布局矩形和 GraphicalDomainC（世界坐标到像素的映射）的像素宽度
+  （高 161 / 211 不动）。SH-3 立即数最大 127，231 这样拼出来，所以按 32 位字
+  扫描 240/231 一无所获。改成 `mov #78,rN; shll2 rN` = 312（两条指令能拼出的
+  最宽值，320 − 312 = 8，与原来 240 − 231 = 9 的边距相当）。
+- GraphicsPlane.dll `RectPlaneViewC::OnCreate` 用 `CreateCompatibleBitmap(dc,
+  240, 320)` 建后台缓冲，平面上所有绘制经它再贴到窗口，所以只改前两处时
+  坐标轴居中到 156 却仍在 x=240 被切。改成 320×512（`mov #80,r5; shll2`、
+  `mov #2,r6; shll8`；512 是两条指令能拼出的不超过屏高的最大值）。
+
+`tools/xpander_widen.py` 按指令模式找这些点并核对数量（三个 DLL 共 9 处），
+stage.py 在 sh3imports 之后调用它，VM 里 FILES\xpander 的拷贝已就地打过；
+`--check` 只报告。模拟器验证（直接把补丁打进 EXT.bin 的记录并重算校验和，不等
+makeimg）：Graph 的坐标轴从 x=1 到 308，两端的 −11.5 / 11.5 标签都在，y 轴居中
+156；Geometry 面板的残留灰线消失。下次 makeimg 生成的 EXT.bin 与这份一致。
+
 ## 九、还没做的
 
 - 在 VM 里构建（第一次构建会暴露 SDK 的差异：头文件、`WARNISERROR`）。

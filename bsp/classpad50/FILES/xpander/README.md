@@ -2,8 +2,9 @@
 
 Math Xpander 1.0 (Saltire Software, 2001), the Pocket PC 2000 SH3 build
 (`Xpander.PPC300_10003.cab`), executed in place from the EXT region: the
-second XIP region of `config.bib`, in the erased hole inside Casio's OS image
-(P1 `0x80EE0000`, 5 MiB; docs/03 "The EXT region"). `platform.bib` lists its
+second XIP region of `config.bib`, in the eActivity area of the chip since
+2026-11-09 (P1 `0x83860000`, 7.625 MiB; the hole inside Casio's OS image
+before that; docs/03 "The regions swapped"). `platform.bib` lists its
 23 SH3 DLLs and `MathXpander.exe` as `MODULES ... EXT P` (P: no CPU type
 check, they are SH3) and its help pages, keypad bitmaps and `mathxpander.lnk`
 as `FILES ... EXT`. makeimg then writes `EXT.bin` next to `NK.bin`.
@@ -47,3 +48,18 @@ the FPU calling convention; `stage.py` points those imports at
 suspect. Not covered: `printf`-family `%f` arguments (variadic doubles) and
 any other coredll function taking or returning a float or double outside
 the list in `sh3crt.def`.
+
+Screen width: the program was laid out for the HP Xpander's 240x320 screen,
+and three places keep that size, so on the 320-pixel ClassPad the right 80
+pixels of a graph or geometry plane stayed blank (2026-11-09). GraphFrame.dll
+and GeometryPane.dll build their plane's layout rectangle and its
+GraphicalDomainC pixel width as 231 (`mov #127; add #104`), and
+GraphicsPlane.dll's `RectPlaneViewC::OnCreate` draws through a
+`CreateCompatibleBitmap(dc, 240, 320)` back buffer that clipped everything
+past x = 240. `tools/xpander_widen.py` patches the three DLLs (231 -> 312,
+the buffer -> 320x512; stage.py runs it after sh3imports, and it can be run
+on this folder's copies directly, `--check` only reports). The constants
+were found by disassembling the modules with `sh-elf-objdump` and reading
+their C++ export names (the DLLs export decorated names, so
+`??0GraphicalDomainC@...@NNNNNNGG@Z` with the 231/161 arguments and the
+import thunks to coredll were enough to place them).
