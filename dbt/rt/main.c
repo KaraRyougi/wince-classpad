@@ -114,7 +114,7 @@ void dbt_main(void)
     memset(&cfg, 0, sizeof cfg);
     cfg.cache_base = CACHE_BASE; cfg.cache_size = CACHE_SIZE;
     cfg.guest_ram_lo = GUEST_RAM_LO; cfg.guest_ram_hi = GUEST_RAM_HI;
-    cfg.dev_lo = info.kernel_lo; cfg.dev_hi = info.kernel_hi;      /* kernel.dll reaches the CCN registers directly */
+    cfg.dev_lo = info.kernel_lo; cfg.dev_hi = info.kernel_hi;      /* the kernel (kernel.dll, or CE 5.0's nk.exe) reaches the CCN registers directly */
     cfg.rom_lo = info.physfirst & 0x1FFFFFFFu; cfg.rom_hi = info.physlast & 0x1FFFFFFFu;
 #ifdef EXT_FLASH
     /* config.bib's second XIP region (EXT, docs/03): its modules run in place

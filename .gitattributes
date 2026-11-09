@@ -2,3 +2,6 @@ bsp/classpad/** text eol=crlf
 bsp/kernel/*.patch -text
 bsp/classpad/**/*.dll binary
 bsp/classpad/**/*.ico binary
+bsp/classpad50/** text eol=crlf
+bsp/classpad50/**/*.dll binary
+bsp/classpad50/**/*.ico binary

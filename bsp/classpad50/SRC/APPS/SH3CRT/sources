@@ -1,0 +1,15 @@
+!if 0
+SH3CRT.dll - coredll's floating-point helpers and double-taking C library
+functions with the SH-3 calling convention, for Pocket PC SH-3 binaries
+(sh3crt.c). Exports by name, sh3crt.def.
+!endif
+TARGETNAME=SH3CRT
+TARGETTYPE=DYNLINK
+RELEASETYPE=PLATFORM
+WINCEOEM=1
+DLLENTRY=_DllMainCRTStartup
+DEFFILE=sh3crt.def
+TARGETLIBS= \
+    $(_COMMONSDKROOT)\lib\$(_CPUINDPATH)\coredll.lib
+SOURCES= \
+    sh3crt.c

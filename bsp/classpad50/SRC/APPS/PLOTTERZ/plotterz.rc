@@ -1,0 +1,4 @@
+// plotterz.rc - upstream's resources (menus, dialogs, icon, strings) as they
+// are; afxres.h in this directory stands in for MFC's, and the icon is found
+// through INCLUDES (sources).
+#include "upstream\plotter-z\win32-native\PlotterZNative.rc"

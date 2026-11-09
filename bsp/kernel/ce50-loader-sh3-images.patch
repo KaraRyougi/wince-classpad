@@ -1,0 +1,27 @@
+Windows CE 5.0: the SH4 kernel's loader accepts SH3 and SH3DSP executables
+and DLLs (Pocket PC 2000 / CE 3.0 binaries: Math Xpander, mfcce300.dll).
+loader.c's CPU-type chain has cases for SH3, MIPS and ARMV4I only, so on SH4
+every foreign machine type is ERROR_BAD_EXE_FORMAT. SH-3 user-mode code is a
+subset of SH-4 and uses software floating point (see SRC\APPS\SH3CRT for the
+calling-convention side). Same change as loader-sh3-images.patch for CE 6.0.
+
+Apply to %_WINCEROOT%\PRIVATE\WINCEOS\COREOS\NK\KERNEL\loader.c (the 2014
+update rollup; the sources are CRLF, use --ignore-whitespace), then
+`build -c` in that directory (nkmain.lib, nknocomp.lib, nkprof.lib) and a
+Sysgen of the OS design so that nk.lib and kern.exe pick the new library.
+
+--- a/PRIVATE/WINCEOS/COREOS/NK/KERNEL/loader.c
++++ b/PRIVATE/WINCEOS/COREOS/NK/KERNEL/loader.c
+@@ -2537,6 +2537,12 @@
+         if (!bIgnoreCPU && !e32ptr->e32_unit[14].rva && (e32ptr->e32_cpu != THISCPUID)) {
+ #ifdef SH3
+             if ((e32ptr->e32_cpu != IMAGE_FILE_MACHINE_SH3DSP) || !SH3DSP)
+                 return ERROR_BAD_EXE_FORMAT;
++#elif defined(SH4)
++            // CLASSPAD: SH-3 code runs on the SH-4 (user mode, software
++            // floating point): Pocket PC 2000 binaries load as they are
++            if ((e32ptr->e32_cpu != IMAGE_FILE_MACHINE_SH3) && (e32ptr->e32_cpu != IMAGE_FILE_MACHINE_SH3DSP))
++                return ERROR_BAD_EXE_FORMAT;
+ #elif defined(MIPS)
+             if ((e32ptr->e32_cpu != IMAGE_FILE_MACHINE_MIPS16) || !IsMIPS16Supported)
+                 return ERROR_BAD_EXE_FORMAT;

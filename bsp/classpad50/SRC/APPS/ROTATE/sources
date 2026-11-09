@@ -1,0 +1,11 @@
+!INCLUDE $(_TARGETPLATROOT)\sources.cmn
+TARGETNAME=classpad_rotate
+TARGETTYPE=PROGRAM
+RELEASETYPE=PLATFORM
+WINCEOEM=1
+EXEENTRY=WinMainCRTStartup
+INCLUDES=$(INCLUDES);$(_TARGETPLATROOT)\src\inc;$(_WINCEROOT)\public\common\sdk\inc;$(_WINCEROOT)\public\common\oak\inc
+TARGETLIBS= \
+    $(_PROJECTROOT)\cesysgen\sdk\lib\$(_CPUINDPATH)\coredll.lib
+SOURCES= \
+    rotate.cpp

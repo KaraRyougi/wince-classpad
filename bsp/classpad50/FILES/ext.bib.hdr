@@ -1,0 +1,31 @@
+;-------------------------------------------------------------------------------
+; ext.bib.hdr - the EXT region's own bib for the second romimage run
+; (config.bib explains why CE 5.0 needs two runs). PostRomImage.bat appends
+; the MODULES and FILES entries that PostFmergeBib.bat took out of ce.bib
+; (ext.modules.bib, ext.files.bib: the platform.bib entries with EXT in the
+; region column, paths already expanded by fmerge) and runs
+; "romimage ext.bib", which writes EXT.bin next to NK.bin.
+;
+; The RAM line is the same as config.bib's: romimage wants one, nothing in
+; this region uses it (the kernel takes RAM from NK's ROMHDR). No kernel in
+; this region ("Warning: No kernel module found" is expected), hence no
+; kernel fixups. The DLL ranges are disjoint from NK's (config.bib).
+;-------------------------------------------------------------------------------
+MEMORY
+    EXT         80EE0000  00500000  RAMIMAGE
+    RAM         8C001000  007FE000  RAM
+
+CONFIG
+    KERNELFIXUPS=OFF
+    AUTOSIZE=OFF
+    DLLLOWADDR      EXT  01400000
+    DLLHIGHADDR     EXT  01F00000
+    DLLLOWCODEADDR  EXT  02100000
+    DLLHIGHCODEADDR EXT  02200000
+    ROMSTART=80EE0000
+    ROMSIZE=00500000
+    ROMWIDTH=32
+    PROFILE=OFF
+    COMPRESSION=OFF
+    ROMFLAGS=00
+

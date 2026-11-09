@@ -1,0 +1,90 @@
+;;-----------------------------------------------------------------------------
+;;  cacheops.src - cache maintenance by address range (SH-4A)
+;;
+;;  r4 = start address, r5 = length in bytes. Lines are 32 bytes. These
+;;  instructions run natively under the translator.
+;;    ocbwb  write back a line, keep it
+;;    ocbp   write back and invalidate a line
+;;    icbi   invalidate an instruction cache line (SH-4A, encoded by hand:
+;;           the CE 6.0 assembler only knows the SH-4)
+;;-----------------------------------------------------------------------------
+        .list       OFF
+        .include    "kxshx.h"
+        .list       ON
+
+;;  void ClasspadCacheWriteback(DWORD addr, DWORD len)
+        LEAF_ENTRY _ClasspadCacheWriteback
+        mov     r4, r0
+        add     r5, r0                  ; (r0) = end
+        mov     #-32, r1
+        and     r1, r4                  ; line align
+wb10:   ocbwb   @r4
+        add     #32, r4
+        cmp/hs  r0, r4                  ; T = r4 >= end
+        bf      wb10
+        rts
+        nop
+        ENTRY_END _ClasspadCacheWriteback
+
+;;  void ClasspadCachePurge(DWORD addr, DWORD len)
+        LEAF_ENTRY _ClasspadCachePurge
+        mov     r4, r0
+        add     r5, r0
+        mov     #-32, r1
+        and     r1, r4
+pg10:   ocbp    @r4
+        add     #32, r4
+        cmp/hs  r0, r4
+        bf      pg10
+        rts
+        nop
+        ENTRY_END _ClasspadCachePurge
+
+;;  void ClasspadICacheInvalidate(DWORD addr, DWORD len)
+        LEAF_ENTRY _ClasspadICacheInvalidate
+        mov     r4, r0
+        add     r5, r0
+        mov     #-32, r1
+        and     r1, r4
+ic10:   .data.w h'04E3                  ; icbi @r4
+        add     #32, r4
+        cmp/hs  r0, r4
+        bf      ic10
+        .data.w h'00AB                  ; synco
+        rts
+        nop
+        ENTRY_END _ClasspadICacheInvalidate
+
+        ; Whole operand cache in one walk of the OC address array: 4 ways x 256
+        ; entries x 32-byte lines (SH7305, 32 KiB; the way bits 14:13 and the
+        ; entry bits 12:5 are contiguous, so the walk is linear). A non-
+        ; associative write of V=0/U=0 writes a dirty line back first, so this
+        ; is write-back and invalidate: what CACHE_SYNC_DISCARD and
+        ; CACHE_SYNC_WRITEBACK need when no range is given. 1024 stores
+        ; against 368 k ocbp for a walk of the RAM window.
+        LEAF_ENTRY _ClasspadOCacheFlushAll
+        mov.l   #h'F4000000, r1
+        mov.l   #h'00000400, r2         ; 32 KiB / 32
+        mov     #0, r0
+oa10:   mov.l   r0, @r1
+        add     #32, r1
+        dt      r2
+        bf      oa10
+        rts
+        nop
+        ENTRY_END _ClasspadOCacheFlushAll
+
+        ; Whole instruction cache: the same walk of the IC address array
+        LEAF_ENTRY _ClasspadICacheInvalidateAll
+        mov.l   #h'F0000000, r1
+        mov.l   #h'00000400, r2
+        mov     #0, r0
+ia10:   mov.l   r0, @r1
+        add     #32, r1
+        dt      r2
+        bf      ia10
+        .data.w h'00AB                  ; synco
+        rts
+        nop
+        ENTRY_END _ClasspadICacheInvalidateAll
+        .end

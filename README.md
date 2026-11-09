@@ -19,7 +19,8 @@ trap-and-emulate FPU lives in the kernel's illegal-instruction path.
 | `tools/nkbin.py` | Parser/inspector for CE `.bin` images (B000FF) and ROMHDR |
 | `dbt/hhk/` | HollyHock 3 programs for the real fx-CP400: `wince.hhk` starts the translator from Casio's OS, `nkflash.hhk` writes NK.bin into the NOR (docs/03) |
 | `loader/` | history only: the pre-translator loader idea (see its README) |
-| `bsp/` | Platform Builder BSP (OAL, drivers, .bib/.reg files); needs PB 6.0 on Windows |
+| `bsp/classpad/` | Platform Builder 6.0 BSP (OAL, drivers, .bib/.reg files); needs PB 6.0 on Windows |
+| `bsp/classpad50/` | the same BSP for Windows CE 5.0 (the current target, docs/08); needs PB 5.0 on Windows |
 
 ## Status
 
@@ -31,7 +32,7 @@ translator (`dbt/`) runs its three test guests to completion inside casio-emu
 
 - macOS/Linux with clang or gcc and python3 for `fpuemu` tests and `tools/`.
 - fxSDK's `sh-elf-gcc` (`giteapc install Lephenixnoir/fxsdk Lephenixnoir/sh-elf-gcc`) for `dbt/`, including the HollyHock programs (no HollyHock SDK needed).
-- Windows (VM is fine) with Visual Studio 2005 + Platform Builder 6.0 R3 for `bsp/`.
+- Windows (VM is fine) with Platform Builder 5.0 for `bsp/classpad50/` (Visual Studio 2005 + Platform Builder 6.0 R3 for `bsp/classpad/`).
 - casio-emu (fx-CG100 model) for first bring-up before touching hardware.
 
 ```sh

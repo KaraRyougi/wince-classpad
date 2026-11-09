@@ -1,0 +1,51 @@
+;;-----------------------------------------------------------------------------
+;;  startup.src - CLASSPAD image entry (Windows CE 5.0)
+;;
+;;  The translator finds the image in the NOR (XIP) and jumps here with MD=1.
+;;  Nothing board-level is needed (no SDRAM or watchdog setup: the calculator's
+;;  own boot code and the translator's launcher already ran). KernelStart (in
+;;  nk.lib, shexcept.src) sets SR = PR_B1_BK itself, runs SH3Init from the
+;;  uncached alias (caches off, KernelRelocate, OEMInitDebugSerial, the
+;;  sign-on, MMU on, OEMInit, KernelFindMemory) and goes on to KernelInit.
+;;-----------------------------------------------------------------------------
+        .list       OFF
+        .include    "kxshx.h"
+        .list       ON
+
+        .import     KernelStart
+
+SR_INIT         .equ    h'500000F0      ; MD=1, BL=1, IMASK=15, RB=0
+SYSINTR_NOP     .equ    0
+
+        LEAF_ENTRY _StartUp
+
+        mov.l   #SR_INIT, r0
+        ldc     r0, sr
+        mov.l   #h'00000000, r0
+        ldc     r0, vbr                 ; the kernel installs its own table (shadowed by the translator)
+
+        mov.l   #KernelStart, r0
+        mov.l   #Base, r1
+        sub     r1, r0
+        mov.l   #4, r1
+        sub     r1, r0
+Base:   braf    r0
+        nop
+
+Halt:   bra     Halt
+        nop
+
+        ENTRY_END   _StartUp
+
+;;-----------------------------------------------------------------------------
+;;  OEMNMI - non-maskable interrupt: nothing to signal. The CE 5.0 kernel's
+;;  exception table imports the assembly symbol OEMNMI (no C underscore),
+;;  like PLATFORM\ASPEN\KERNEL\HAL\SH\fw.src defines it. Entered in bank 1
+;;  with exceptions blocked; r0-r3, r6 are free.
+;;-----------------------------------------------------------------------------
+        LEAF_ENTRY OEMNMI
+        rts
+        mov     #SYSINTR_NOP, r0
+        ENTRY_END   OEMNMI
+
+        .end

@@ -1,0 +1,119 @@
+;-------------------------------------------------------------------------------
+; CLASSPAD platform.bib (Windows CE 5.0): the display driver when GWES is in
+; the OS design, the KEYSC keyboard with the keyboard MDD, the touch driver
+; with the touch (pointer) component, the BSP's applications and the Pocket
+; PC compatibility DLLs.
+;
+; Regions (config.bib): the three drivers stay in NK with the OS (the
+; eActivity area that Casio's OS reformats at every boot and wince.hhk
+; reflashes before each CE session), so the image is usable with NK.bin
+; alone; everything else this BSP adds (applications, DocList, SH3CRT,
+; mfcce300, Math Xpander) lives in EXT, the 5 MiB hole inside Casio's OS
+; image, which survives Casio boots and is flashed once. Under CE 5.0 the EXT
+; entries below are taken out of ce.bib by PostFmergeBib.bat and built into
+; EXT.bin by a second romimage run (PostRomImage.bat, ext.bib.hdr), so their
+; region column must read exactly "EXT". Sizes, 2026-11-09 image: NK about
+; 4.9 MB of 7.625 MiB, EXT about 4.0 MB of 5 MiB.
+;-------------------------------------------------------------------------------
+MODULES
+;;  Name            Path                                            Memory Type
+;;  --------------- ----------------------------------------------- -----------
+; @CESYSGEN IF CE_MODULES_DISPLAY
+   classpad_ddi.dll     $(_FLATRELEASEDIR)\classpad_ddi.dll     NK  SH
+; @CESYSGEN ENDIF CE_MODULES_DISPLAY
+; @CESYSGEN IF CE_MODULES_KEYBD
+   kbdmouse.dll         $(_FLATRELEASEDIR)\classpad_kbd.dll     NK  SH
+; @CESYSGEN ENDIF CE_MODULES_KEYBD
+; @CESYSGEN IF CE_MODULES_POINTER
+   touch.dll            $(_FLATRELEASEDIR)\classpad_touch.dll   NK  SH
+; @CESYSGEN ENDIF CE_MODULES_POINTER
+; @CESYSGEN IF CE_MODULES_COMMCTRL
+   DocList.dll          $(_FLATRELEASEDIR)\DocList.dll          EXT  S
+; @CESYSGEN ENDIF CE_MODULES_COMMCTRL
+
+FILES
+
+; Plotter-Z, a 3D function plotter (SRC\APPS\PLOTTERZ, built with the BSP):
+; command bar, trackbar and the Open/Save dialogs, so only with commctrl and
+; commdlg in the OS design. platform.dat puts the link in the Start menu.
+; @CESYSGEN IF CE_MODULES_COMMCTRL
+; @CESYSGEN IF CE_MODULES_COMMDLG
+MODULES
+    PlotterZ.exe        $(_FLATRELEASEDIR)\PlotterZ.exe        EXT  S
+FILES
+    plotterz.lnk        $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\plotterz.lnk     EXT  S
+; @CESYSGEN ENDIF CE_MODULES_COMMDLG
+; @CESYSGEN ENDIF CE_MODULES_COMMCTRL
+
+MODULES
+    classpad_rotate.exe $(_FLATRELEASEDIR)\classpad_rotate.exe EXT S
+
+MODULES
+    classpad_rotatekey.exe $(_FLATRELEASEDIR)\classpad_rotatekey.exe EXT S
+
+; SH-3 floating point for the Pocket PC SH-3 binaries below (SRC\APPS\SH3CRT):
+; coredll's helpers and double C functions with the SH-3 calling convention;
+; stage.py points their imports here (tools/sh3imports.py).
+MODULES
+    sh3crt.dll          $(_FLATRELEASEDIR)\sh3crt.dll          EXT  S
+
+; MFC CE 3.0 (Pocket PC, SH3) for legacy applications, with DocList.dll above,
+; executed in place like the rest of NK. P: romimage does not check the CPU
+; type of an SH3 module; the kernel loads ROM modules without a CPU check.
+; The Pocket PC tools linked SH3 binaries with 1 KiB sections and romimage
+; takes only 4 KiB ones ("only 4k page alignments supported"): stage.py
+; realigns every MODULES entry under FILES with tools/pe4k.py.
+MODULES
+   mfcce300.dll          $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\legacy-mfc\mfcce300.dll        EXT  P
+
+; Math Xpander 1.0 (Saltire, Pocket PC 2000 SH3) in the EXT region (config.bib):
+; its binaries as XIP modules, help pages, keypad bitmaps and the Start menu
+; link as files. The binaries are not in the repository: stage.py copies them
+; into FILES\xpander from the unpacked cab (FILES\xpander\README.md) and
+; realigns them to 4 KiB sections. MathXpander.exe is linked /FIXED (no
+; relocations): stage.py rebuilds them first (pe4k.reconstruct_relocs; as a
+; plain file CE 6 refused it, "not a valid Windows CE application": its loader
+; takes no section that is not page aligned, 2026-11-06). The
+; program is \Windows\MathXpander.exe; platform.dat puts the link in the Start
+; menu, platform.reg registers .mwb. MathKeyPad.dll (its keypad input method)
+; is in, not registered.
+MODULES
+   AlgebraicExpression.dll  $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\AlgebraicExpression.dll   EXT  P
+   CalculationPane.dll      $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\CalculationPane.dll       EXT  P
+   Common.dll               $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\Common.dll                EXT  P
+   DataSet.dll              $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\DataSet.dll               EXT  P
+   EvalAlgorithms.dll       $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\EvalAlgorithms.dll        EXT  P
+   EventServiceBroker.dll   $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\EventServiceBroker.dll    EXT  P
+   ExpressionEditor.dll     $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\ExpressionEditor.dll      EXT  P
+   ExpressionEditorUI.dll   $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\ExpressionEditorUI.dll    EXT  P
+   GeometryControl.dll      $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\GeometryControl.dll       EXT  P
+   GeometryEngine.dll       $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\GeometryEngine.dll        EXT  P
+   GeometryPane.dll         $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\GeometryPane.dll          EXT  P
+   GraphFrame.dll           $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\GraphFrame.dll            EXT  P
+   Graphics.dll             $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\Graphics.dll              EXT  P
+   GraphicsPlane.dll        $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\GraphicsPlane.dll         EXT  P
+   MfcComponents.dll        $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\MfcComponents.dll         EXT  P
+   ndosspal.dll             $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\ndosspal.dll              EXT  P
+   NumericCAS.dll           $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\NumericCAS.dll            EXT  P
+   PlotControl.dll          $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\PlotControl.dll           EXT  P
+   Relation.dll             $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\Relation.dll              EXT  P
+   SymbolicPane.dll         $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\SymbolicPane.dll          EXT  P
+   TableFrame.dll           $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\TableFrame.dll            EXT  P
+   TablePane.dll            $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\TablePane.dll             EXT  P
+   Workbook.dll             $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\Workbook.dll              EXT  P
+   MathKeyPad.dll           $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\MathKeyPad.dll            EXT  P
+   MathXpander.exe          $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\MathXpander.exe           EXT  P
+FILES
+   geometry1.htm            $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\geometry1.htm             EXT  S
+   graph1.htm               $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\graph1.htm                EXT  S
+   math1.htm                $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\math1.htm                 EXT  S
+   math_help_contents.htm   $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\math_help_contents.htm    EXT  S
+   mathkeypad_123.2BP       $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\mathkeypad_123.2BP        EXT  S
+   mathkeypad_abc.2BP       $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\mathkeypad_abc.2BP        EXT  S
+   mathkeypad_arrow.2BP     $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\mathkeypad_arrow.2BP      EXT  S
+   table1.htm               $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\table1.htm                EXT  S
+   wookbook_line.2BP        $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\wookbook_line.2BP         EXT  S
+   workbook1.htm            $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\workbook1.htm             EXT  S
+   workbook_keyboard.2BP    $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\workbook_keyboard.2BP     EXT  S
+   workbook_keybswitch.2BP  $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\workbook_keybswitch.2BP   EXT  S
+   mathxpander.lnk          $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\mathxpander.lnk           EXT  S

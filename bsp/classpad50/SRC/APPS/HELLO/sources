@@ -1,0 +1,13 @@
+!if 0
+classpad_hello.exe - the first window: GWES, GDI and the display driver end
+to end. Launched from HKLM\init after GWES (platform.reg).
+!endif
+TARGETNAME=classpad_hello
+TARGETTYPE=PROGRAM
+RELEASETYPE=PLATFORM
+WINCEOEM=1
+EXEENTRY=WinMainCRTStartup
+TARGETLIBS= \
+    $(_COMMONSDKROOT)\lib\$(_CPUINDPATH)\coredll.lib
+SOURCES= \
+    hello.c

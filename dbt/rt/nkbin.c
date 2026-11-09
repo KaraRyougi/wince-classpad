@@ -34,14 +34,17 @@ static void parse_rom(sf_u32 start, sf_u32 lo, sf_u32 hi, nkbin_info *out)
                 sf_u32 i, toc = out->romhdr + 84;
                 static const char kname[] = "kernel.dll";
                 static const char nkname[] = "nk.exe";
+                sf_u32 nk_lo = 0, nk_hi = 0;
                 for (i = 0; i < out->nummods && i < 256 && toc + 32 <= hi; i++, toc += 32) {
                     const sf_u8 *te = (const sf_u8 *)toc;
-                    sf_u32 name = le32(te + 16), e32 = le32(te + 20), load = le32(te + 28), k;
+                    sf_u32 name = le32(te + 16), e32 = le32(te + 20), load = le32(te + 28), k, is_nk, is_kdll;
                     if (name < lo || name + 16 > hi || e32 < lo || e32 + 24 > hi) continue;
                     for (k = 0; k < sizeof nkname; k++) if (((const char *)name)[k] != nkname[k]) break;
-                    if (k == sizeof nkname) out->nk_entry = load + le32((const sf_u8 *)e32 + 4);   /* e32_entryrva */
+                    is_nk = (k == sizeof nkname);
                     for (k = 0; k < sizeof kname; k++) if (((const char *)name)[k] != kname[k]) break;
-                    if (k == sizeof kname) {
+                    is_kdll = (k == sizeof kname);
+                    if (is_nk) out->nk_entry = load + le32((const sf_u8 *)e32 + 4);   /* e32_entryrva */
+                    if (is_nk || is_kdll) {
                         /* the code range is the union of the module's code
                          * sections (o32: vsize +0, realaddr +16, flags +20;
                          * IMAGE_SCN_CNT_CODE 0x20): ROMIMAGE places them
@@ -55,11 +58,17 @@ static void parse_rom(sf_u32 start, sf_u32 lo, sf_u32 hi, nkbin_info *out)
                             if (real < clo) clo = real;
                             if (real + vsize > chi) chi = real + vsize;
                         }
-                        if (chi) { out->kernel_lo = clo; out->kernel_hi = chi; }
-                        else { out->kernel_lo = load; out->kernel_hi = load + le32((const sf_u8 *)e32 + 20); }
-                        break;
+                        if (!chi) { clo = load; chi = load + le32((const sf_u8 *)e32 + 20); }
+                        if (is_kdll) { out->kernel_lo = clo; out->kernel_hi = chi; out->kernel_is_nk = 0; }
+                        else { nk_lo = clo; nk_hi = chi; }
                     }
                 }
+                /* CE 6.0: kernel.dll is the kernel and reaches the CCN registers;
+                 * nk.exe is only the OAL. CE 5.0 and earlier: there is no
+                 * kernel.dll, nk.exe is kernel + OAL in one module, so the
+                 * device-aware range is its code (the OAL inside it must then
+                 * access P4 registers unswapped: bsp/classpad50 P4_* macros). */
+                if (!out->kernel_hi && nk_hi) { out->kernel_lo = nk_lo; out->kernel_hi = nk_hi; out->kernel_is_nk = 1; }
             }
         }
     }
@@ -127,7 +136,8 @@ void nkbin_print(const nkbin_info *i)
     dbt_puts(" free "); dbt_puthex(i->ram_free); dbt_puts(" end "); dbt_puthex(i->ram_end);
     dbt_puts(" kflags "); dbt_puthex(i->kernel_flags); dbt_puts("\n");
     if (i->kernel_hi) {
-        dbt_puts("[nk] kernel.dll "); dbt_puthex(i->kernel_lo); dbt_puts(".."); dbt_puthex(i->kernel_hi);
+        dbt_puts(i->kernel_is_nk ? "[nk] nk.exe (kernel + OAL, CE 5.0 style) " : "[nk] kernel.dll ");
+        dbt_puthex(i->kernel_lo); dbt_puts(".."); dbt_puthex(i->kernel_hi);
         dbt_puts(" (device-aware translation)\n");
     }
 }

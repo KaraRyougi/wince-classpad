@@ -1,0 +1,79 @@
+;-------------------------------------------------------------------------------
+; CLASSPAD config.bib, Windows CE 5.0: the image executes in place from the
+; NOR flash (XIP). Two regions, as the CE 6.0 image had (docs/03):
+;   NK   the kernel, the shell and the drivers, in the eActivity area of the
+;        fx-CP400's chip (P1 0x83860000, 7.625 MiB; Casio's OS reformats the
+;        area at every boot, so wince.hhk reflashes NK.bin before each CE
+;        session; the translator is built with NK_WINDOW=eact). This file.
+;   EXT  a second XIP region in the erased hole inside Casio's OS image
+;        (P1 0x80EE0000, 5 MiB): the BSP's applications, the Pocket PC
+;        compatibility DLLs and Math Xpander (platform.bib entries with EXT
+;        in the region column). OEMInit hands it to the kernel through
+;        OEMRomChain (SRC\INC\classpad_extrom.h). Without EXT.bin flashed CE
+;        boots as if the region were empty.
+;
+; CE 5.0's romimage (4.0) cannot lay out two regions that are not
+; contiguous: given both MEMORY lines it placed NK at EXT's address and EXT
+; right after NK's end, whatever the addresses said (2026-11-09 makeimg.log:
+; "RAM AutoSize: RAM Start=813c1000", nk.exe at 80ee0000, Math Xpander at
+; 81443000..818eb000, then an assertion while finishing NK.bin). CE 6.0's
+; romimage honoured them. So the CE 5.0 build makes EXT in a second romimage
+; run: PostFmergeBib.bat moves the EXT entries out of ce.bib into
+; ext.modules.bib / ext.files.bib, romimage builds NK alone from this file,
+; and PostRomImage.bat assembles ext.bib from ext.bib.hdr (the EXT region's
+; own MEMORY and CONFIG) and those entries and runs romimage again. The DLL
+; address ranges of the two runs must not overlap (every ROM DLL has a fixed
+; virtual address): NK's SH4 DLLs put their data pages top-down from
+; 0x02000000 (a few KiB each, 33 DLLs: 1 MiB is plenty) and their code in
+; slot 1 top-down from 0x04000000 (4.1 MiB); EXT's Pocket PC modules have no
+; .rel files ("old fixup style") and go whole into the data range, 5.1 MiB
+; for 25 modules, plus 128 KiB of code range. Hence:
+;   NK   data 01F00000..02000000   code 02200000..04000000  (here)
+;   EXT  data 01400000..01F00000   code 02100000..02200000  (ext.bib.hdr)
+; Processes keep slot 0 below 0x01400000 (20 MiB; the default boundary is
+; 0x01800000). No AUTOSIZE: in this romimage DLLADDR_AUTOSIZE only works
+; under AUTOSIZE=ON, which also moves RAM behind the image.
+;
+; The whole guest RAM window 0x8C000000-0x8C7FFFFF is RAM (dbt/Makefile owns
+; these numbers); the first page is the BOOTARGS page, the last page the
+; debug ring shared with the translator (image_cfg.h), both kept out of RAM.
+;-------------------------------------------------------------------------------
+MEMORY
+;   Name        Start     Size      Type
+;   -------     --------  --------  ----
+    BOOTARGS    8C000000  00001000  RESERVED    ; OAL argument page (unused for now)
+    NK          83860000  007A0000  RAMIMAGE    ; eActivity area, 7.625 MiB (RAMIMAGE is the only image type; XIP follows from the address)
+;   NK          81000000  003E0000  RAMIMAGE    ; alternative without EXT: the hole alone, 3.875 MiB (make NK_WINDOW=hole, the default window of the first CE 6.0 images)
+;   EXT         80EE0000  00500000  RAMIMAGE    ; the hole in Casio's OS image, 5 MiB: built by the second romimage run, ext.bib.hdr
+    RAM         8C001000  007FE000  RAM         ; up to 0x8C7FF000 (dbt/Makefile GUEST_RAM_HI - 4 KiB)
+    DBGRING     8C7FF000  00001000  RESERVED    ; translator debug ring (image_cfg.h CLASSPAD_DBG_RING_PA)
+
+CONFIG
+    KERNELFIXUPS=ON
+    AUTOSIZE=OFF
+    DLLLOWADDR      NK   01F00000
+    DLLHIGHADDR     NK   02000000
+    DLLLOWCODEADDR  NK   02200000
+    DLLHIGHCODEADDR NK   04000000
+    ROMSTART=83860000
+    ROMSIZE=007A0000
+    ROMWIDTH=32
+; No profiler symbol tables (romimage writes one per module when PROFILE is
+; on; the CE 5.0 makeimg of 2026-11-09 died while printing them)
+    PROFILE=OFF
+; No compression: the writable sections are stored as is, so the kernel
+; does not run its decompressor at boot (slow under the translator) and
+; the image is a few hundred KB larger.
+    COMPRESSION=OFF
+; ROMFLAGS: bit 0 would disable demand paging, bit 1 the full kernel mode
+; (CE 5.0 drivers and GWES run in kernel mode, which the MMIO macros of the
+; drivers need), bit 4 "trust only ROM modules". Keep all off.
+    ROMFLAGS=00
+; RAM file system (object store) share of RAM, per 2 MiB band: 8 of 256
+; (3.1 %, about 256 KiB of the 8 MiB window) instead of the default 50 %.
+; The kernel carves these pages out at boot and never lends them back; the
+; object store is the root file system and holds the registry, so it stays
+; non-zero. The default left so few pages with 9 MiB of RAM that the kernel
+; refused the display driver's data copy and GWES started without a driver
+; (CE 6.0, 2026-11-03).
+    FSRAMPERCENT=08080808

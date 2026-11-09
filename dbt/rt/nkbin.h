@@ -3,7 +3,8 @@
  * memory model is byte-identical to a little-endian machine), and a flat
  * ROMIMAGE already in the NOR that the kernel executes in place (XIP). In
  * both the ROMHDR is found through the "ECEC" marker at image start + 0x40
- * and gives the RAM range, kernel.dll's code range and nk.exe's entry. */
+ * and gives the RAM range, the kernel's code range (kernel.dll, or nk.exe
+ * when the image has no kernel.dll: CE 5.0) and nk.exe's entry. */
 #ifndef NKBIN_H
 #define NKBIN_H
 #include "rt.h"
@@ -15,7 +16,8 @@ typedef struct {
     sf_u32 physfirst, physlast, nummods;
     sf_u32 ram_start, ram_free, ram_end;
     sf_u32 kernel_flags, cpu_type;    /* usCPUType: 0x01A6 = SH4 */
-    sf_u32 kernel_lo, kernel_hi;      /* kernel.dll from the module table (load .. load + e32 vsize), 0 if absent */
+    sf_u32 kernel_lo, kernel_hi;      /* the kernel's code range from the module table: kernel.dll (CE 6.0), else nk.exe (CE 5.0: kernel + OAL); 0 if absent */
+    sf_u32 kernel_is_nk;              /* 1 when the range is nk.exe's (no kernel.dll in the image) */
     sf_u32 nk_entry;                  /* nk.exe's entry point from its e32 header, 0 if absent */
     sf_u32 fail_off;                  /* source offset where parsing stopped (diagnostics) */
     int    xip;                       /* 1: executes in place from flash (nothing was copied) */

@@ -1,0 +1,49 @@
+//
+// classpad.cec - Platform Builder 5.0 catalog entry for PLATFORM\CLASSPAD
+//
+// Import once in Platform Builder: File > Manage Catalog Items > Import,
+// pick this file. The New Platform Wizard then lists "Casio ClassPad: SH4"
+// under BSPs. The drivers and applications are built with the BSP
+// (SRC\dirs); they need no catalog items of their own, platform.bib takes
+// them into the image when the OS design has GWES, the keyboard MDD, the
+// touch (pointer) component, commctrl and commdlg (@CESYSGEN conditions).
+//
+CECInfo
+(
+    Name ( "classpad" )
+    CECVersion ( 5.00 )
+    Description ( "Casio ClassPad (SH7305 under the little-endian translator) BSP catalog items" )
+    GUID ( {6A4F2C10-5C33-4A2B-9D0E-0C1A55E0C501} )
+    Vendor ( "wince-classpad" )
+)
+ComponentType
+(
+    Name ( "BSPs" )
+    GUID ( {3CABD6DA-B577-4A87-9490-9432E80DC2F1} )
+    Description ( "Board Support Packages" )
+    MaxResolvedImpsAllowed( 999 )
+    Implementations
+    (
+        Implementation
+        (
+            Name ( "Casio ClassPad: SH4" )
+            GUID ( {6A4F2C11-5C33-4A2B-9D0E-0C1A55E0C501} )
+            Description ( "Casio SH7305 calculators (fx-CP400 first; fx-CG50/CG100 share the SoC) running under the little-endian translator: TMU0 tick, INTC, DCS panel display driver, KEYSC keyboard, IIC0 touch panel, R-standby suspend, translator debug console." )
+            BSPPlatformDir ( "CLASSPAD" )
+            Version ( "5.0.0.0" )
+            Locale ( 0409 )
+            Vendor ( "wince-classpad" )
+            Date ( "11/8/2026" )
+            SizeIsCPUDependent( 1 )
+            BuildMethods
+            (
+                BuildMethod
+                (
+                    GUID ( {6A4F2C12-5C33-4A2B-9D0E-0C1A55E0C501} )
+                    Step ( BSP )
+                    CPU ( "SH4" )
+                )
+            )
+        )
+    )
+)

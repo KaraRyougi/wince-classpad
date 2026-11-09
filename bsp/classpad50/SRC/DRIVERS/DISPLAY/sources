@@ -1,0 +1,20 @@
+!if 0
+classpad_ddi.dll - GPE display driver for the ClassPad under the translator.
+A RAM frame buffer that GDI draws into; a thread pushes dirty rows to the
+panel (fx-CP400 DCS, or the fx-CG100 R61524) through its 16-bit data port
+(no scan-out hardware). gpe.lib is the sysgen'd copy in cesysgen\oak\lib
+(PUBLIC\COMMON\OAK\LIB has it as gpe_lib.lib).
+!endif
+TARGETNAME=classpad_ddi
+TARGETTYPE=DYNLINK
+RELEASETYPE=PLATFORM
+WINCEOEM=1
+DEFFILE=classpad_ddi.def
+DLLENTRY=_DllMainCRTStartup
+CDEFINES=$(CDEFINES) -DDDI
+INCLUDES=$(INCLUDES);$(_TARGETPLATROOT)\src\inc
+TARGETLIBS= \
+    $(_COMMONSDKROOT)\lib\$(_CPUINDPATH)\coredll.lib \
+    $(_COMMONOAKROOT)\lib\$(_CPUINDPATH)\gpe.lib
+SOURCES= \
+    classpad_ddi.cpp

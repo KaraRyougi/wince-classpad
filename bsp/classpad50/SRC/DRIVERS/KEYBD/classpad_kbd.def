@@ -1,0 +1,21 @@
+LIBRARY LAYOUTMANAGER
+
+EXPORTS
+    KeybdDriverInitializeEx
+    KeybdDriverPowerHandler
+    KeybdDriverGetInfo
+    KeybdDriverSetMode
+    KeybdDriverInitStates
+    KeybdDriverVKeyToUnicode
+    KeybdDriverMapVirtualKey
+
+    LayoutMgrGetKeyboardType
+    LayoutMgrGetKeyboardLayout
+    LayoutMgrGetKeyboardLayoutName
+    LayoutMgrGetKeyboardLayoutList
+    LayoutMgrLoadKeyboardLayout
+    LayoutMgrActivateKeyboardLayout
+
+    IL_00000409
+    ClassPad
+    ClassPad_00000409

@@ -48,3 +48,16 @@ In the build window (PBInitEnv.bat environment, `notes/ce/build-commands.txt`):
    `blddemo -q` style command-line equivalents). Check the timestamp of
    `kernel.dll` in the flat release directory before `makeimg`.
 4. Copy NK.bin to `notes/ce/` and run it under the translator.
+
+## Windows CE 5.0 (bsp/classpad50)
+
+- `ce50-loader-sh3-images.patch`: the same SH3 acceptance for CE 5.0's
+  `loader.c` (the CPU-type chain at ~2537 has SH3, MIPS and ARMV4I cases
+  only). Apply to `%_WINCEROOT%\PRIVATE\WINCEOS\COREOS\NK\KERNEL\loader.c`
+  of the CE 5.0 tree (2014 update rollup, CRLF: `git apply
+  --ignore-whitespace`), `build -c` in that directory, then a Sysgen of the
+  OS design: in CE 5.0 the kernel is `nk.lib` (sysgen'd from `nkmain.lib`)
+  linked into the BSP's `kern.exe`, so the BSP build picks it up on the next
+  Build Platform.
+- No WaitOneMore patch: CE 5.0's `schedule.c` already unlinks an
+  interrupt-event proxy on the timed-out exit path.

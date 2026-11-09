@@ -73,6 +73,11 @@ needed: casio-emu runs the translator as an ordinary big-endian add-in.
    for the kernel.
 4. ~~Guest image choice~~: self-built CE 6.0 R3 SH4 image (decided
    2026-10-22; Pocket PC 2000 SH3 ROMs would mean emulating a Jornada 540).
+   **Revised 2026-11-07/08: port Windows CE 5.0 instead** (the user's
+   assessment: 6.0 does not suit the hardware; 4.2 was considered first).
+   Everything the CE 6.0 image needed, and what to re-check, is in
+   docs/07-ce42-port-lessons.md; the CE 5.0 port itself (bsp/classpad50,
+   the translator's nk.exe handling) is in docs/08-ce50-port.md.
 5. CE image loading: ~~`.bin` records to guest RAM, ROMHDR, entry~~ done
    (dbt/rt/nkbin.c, image in emulated flash via HLE_OSROM; docs/05).
    ~~Platform Builder VM~~ up, stock HARP image built (2026-11-02); kernel

@@ -1,0 +1,23 @@
+;; BL closes the flag-check/SLEEP race; SLEEP accepts an interrupt with BL=1.
+;; IMASK must be below KEYSC priority. Restore the caller's SR before return.
+        .list OFF
+        .include "kxshx.h"
+        .list ON
+        LEAF_ENTRY _ClasspadSleepUntilInterrupt
+        stc     sr, r2
+        mov     r2, r1
+        mov     #h'ffffff0f, r0
+        and     r0, r1
+        mov.l   #h'10000000, r0
+        or      r0, r1
+        ldc     r1, sr
+        mov.l   @r4, r0
+        tst     r0, r0
+        bf      sleep_done
+        sleep
+sleep_done:
+        ldc     r2, sr
+        rts
+        nop
+        ENTRY_END _ClasspadSleepUntilInterrupt
+        .end

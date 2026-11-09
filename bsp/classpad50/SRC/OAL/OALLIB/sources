@@ -1,0 +1,27 @@
+!if 0
+oal.lib - the ClassPad OAL for Windows CE 5.0, linked into kern.exe (..\KERN).
+oalcommon.c carries the handful of PQOAL-style helpers (SYSINTR map, IOCTL
+dispatcher, log, wake sources, timer globals) that the CE 6.0 BSP took from
+PLATFORM\COMMON, which CE 5.0 does not build for SH4.
+!endif
+RELEASETYPE=PLATFORM
+TARGETNAME=oal
+TARGETTYPE=LIBRARY
+
+LDEFINES=-subsystem:native /DEBUG /DEBUGTYPE:CV /FIXED:NO
+
+SOURCES=\
+    init.c      \
+    oalcommon.c \
+    intr.c      \
+    timer.c     \
+    cache.c     \
+    debug.c     \
+    ioctl.c     \
+    rtc.c       \
+    power.c
+
+SH_SOURCES=\
+    startup.src \
+    cacheops.src \
+    sleep.src

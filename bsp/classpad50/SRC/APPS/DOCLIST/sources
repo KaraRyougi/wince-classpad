@@ -1,0 +1,17 @@
+!if 0
+DocList.dll - the Pocket PC document list control for Pocket PC binaries:
+MFC CE 3.0 (mfcce300.dll) imports DocList_Create by name and CE 6.0 has no
+DocList, so without this DLL the loader refuses mfcce300.dll and everything
+linked to it. Exports by name (and the Pocket PC ordinals), doclist.def.
+!endif
+TARGETNAME=DocList
+TARGETTYPE=DYNLINK
+RELEASETYPE=PLATFORM
+WINCEOEM=1
+DLLENTRY=_DllMainCRTStartup
+DEFFILE=DocList.def
+TARGETLIBS= \
+    $(_COMMONSDKROOT)\lib\$(_CPUINDPATH)\coredll.lib \
+    $(_COMMONSDKROOT)\lib\$(_CPUINDPATH)\commctrl.lib
+SOURCES= \
+    doclist.c

@@ -1,0 +1,9 @@
+; CLASSPAD platform.dat: object store setup (initobj.dat) for the BSP
+
+; Math Xpander from the EXT region (FILES\xpander, docs/03): its Start menu
+; link. The link and the program are in that region, so with no EXT region
+; flashed there is nothing to copy.
+Directory("\Windows\Programs"):-File("Math Xpander.lnk", "\Windows\mathxpander.lnk")
+
+; Plotter-Z (SRC\APPS\PLOTTERZ, in NK)
+Directory("\Windows\Programs"):-File("Plotter-Z.lnk", "\Windows\plotterz.lnk")

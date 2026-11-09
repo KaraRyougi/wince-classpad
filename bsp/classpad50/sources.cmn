@@ -1,0 +1,23 @@
+WINCEOEM=1
+WINCECPU=1
+WARNISERROR=1
+RELEASETYPE=PLATFORM
+
+# Windows CE 5.0: the BSP builds against the sysgen'd headers and libraries
+# of the OS design (PLATFORM\ASPEN does the same).
+_COMMONPUBROOT=$(_PROJECTROOT)\cesysgen
+__PROJROOT = $(_PROJECTROOT)
+
+_OEMINCPATH=$(_WINCEROOT)\public\common\sdk\inc;
+_OEMINCPATH=$(_OEMINCPATH);$(_WINCEROOT)\public\common\oak\inc;
+_OEMINCPATH=$(_OEMINCPATH);$(_WINCEROOT)\public\common\ddk\inc;
+
+_ISVINCPATH=$(_WINCEROOT)\public\common\sdk\inc;
+
+INCLUDES=$(_TARGETPLATROOT)\src\inc;
+# the PQOAL headers (oal_timer.h, oal_intr.h, ...): types and prototypes only,
+# the implementations are the BSP's own (SRC\OAL\OALLIB\oalcommon.c)
+INCLUDES=$(INCLUDES);$(_PLATFORMROOT)\common\src\inc;
+
+ADEFINES=$(ADEFINES) -DSH_CPU=64
+LDEFINES=-subsystem:native /DEBUG /DEBUGTYPE:CV /FIXED:NO

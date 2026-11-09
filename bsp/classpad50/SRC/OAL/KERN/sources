@@ -1,0 +1,22 @@
+!if 0
+kern.exe - the Windows CE 5.0 kernel for the ClassPad: nk.lib (the kernel
+proper, made by the OS design's sysgen from nkmain.lib) linked with the OAL
+(oal.lib, SRC\OAL\OALLIB) into one executable, which common.bib puts into
+the image as nk.exe when IMGNOKITL and IMGNODEBUGGER are set (classpad.bat).
+Same shape as PLATFORM\ASPEN\KERNEL\BUILDEXE\KERN.
+!endif
+RELEASETYPE=PLATFORM
+WINCECPU=1
+EXEENTRY=StartUp
+SYNCHRONIZE_DRAIN=1
+TARGETTYPE=PROGRAM
+TARGETNAME=kern
+
+TARGETLIBS=$(_COMMONOAKROOT)\lib\$(_CPUDEPPATH)\nk.lib          \
+           $(_TARGETPLATROOT)\lib\$(_CPUDEPPATH)\oal.lib        \
+           $(_COMMONOAKROOT)\lib\$(_CPUDEPPATH)\loadauth.lib    \
+           $(_COMMONOAKROOT)\lib\$(_CPUINDPATH)\fulllibc.lib
+
+LDEFINES=-subsystem:native /DEBUG /DEBUGTYPE:CV /FIXED:NO
+
+SOURCES=kitlstub.c
