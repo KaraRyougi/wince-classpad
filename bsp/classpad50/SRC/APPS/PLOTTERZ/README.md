@@ -21,6 +21,24 @@ Only what the CE program needs was copied: `common`, `formula-z`,
 and the two libraries upstream's `fetch-deps.sh` clones. None of the three
 repositories states a licence.
 
+**Local changes to `plotter-z-win32-native.c`** (each marked `ClassPad
+(2026-11-09)`; a recalculation of the Saddle Surface sample took 160 s under
+the translator and almost none of it was arithmetic, docs/08 section 10):
+
+- the 16 bpp back buffer is a `BI_BITFIELDS` RGB565 DIB, the screen's
+  format, so the blit to the window is a plain copy (`g_bDib565`,
+  `RGB888_TO_WORD_RGB565`); it was BI_RGB, i.e. RGB555, converted pixel by
+  pixel by the display driver;
+- `PaintCanvas16BppRect`: the 2 bpp canvas is converted row-wise, four
+  pixels per byte, and only for the rectangle being repainted; the window's
+  WM_PAINT converts and copies just `ps.rcPaint` at 16 bpp;
+- `DrawRecalcProgress` invalidates the progress bar's rectangle instead of
+  the whole window (which repainted the command bar's text and the whole
+  canvas after every column).
+
+When replacing upstream's files with a newer checkout, reapply them (or
+better, send them upstream).
+
 The CE 6.0 glue is in this directory, so upstream's files can be replaced
 by a newer checkout as they are:
 

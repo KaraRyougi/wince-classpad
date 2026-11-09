@@ -92,6 +92,12 @@ COLORREF g_rgbPalette[] = {
 
 /* Pre-computed palette for 16/32 bpp blit */
 #define RGB888_TO_WORD_RGB555(r,g,b)    ((WORD)(((r) >> 3 << 10) | ((g) >> 3 << 5) | ((b) >> 3)))
+#define RGB888_TO_WORD_RGB565(r,g,b)    ((WORD)(((r) >> 3 << 11) | ((g) >> 2 << 5) | ((b) >> 3)))
+/* ClassPad (2026-11-09): the 16 bpp back buffer is created as a BI_BITFIELDS
+ * RGB565 DIB, the format of the screen, so the blit to the window is a plain
+ * copy instead of a per-pixel colour conversion in the display driver;
+ * g_wPaletteRGB555 then holds 565 values. */
+static int    g_bDib565 = 0;
 
 static WORD   g_wPaletteRGB555[4];
 static DWORD  g_dwPaletteRGB888[4];
@@ -102,7 +108,7 @@ static void RecalcPaletteLUTs(void) {
         BYTE r = GetRValue(g_rgbPalette[i]);
         BYTE g = GetGValue(g_rgbPalette[i]);
         BYTE b = GetBValue(g_rgbPalette[i]);
-        g_wPaletteRGB555[i] = RGB888_TO_WORD_RGB555(r, g, b);
+        g_wPaletteRGB555[i] = g_bDib565 ? RGB888_TO_WORD_RGB565(r, g, b) : RGB888_TO_WORD_RGB555(r, g, b);
         g_dwPaletteRGB888[i] = (DWORD)((r << 16) | (g << 8) | b);
     }
 }
@@ -371,7 +377,7 @@ static int CreateBackBuffer(HWND hWnd, int iWidth, int iHeight) {
             return 0;
     }
 
-    iBmiSize = sizeof(BITMAPINFO) + iPaletteSize * sizeof(RGBQUAD);
+    iBmiSize = sizeof(BITMAPINFO) + iPaletteSize * sizeof(RGBQUAD) + 3 * sizeof(DWORD);   /* + room for BI_BITFIELDS masks */
     pbmi = (BITMAPINFO*)malloc((size_t)iBmiSize);
     if (pbmi == NULL) {
         MessageBox(hWnd, TEXT("Failed to allocate BITMAPINFO"), TEXT("ERROR"), MB_OK);
@@ -406,6 +412,15 @@ static int CreateBackBuffer(HWND hWnd, int iWidth, int iHeight) {
 	pbmi->bmiHeader.biClrImportant	= 0;
     /* Note: when creating 2bit DIBsection biClrUsed should be set to 0 */
     pbmi->bmiHeader.biClrUsed       = (g_iScreenBpp == 2) ? 0 : iPaletteSize;
+    g_bDib565 = 0;
+    if (g_iScreenBpp == 16) {
+        /* ClassPad (2026-11-09): RGB565 bit fields, matching the screen */
+        DWORD* pMasks = (DWORD*)pbmi->bmiColors;
+        pbmi->bmiHeader.biCompression = BI_BITFIELDS;
+        pMasks[0] = 0xF800; pMasks[1] = 0x07E0; pMasks[2] = 0x001F;
+        g_bDib565 = 1;
+        RecalcPaletteLUTs();
+    }
 
     g_hdcBuffer = CreateCompatibleDC(hdc);
     ReleaseDC(hWnd, hdc);
@@ -513,11 +528,50 @@ static void PaintCanvas8Bpp() {
     }
 }
 
+/* ClassPad (2026-11-09): only the DIB rows and columns [x0, x1) x [y0, y1)
+ * that are being repainted; a byte of the 2 bpp canvas yields four pixels. */
+static void PaintCanvas16BppRect(int x0, int y0, int x1, int y1) {
+    int iX, iY;
+    int iZoom = g_iCanvasScaleFactor;
+    if (iZoom < 1) iZoom = 1;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > g_iDibW) x1 = g_iDibW;
+    if (y1 > g_iDibH) y1 = g_iDibH;
+    for (iY = y0; iY < y1; ++iY) {
+        WORD* pDst16 = (WORD*)(g_pDibPixels + iY * g_iDibPitch);
+        int iCy = iY / iZoom;
+        const unsigned char* pSrcRow = (iCy < g_iCanvasH) ? g_pCanvas + iCy * g_iCanvasPitch : NULL;
+        if (pSrcRow == NULL) {
+            for (iX = x0; iX < x1; ++iX) pDst16[iX] = g_wPaletteRGB555[0];
+            continue;
+        }
+        if (iZoom == 1) {
+            iX = x0;
+            while (iX < x1 && (iX & 3)) { pDst16[iX] = g_wPaletteRGB555[(pSrcRow[iX >> 2] >> canvasShift(iX)) & 3]; ++iX; }
+            for (; iX + 4 <= x1 && iX + 4 <= g_iCanvasW; iX += 4) {
+                unsigned char b = pSrcRow[iX >> 2];
+                pDst16[iX]     = g_wPaletteRGB555[(b >> 6) & 3];
+                pDst16[iX + 1] = g_wPaletteRGB555[(b >> 4) & 3];
+                pDst16[iX + 2] = g_wPaletteRGB555[(b >> 2) & 3];
+                pDst16[iX + 3] = g_wPaletteRGB555[b & 3];
+            }
+            for (; iX < x1; ++iX) pDst16[iX] = (iX < g_iCanvasW) ? g_wPaletteRGB555[(pSrcRow[iX >> 2] >> canvasShift(iX)) & 3] : g_wPaletteRGB555[0];
+        } else {
+            for (iX = x0; iX < x1; ++iX) {
+                int iCx = iX / iZoom;
+                pDst16[iX] = (iCx < g_iCanvasW) ? g_wPaletteRGB555[(pSrcRow[iCx >> 2] >> canvasShift(iCx)) & 3] : g_wPaletteRGB555[0];
+            }
+        }
+    }
+}
+
 static void PaintCanvas16Bpp() {
     int iX, iY, iX2, iY2;
     int iZoom = g_iCanvasScaleFactor;
     BYTE* pRow;
     if (iZoom < 1) iZoom = 1;
+    if (g_pDibPixels != NULL) { PaintCanvas16BppRect(0, 0, g_iDibW, g_iDibH); return; }   /* ClassPad: the row-wise version */
     for (iY = 0; iY < g_iCanvasH; ++iY) {
         for (iX = 0; iX < g_iCanvasW; ++iX) {
             int iColor = GetPixelCanvas(iX, iY);
@@ -580,8 +634,24 @@ static void PaintCanvasToWindow(HWND hWnd) {
                 PaintCanvas8Bpp();
                 break;
             case 16: {
-                PaintCanvas16Bpp();
-                break;
+                /* ClassPad (2026-11-09): convert and copy only what is being
+                 * repainted (a recalculation repaints just its progress bar) */
+                RECT rc;
+                rc.left   = ps.rcPaint.left;
+                rc.top    = ps.rcPaint.top - g_iBarHeight;
+                rc.right  = ps.rcPaint.right;
+                rc.bottom = ps.rcPaint.bottom - g_iBarHeight;
+                if (rc.left < 0) rc.left = 0;
+                if (rc.top < 0) rc.top = 0;
+                if (rc.right > g_iDibW) rc.right = g_iDibW;
+                if (rc.bottom > g_iDibH) rc.bottom = g_iDibH;
+                if (rc.right > rc.left && rc.bottom > rc.top) {
+                    PaintCanvas16BppRect(rc.left, rc.top, rc.right, rc.bottom);
+                    BitBlt(hdc, rc.left, rc.top + g_iBarHeight, rc.right - rc.left, rc.bottom - rc.top,
+                           g_hdcBuffer, rc.left, rc.top, SRCCOPY);
+                }
+                EndPaint(hWnd, &ps);
+                return;
             }
             case 32: {
                 PaintCanvas32Bpp();
@@ -1606,10 +1676,20 @@ static void DrawRecalcProgressFirstFrame(HWND hWnd) {
 static void DrawRecalcProgress(HWND hWnd, int iPct) {
     MSG msg;
     int y;
+    RECT rcBar;
+    int iZoom = g_iCanvasScaleFactor > 1 ? g_iCanvasScaleFactor : 1;
+    int barW = g_iCanvasW / 2, barX = (g_iCanvasW - barW) / 2;
     y = g_iCanvasH / 2 - CURRENT_FONT_HEIGHT - 4;
     if (y < 0) y = 0;
     DrawProgressBar(y + CURRENT_FONT_HEIGHT + 4, iPct);
-    InvalidateRect(hWnd, NULL, FALSE);
+    /* ClassPad (2026-11-09): the bar is all that changed; invalidating the
+     * whole window redrew the command bar and the whole canvas per column */
+    if (barX < 0) barX = 0;
+    rcBar.left   = barX * iZoom;
+    rcBar.top    = g_iBarHeight + (y + CURRENT_FONT_HEIGHT + 4) * iZoom;
+    rcBar.right  = (barX + barW) * iZoom;
+    rcBar.bottom = rcBar.top + CURRENT_FONT_HEIGHT * 2 * iZoom;
+    InvalidateRect(hWnd, &rcBar, FALSE);
     UpdateWindow(hWnd);
     while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
         TranslateMessage(&msg);
