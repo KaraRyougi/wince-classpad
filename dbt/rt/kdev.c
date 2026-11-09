@@ -31,7 +31,7 @@ void *memset(void *d, int c, kdev_size_t n);
 #include "kernel_dev50.h"        /* CE 5.0 nk.exe (kernel + OAL): kdev_funcs50[KDEV_FUNCS50] */
 
 /* both generated tables have this layout */
-typedef struct { sf_u16 w[4]; sf_u32 len, crc; } kdev_func_t;
+typedef struct { sf_u16 w[4]; sf_u32 len, crc, hint; } kdev_func_t;   /* hint: the function's P1 address in the image the table was made from, 0 = unknown */
 
 #define KDEV_MAX_WORDS 2048          /* the generator refuses longer functions */
 
@@ -97,6 +97,19 @@ unsigned kdev_locate(sf_u32 text, sf_u32 len, sf_u32 *ranges, unsigned max, int 
     sf_u32 at[KDEV_MAX_RANGES], pos, end = text + len;
     unsigned hits[KDEV_MAX_RANGES], f, n = 0, i, any_zero = 0, any_br = 0;
     if (max < nf || nf > KDEV_MAX_RANGES) return 0;
+    /* The image this table was generated from, or a relink that left these
+     * functions where they were (nk.exe and the translator ship together):
+     * check every signature at its recorded address and skip the scan. */
+    for (f = 0; f < nf; ++f) {
+        sf_u32 h = tab[f].hint;
+        if (!h || h < text || h + tab[f].len > end) break;
+        kmask(h, 4, h, h);
+        if (g_out[0] != tab[f].w[0] || g_out[1] != tab[f].w[1] || g_out[2] != tab[f].w[2] || g_out[3] != tab[f].w[3]) break;
+        kmask(h, tab[f].len / 2, h, h + tab[f].len);
+        if (crc32_words(tab[f].len / 2) != tab[f].crc) break;
+        at[f] = h; hits[f] = 1;
+    }
+    if (f == nf) { dbt_puts("[kdev] "); dbt_puts(mod); dbt_puts(" functions at their recorded addresses\n"); goto found; }
     /* Cheap pre-filter on the raw first word (the 4-word masking took 7 s of
      * a CE 5.0 boot when done at every position): masked word 0 is the raw
      * word, or 0 for an aligned P1/P2 address pair (a literal inside the
@@ -130,6 +143,7 @@ unsigned kdev_locate(sf_u32 text, sf_u32 len, sf_u32 *ranges, unsigned max, int 
             dbt_puts(" times: the whole module stays device-aware\n");
             return 0;
         }
+found:
     /* sorted, P1/P2 folded like the translator's test, adjacent ones merged */
     for (f = 0; f < nf; ++f) {
         sf_u32 lo = at[f] & 0x1FFFFFFFu, hi = lo + tab[f].len;
