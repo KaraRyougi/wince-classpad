@@ -12,7 +12,7 @@
 ; kernel fixups. The DLL ranges are disjoint from NK's (config.bib).
 ;-------------------------------------------------------------------------------
 MEMORY
-    EXT         80EE0000  00500000  RAMIMAGE
+    EXT         83860000  007A0000  RAMIMAGE    ; the eActivity area (config.bib)
     RAM         8C001000  007FE000  RAM
 
 CONFIG
@@ -22,8 +22,8 @@ CONFIG
     DLLHIGHADDR     EXT  01F00000
     DLLLOWCODEADDR  EXT  02100000
     DLLHIGHCODEADDR EXT  02200000
-    ROMSTART=80EE0000
-    ROMSIZE=00500000
+    ROMSTART=83860000
+    ROMSIZE=007A0000
     ROMWIDTH=32
     PROFILE=OFF
     COMPRESSION=OFF

@@ -29,7 +29,7 @@ def main():
     seq = ';'.join(f'{x},{y},{7500000+i*400000},4000' for i, (x, y) in enumerate(points))
     env = dict(os.environ, CALCEMU_MODEL='fx-cp400', SDL_VIDEODRIVER='dummy',
                SDL_RENDER_DRIVER='software', HLE_FBDUMP_ALL='1', HLE_FBDUMP=str(frame),
-               HLE_OSROM=str(args.flash.resolve()), HLE_OSROM_PAD='0x03860000',
+               HLE_OSROM=str(args.flash.resolve()), HLE_OSROM_PAD='0x00EE0000',
                HLE_CB_TOUCHSEQ=seq, HLE_EXIT_AT='9000000')
     env.pop('HLE_FB_EXPECT', None)
     captured = []

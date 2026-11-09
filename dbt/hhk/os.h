@@ -20,8 +20,10 @@ int  os_init(int argc, char **argv, char **envp);
 void ui_clear(void);
 void ui_printf(int row, const char *fmt, ...);
 void ui_refresh(void);
-/* KEYSC read, no OS involved: returns 1 for EXE, 0 for Clear/ON */
+/* KEYSC read, no OS involved: returns 1 for EXE, 0 for Clear/ON; ui_wait_key(1)
+ * also returns 2 for the Keyboard key */
 int  ui_wait_exe_or_clear(void);
+int  ui_wait_key(int keyboard_too);
 
 void *os_malloc(unsigned n);
 void  os_free(void *p);

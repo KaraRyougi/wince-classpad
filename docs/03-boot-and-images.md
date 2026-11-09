@@ -163,7 +163,30 @@ loosely (`docs/04` "Limits"); the window not being free on that OS version
 - Debug serial: SCIF; KITL over the same port.
 - Memory: `MainMemoryEndAddress` = 0x8CFFFFFF on 16 MiB units.
 
-## The EXT region in the hole (2026-11-06)
+## The regions swapped: NK in the hole, EXT in the eActivity area (2026-11-09)
+
+The 2026-11-09 CE 5.0 image is 4.88 MiB, so NK fits the 5 MiB hole (with the
+BSP's own programs moved in and ws2.dll dropped: about 120 KiB to spare), and
+the two sections below describe the layout the other way round. Since the
+hole is the one place Casio's OS never writes after an OS update and the
+eActivity area is reformatted at every Casio boot, the image worth keeping
+goes into the hole: `config.bib` `NK 80EE0000 00500000`, `ext.bib.hdr`
+`EXT 83860000 007A0000`, `classpad_extrom.h` 0x83860000 / 0x7A0000,
+`dbt/Makefile` `NK_WINDOW=hole` (the default; `eact` is the old layout for
+the images built before). EXT holds Math Xpander and mfcce300 only; Plotter-Z,
+PegHelp, the rotation programs, SH3CRT and DocList are NK modules now, so
+`NK.bin` alone is a complete system and a wiped eActivity area costs only
+Xpander. `wince.hhk` flashes NK once (found identical afterwards) and offers
+to rewrite EXT whenever `\fls0\EXT.bin` differs from the area; the Keyboard
+key at its prompt boots at once without rewriting EXT. The flasher's rule
+"erase only blank sectors, our own image, or the eActivity volume" now applies
+the eActivity clause to the EXT window (`EXT_WINDOW_EACT`). The OAL's check
+of the region is unchanged: after Casio's format the first sector holds a
+Fugue header, not `ECEC`, so the region is cleanly absent. Host test
+(`bsp/tests/test_extrom`), the `extrom`, `nkxip` and `flashtest` guests and
+the hhk build run at the new addresses.
+
+## The EXT region in the hole (2026-11-06, layout until 2026-11-09)
 
 With the NK image in the eActivity area, the hole 0x0EE0000-0x13E0000 is free,
 all 5 MiB of it from its real start (the NK window used 3.875 MiB from 16 MiB).

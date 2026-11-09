@@ -95,7 +95,8 @@ exercised.
    then Build OS > Make Run-Time Image. `NK.bin` and `EXT.bin` land in the
    flat release directory. The command-line equivalent, from Build OS > Open
    Release Directory: `cd %_TARGETPLATROOT%`, `build -c`, then `makeimg`.
-5. On the Mac: `make -C dbt NK_WINDOW=eact NKBIN=/abs/NK.bin EXTBIN=/abs/EXT.bin RUN_SECS=600 nkshot`
+5. On the Mac: `make -C dbt NKBIN=/abs/NK.bin EXTBIN=/abs/EXT.bin RUN_SECS=600 nkshot`
+   (images built before the 2026-11-09 region swap need `NK_WINDOW=eact`)
    runs the image on casio-emu's ClassPad profile; the console should show
    `[nk] nk.exe (kernel + OAL, CE 5.0 style) ... (device-aware translation)`,
    the kernel sign-on "Windows CE Kernel for Hitachi SH Built on ...",

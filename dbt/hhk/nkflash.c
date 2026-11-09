@@ -5,15 +5,18 @@
  *     boots. An XIP build (image start == NK_FLASH) has every record
  *     programmed at its own address (P1 address - 0x80000000); a RAM image
  *     is programmed as is at NK_FLASH and copied into RAM by the translator.
- *   - EXT (EXT_FLASH .. + EXT_FLASH_MAX, \fls0\EXT.bin, only with an NK
- *     window elsewhere, i.e. NK_WINDOW=eact): the files-only ROM region of
- *     tools/mkextrom.py in the hole inside Casio's OS image, which the OAL
- *     chains to the kernel (classpad_extrom.h). Casio's boots leave it alone,
- *     so it is normally written once and found identical afterwards.
- * A window is only ever touched inside its own bounds, and a sector in it is
- * erased only when it is still blank, the window already holds a CE image of
- * ours ("ECEC" at +0x40 or a B000FF header) or (NK, NK_WINDOW=eact) the
- * eActivity volume; anything else stops before the first erase.
+ *   - EXT (EXT_FLASH .. + EXT_FLASH_MAX, \fls0\EXT.bin): the second XIP
+ *     region (Math Xpander), which the OAL chains to the kernel
+ *     (classpad_extrom.h).
+ * Since 2026-11-09 NK is in the hole inside Casio's OS image, which Casio's
+ * boots leave alone (written once, found identical afterwards), and EXT in
+ * the eActivity area, which Casio's OS reformats, so EXT is the one usually
+ * rewritten before a CE session (dbt/Makefile NK_WINDOW; the images before
+ * that date had it the other way round). A window is only ever touched
+ * inside its own bounds, and a sector in it is erased only when it is still
+ * blank, the window already holds a CE image of ours ("ECEC" at +0x40 or a
+ * B000FF header) or the window is the eActivity area (*_WINDOW_EACT);
+ * anything else stops before the first erase.
  *
  * Two users: wince.hhk (hhk/launcher.c) calls nkflash_open / compare /
  * write per window to bring the flash up to date before it boots, and
@@ -24,10 +27,10 @@
 #include "nkflash.h"
 
 #ifndef NK_FLASH
-#define NK_FLASH     0x81000000u
+#define NK_FLASH     0x80EE0000u
 #endif
 #ifndef NK_FLASH_MAX
-#define NK_FLASH_MAX 0x003E0000u
+#define NK_FLASH_MAX 0x00500000u
 #endif
 #define CHUNK  0x10000u
 #define HDR    15u
@@ -37,15 +40,21 @@ static const char *const nk_paths[] = { "\\fls0\\NK.bin", "\\fls0\\nk.bin", "\\f
 static const char *const ext_paths[] = { "\\fls0\\EXT.bin", "\\fls0\\ext.bin", "\\fls0\\wince\\EXT.bin", 0 };
 #endif
 
-const nkwindow nk_windows[] = {
-    { "NK", NK_FLASH, NK_FLASH_MAX, nk_paths,
 #ifdef NK_WINDOW_EACT
-      1 },
+#define NK_EACT 1
 #else
-      0 },
+#define NK_EACT 0
 #endif
+#ifdef EXT_WINDOW_EACT
+#define EXT_EACT 1
+#else
+#define EXT_EACT 0
+#endif
+
+const nkwindow nk_windows[] = {
+    { "NK", NK_FLASH, NK_FLASH_MAX, nk_paths, NK_EACT },
 #ifdef EXT_FLASH
-    { "EXT", EXT_FLASH, EXT_FLASH_MAX, ext_paths, 0 },
+    { "EXT", EXT_FLASH, EXT_FLASH_MAX, ext_paths, EXT_EACT },
 #endif
 };
 const int nk_nwindows = sizeof nk_windows / sizeof nk_windows[0];
@@ -95,15 +104,16 @@ static int read_exact(int fd, void *buf, u32 n)
     return 0;
 }
 
-static int window_has_our_image(const nkwindow *w)
+int window_has_our_image(const nkwindow *w)
 {
     const char *p = (const char *)w->base;
     return !memcmp(p + 0x40, "ECEC", 4) || !memcmp(p, "B000FF\n", 7);
 }
 
-/* NK_WINDOW=eact: the NK window is the eActivity volume, which Casio's OS
- * reformats at every boot that finds it holding something else (docs/03), so
- * everything in it is ours to erase. Fugue is log-structured: on a used
+/* The window in the eActivity area (NK with NK_WINDOW=eact, EXT otherwise)
+ * is the eActivity volume, which Casio's OS reformats at every boot that
+ * finds it holding something else (docs/03), so everything in it is ours to
+ * erase. Fugue is log-structured: on a used
  * calculator its header sector ("Fugue FAT File System" at +0x2020) can be
  * any sector of the area and the first one may well be blank (seen on the
  * first hardware run: "sector at 83880000 is in use" with the first sector

@@ -30,10 +30,10 @@
 #define GUEST_LINK   0x8C100000u          /* where guest/guest.ld links the raw test guests */
 #endif
 #ifndef NK_FLASH
-#define NK_FLASH     0x81000000u          /* NOR offset 16 MiB (dbt/Makefile NK_FLASH) */
+#define NK_FLASH     0x80EE0000u          /* the hole in Casio's OS image (dbt/Makefile NK_FLASH) */
 #endif
 #ifndef NK_FLASH_MAX
-#define NK_FLASH_MAX 0x003E0000u          /* the window on the device: the erased hole in Casio's OS image ends at offset 0x13E0000 (docs/03) */
+#define NK_FLASH_MAX 0x00500000u          /* the window on the device: the erased hole in Casio's OS image, offsets 0xEE0000-0x13E0000 (docs/03) */
 #endif
 
 extern const unsigned char guest_blob_start[], guest_blob_end[];   /* asm: _guest_blob_* */

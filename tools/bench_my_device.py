@@ -18,7 +18,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     for name in ('emulator', 'binary', 'flash', 'reference', 'output'):
         p.add_argument('--' + name, type=Path, required=True)
-    p.add_argument('--flash-offset', default='0x03860000')
+    p.add_argument('--flash-offset', default='0x00EE0000')
     p.add_argument('--tap-tick', type=int, default=7500000)
     a = p.parse_args()
     a.output.mkdir(parents=True, exist_ok=True)

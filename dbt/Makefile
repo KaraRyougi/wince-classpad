@@ -66,36 +66,39 @@ RT_SRC := rt/crt0.S rt/stubs.S rt/standby.S rt/main.c rt/rt.c rt/kdev.c rt/lcdco
 # P1 range) is flattened to the bytes the NOR holds at its own address and
 # runs in place (XIP). Example: make NKBIN=/abs/path/NK.bin run
 NKBIN       ?=
-# NOR offset of the CE image. On the fx-CP400 (64 MiB chip) offset 16 MiB lies
-# in the erased hole inside Casio's 21 MiB OS image (0x00EE0000-0x013E0000,
-# docs/03); the window ends at 0x013E0000, so an image has 3.875 MiB
-# (config.bib ROMSIZE). NK_FLASH is the same offset as a P1 address.
-# NK_WINDOW=hole (default) or eact: the eActivity area 0x3860000-0x3FFFFFF
-# (7.625 MiB raw) for images larger than the hole; what Casio's OS does to it
-# is in docs/03. NK_FLASH_OFF/NK_FLASH_MAX can also be given directly (an
-# emulator run of a 7 MiB image linked at 0x81000000: NK_FLASH_MAX=0x00800000).
+# NOR offsets of the two CE regions (docs/03). The fx-CP400's 64 MiB chip has
+# two places for them: the erased hole inside Casio's 21 MiB OS image,
+# 0x00EE0000-0x013E0000 (5 MiB), which Casio's OS never writes after an OS
+# update, and the eActivity area 0x3860000-0x3FFFFFF (7.625 MiB raw), which
+# Casio's OS reformats at every boot that finds something else there.
+# NK_WINDOW=hole (default since 2026-11-09): NK (config.bib ROMSTART, the
+# image the translator boots) in the hole, EXT (the second XIP region,
+# chained to the kernel by the OAL: classpad_extrom.h holds the same two
+# numbers) in the eActivity area. NK_WINDOW=eact: the layout of the images
+# before that date, NK in the eActivity area and EXT in the hole. NK_FLASH is
+# the NK offset as a P1 address; NK_FLASH_OFF/NK_FLASH_MAX can also be given
+# directly (an emulator run of a 7 MiB image linked at 0x81000000:
+# NK_FLASH_OFF=0x01000000 NK_FLASH_MAX=0x00800000). wince.hhk/nkflash.hhk
+# flash \fls0\NK.bin and \fls0\EXT.bin into the two windows; the *_WINDOW_EACT
+# define tells them which window is the eActivity volume (theirs to erase).
+# EXTBIN=<EXT.bin> adds the EXT region to an emulator run's NOR; the
+# translator keeps its blocks over whole-cache flushes like NK's.
 NK_WINDOW    ?= hole
 ifeq ($(NK_WINDOW),eact)
-NK_FLASH_OFF ?= 0x03860000
-NK_FLASH_MAX ?= 0x007A0000
-HOST_CFLAGS  += -DNK_WINDOW_EACT    # nkflash.hhk may erase the eActivity volume (docs/03)
-else
-NK_FLASH_OFF ?= 0x01000000
-NK_FLASH_MAX ?= 0x003E0000
-endif
-NK_FLASH     := $(shell printf '0x%08X' $$((0x80000000 + $(NK_FLASH_OFF))))
-FLASH_DEFS   := -DNK_FLASH=$(NK_FLASH)u -DNK_FLASH_MAX=$(NK_FLASH_MAX)u
-# The EXT region (docs/03): config.bib's second XIP region, in the erased hole
-# of Casio's OS image, chained to the kernel by the OAL (classpad_extrom.h,
-# which holds the same two numbers), flashed by wince.hhk/nkflash.hhk from
-# \fls0\EXT.bin (makeimg writes it next to NK.bin). Only with the NK image in
-# the eActivity area: the hole window overlaps it. EXTBIN=<EXT.bin> adds it to
-# an emulator run's NOR; the translator keeps its blocks like NK's.
-ifeq ($(NK_WINDOW),eact)
+NK_FLASH_OFF  ?= 0x03860000
+NK_FLASH_MAX  ?= 0x007A0000
 EXT_FLASH     ?= 0x80EE0000
 EXT_FLASH_MAX ?= 0x00500000
-FLASH_DEFS   += -DEXT_FLASH=$(EXT_FLASH)u -DEXT_FLASH_MAX=$(EXT_FLASH_MAX)u
+HOST_CFLAGS   += -DNK_WINDOW_EACT
+else
+NK_FLASH_OFF  ?= 0x00EE0000
+NK_FLASH_MAX  ?= 0x00500000
+EXT_FLASH     ?= 0x83860000
+EXT_FLASH_MAX ?= 0x007A0000
+HOST_CFLAGS   += -DEXT_WINDOW_EACT
 endif
+NK_FLASH     := $(shell printf '0x%08X' $$((0x80000000 + $(NK_FLASH_OFF))))
+FLASH_DEFS   := -DNK_FLASH=$(NK_FLASH)u -DNK_FLASH_MAX=$(NK_FLASH_MAX)u -DEXT_FLASH=$(EXT_FLASH)u -DEXT_FLASH_MAX=$(EXT_FLASH_MAX)u
 HOST_CFLAGS  += $(FLASH_DEFS)
 # the extrom guest checks a small test region from inside the translator
 ifeq ($(GUEST),extrom)
@@ -211,7 +214,7 @@ DEVALL_STAMP := $(BUILD)/.devall-$(if $(filter 1,$(DEVALL)),1,0)
 $(DEVALL_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.devall-*
 	touch $@
-LAYOUT_STAMP := $(BUILD)/.layout-$(GUEST_RAM_LO)-$(HHK_PAYLOAD)-$(GUEST_RAM_HI)-$(IMAGE_BASE)-$(CACHE_BASE)-$(CACHE_SIZE)-$(BLOCKS)-$(ARENA_KB)-$(NK_FLASH)-$(NK_FLASH_MAX)-$(DEVICE)-$(CONSOLE)-$(IRQPINS)-$(LAZY_META)$(SECOND_CHANCE)$(KDEV)$(HASH_TAG)$(TLB_REFILL)$(FAST_HELPERS)-$(HASH_ENTRIES)
+LAYOUT_STAMP := $(BUILD)/.layout-$(GUEST_RAM_LO)-$(HHK_PAYLOAD)-$(GUEST_RAM_HI)-$(IMAGE_BASE)-$(CACHE_BASE)-$(CACHE_SIZE)-$(BLOCKS)-$(ARENA_KB)-$(NK_FLASH)-$(NK_FLASH_MAX)-$(EXT_FLASH)-$(DEVICE)-$(CONSOLE)-$(IRQPINS)-$(LAZY_META)$(SECOND_CHANCE)$(KDEV)$(HASH_TAG)$(TLB_REFILL)$(FAST_HELPERS)-$(HASH_ENTRIES)
 $(LAYOUT_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.layout-*
 	touch $@
@@ -234,7 +237,6 @@ $(BUILD)/$(GUEST).bin: $(BUILD)/$(GUEST).elf
 
 # --- a test EXT region for the extrom guest (tools/mkextrom.py; the real one comes from makeimg) ---
 $(BUILD)/extrom-test.bin: guest/extrom.txt guest/extrom-data.txt ../tools/mkextrom.py $(LAYOUT_STAMP) | $(BUILD)
-	$(if $(EXT_FLASH),,$(error the extrom guest needs NK_WINDOW=eact))
 	python3 ../tools/mkextrom.py $< $@ --base $(EXT_FLASH) --max $(EXT_FLASH_MAX)
 
 # --- translator image (big-endian) ---
@@ -260,8 +262,9 @@ $(IMG).g3a: $(IMG)-loader.bin
 # wince.hhk: the stub (hhk/launcher.c, loaded by HollyHock at 0x8CFF0000) with
 # the translator image $(IMG).bin as a second loadable region at IMAGE_BASE;
 # the stub quiets the OS's interrupt sources and jumps into it the way the
-# .g3a launcher does (hhk/takeover.S). nkflash.hhk writes \fls0\NK.bin into
-# the NOR window at NK_FLASH. Both are plain ELF files (also copied as .hh3).
+# .g3a launcher does (hhk/takeover.S). nkflash.hhk writes \fls0\NK.bin and
+# \fls0\EXT.bin into the NOR windows at NK_FLASH and EXT_FLASH. Both are plain
+# ELF files (also copied as .hh3).
 HHK_BASE   := 0x8CFF0000
 HHK_LIMIT  := 0x8D000000
 # Where HollyHock's own copy puts the translator payload (~64 KiB) while

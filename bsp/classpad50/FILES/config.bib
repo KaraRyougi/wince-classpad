@@ -1,16 +1,20 @@
 ;-------------------------------------------------------------------------------
 ; CLASSPAD config.bib, Windows CE 5.0: the image executes in place from the
-; NOR flash (XIP). Two regions, as the CE 6.0 image had (docs/03):
-;   NK   the kernel, the shell and the drivers, in the eActivity area of the
-;        fx-CP400's chip (P1 0x83860000, 7.625 MiB; Casio's OS reformats the
-;        area at every boot, so wince.hhk reflashes NK.bin before each CE
-;        session; the translator is built with NK_WINDOW=eact). This file.
-;   EXT  a second XIP region in the erased hole inside Casio's OS image
-;        (P1 0x80EE0000, 5 MiB): the BSP's applications, the Pocket PC
-;        compatibility DLLs and Math Xpander (platform.bib entries with EXT
-;        in the region column). OEMInit hands it to the kernel through
-;        OEMRomChain (SRC\INC\classpad_extrom.h). Without EXT.bin flashed CE
-;        boots as if the region were empty.
+; NOR flash (XIP). Two regions, as the CE 6.0 image had (docs/03); swapped
+; on 2026-11-09 so that the part worth keeping survives Casio's boots:
+;   NK   the kernel, the shell, the drivers and the BSP's own programs, in
+;        the erased hole inside Casio's OS image (P1 0x80EE0000, 5 MiB), which
+;        Casio's OS never writes after an OS update: flashed once by
+;        wince.hhk / nkflash.hhk and kept (translator NK_WINDOW=hole, the
+;        default). This file. The 2026-11-09 image fills 4.9 MB of it.
+;   EXT  a second XIP region in the eActivity area of the chip (P1
+;        0x83860000, 7.625 MiB): Math Xpander and the libraries only it needs
+;        (platform.bib entries with EXT in the region column). Casio's OS
+;        reformats the area at every boot that finds it holding something
+;        else, so wince.hhk reflashes EXT.bin before a CE session when it
+;        differs, or skips it on request. OEMInit hands the region to the
+;        kernel through OEMRomChain (SRC\INC\classpad_extrom.h); without it
+;        CE boots as if the region were empty.
 ;
 ; CE 5.0's romimage (4.0) cannot lay out two regions that are not
 ; contiguous: given both MEMORY lines it placed NK at EXT's address and EXT
@@ -42,9 +46,9 @@ MEMORY
 ;   Name        Start     Size      Type
 ;   -------     --------  --------  ----
     BOOTARGS    8C000000  00001000  RESERVED    ; OAL argument page (unused for now)
-    NK          83860000  007A0000  RAMIMAGE    ; eActivity area, 7.625 MiB (RAMIMAGE is the only image type; XIP follows from the address)
-;   NK          81000000  003E0000  RAMIMAGE    ; alternative without EXT: the hole alone, 3.875 MiB (make NK_WINDOW=hole, the default window of the first CE 6.0 images)
-;   EXT         80EE0000  00500000  RAMIMAGE    ; the hole in Casio's OS image, 5 MiB: built by the second romimage run, ext.bib.hdr
+    NK          80EE0000  00500000  RAMIMAGE    ; the hole in Casio's OS image, 5 MiB (RAMIMAGE is the only image type; XIP follows from the address)
+;   NK          83860000  007A0000  RAMIMAGE    ; the layout until 2026-11-09: NK in the eActivity area (make NK_WINDOW=eact), EXT in the hole
+;   EXT         83860000  007A0000  RAMIMAGE    ; the eActivity area, 7.625 MiB: built by the second romimage run, ext.bib.hdr
     RAM         8C001000  007FE000  RAM         ; up to 0x8C7FF000 (dbt/Makefile GUEST_RAM_HI - 4 KiB)
     DBGRING     8C7FF000  00001000  RESERVED    ; translator debug ring (image_cfg.h CLASSPAD_DBG_RING_PA)
 
@@ -55,8 +59,8 @@ CONFIG
     DLLHIGHADDR     NK   02000000
     DLLLOWCODEADDR  NK   02200000
     DLLHIGHCODEADDR NK   04000000
-    ROMSTART=83860000
-    ROMSIZE=007A0000
+    ROMSTART=80EE0000
+    ROMSIZE=00500000
     ROMWIDTH=32
 ; No profiler symbol tables (romimage writes one per module when PROFILE is
 ; on; the CE 5.0 makeimg of 2026-11-09 died while printing them)

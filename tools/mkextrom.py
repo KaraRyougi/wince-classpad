@@ -5,10 +5,10 @@ files that the flashers and tools/nkflash.py treat like an XIP NK.bin.
 
 The real EXT region (Math Xpander, XIP) is built by makeimg in the VM; this
 tool exists for the tests of the code that finds and chains it
-(bsp/classpad/SRC/INC/classpad_extrom.h): bsp/tests/test_extrom.c and the
+(bsp/classpad50/SRC/INC/classpad_extrom.h): bsp/tests/test_extrom.c and the
 extrom guest.
 
-  mkextrom.py <manifest> <out.bin> [--base 0x80EE0000] [--max 0x500000] [--root DIR]
+  mkextrom.py <manifest> <out.bin> [--base 0x83860000] [--max 0x7A0000] [--root DIR]
 
 The manifest has one entry per line, '#' starts a comment:
 
@@ -147,7 +147,7 @@ def write_bin(path, base, img):
 
 def main(argv):
     args = argv[1:]
-    opts = {"--base": "0x80EE0000", "--max": "0x500000", "--root": None}
+    opts = {"--base": "0x83860000", "--max": "0x7A0000", "--root": None}
     pos = []
     while args:
         a = args.pop(0)

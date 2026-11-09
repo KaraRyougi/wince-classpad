@@ -7,7 +7,7 @@
 #include "norflash.h"
 
 #ifndef NK_FLASH
-#define NK_FLASH 0x81000000u
+#define NK_FLASH 0x80EE0000u
 #endif
 #define WIN (NK_FLASH - NOR_P1)
 

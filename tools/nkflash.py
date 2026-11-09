@@ -7,14 +7,14 @@ HLE_OSROM_PAD=<offset>).
 
 A RAMIMAGE build (image start inside the guest RAM window, 0x8C000000 up) is
 written as is, padded to a multiple of 4 bytes (casio-emu copies flash files
-in 32-bit units), at the default offset (16 MiB): the runtime finds the
+in 32-bit units), at the default offset (the hole, dbt/Makefile NK_FLASH_OFF): the runtime finds the
 B000FF records there and copies them into RAM. A ROMIMAGE build (image start
 in the NOR's P1 range 0x80000000-0x83FFFFFF) is flattened to the bytes the
 NOR must hold and written at start - 0x80000000: the kernel then executes in
 place and the loader only reads its ROMHDR.
 
---ext adds the files-only EXT region of tools/mkextrom.py (an XIP .bin at
-0x80EE0000, docs/03) to the same flat file: casio-emu takes one HLE_OSROM
+--ext adds the EXT region (an XIP .bin built for its own NOR address: the
+eActivity area since 2026-11-09, docs/03) to the same flat file: casio-emu takes one HLE_OSROM
 blob, so it then covers both images with erased bytes (0xFF) between them,
 which is harmless for the add-in boot (the emulated NOR is otherwise erased).
 "-" instead of NK.bin flashes only the EXT region (the extrom guest).
@@ -42,7 +42,7 @@ def main(argv):
     if len(args) < 2:
         print(__doc__); return 2
     nk, out = args[0], args[1]
-    default = int(args[2], 0) if len(args) > 2 else 0x01000000
+    default = int(args[2], 0) if len(args) > 2 else 0x00EE0000
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     parts = []                                           # (flash offset, bytes)
     if nk != "-":

@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "../classpad/SRC/INC/classpad_extrom.h"
+#include "../classpad50/SRC/INC/classpad_extrom.h"
 
 static int fails;
 #define CHECK(name, cond) do { if (!(cond)) { printf("FAIL %s\n", name); fails++; } } while (0)

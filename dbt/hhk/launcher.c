@@ -1,6 +1,8 @@
 /* launcher.c - the Windows CE launcher (wince.hhk): started by HollyHock from
- * Casio's OS, it brings the NOR window up to date from \fls0\NK.bin when
- * that file is there and differs from the flash (hhk/nkflash.c), then hands
+ * Casio's OS, it brings the NOR windows up to date from \fls0\NK.bin and
+ * \fls0\EXT.bin when a file is there and differs from the flash
+ * (hhk/nkflash.c; the Keyboard key at the prompt boots without rewriting
+ * EXT, the region Casio's OS wipes, when Math Xpander is not wanted), then hands
  * the fx-CP400 to the translator image that the ELF carries at IMAGE_BASE
  * (payload.S, placed there by the launcher's own copy), which finds the CE
  * image in the NOR at NK_FLASH (docs/05).
@@ -26,10 +28,10 @@ extern void hhk_takeover(const void *src, void *dst, unsigned len, unsigned entr
 #error IMAGE_BASE (the translator link address) must come from the Makefile
 #endif
 #ifndef NK_FLASH
-#define NK_FLASH 0x81000000u
+#define NK_FLASH 0x80EE0000u
 #endif
 #ifndef NK_FLASH_MAX
-#define NK_FLASH_MAX 0x003E0000u
+#define NK_FLASH_MAX 0x00500000u
 #endif
 #ifndef GUEST_RAM_HI
 #error GUEST_RAM_HI must come from the Makefile
@@ -89,7 +91,7 @@ int hhk_main(int argc, char **argv, char **envp)
         nk_say("translator %u bytes, sum %08x %s", len, sum, ok ? "ok" : "MISMATCH");
         if (!ok) return stop("Copy wince.hhk to the calculator again.");
         /* NK first (it decides whether CE can boot at all), then the EXT
-         * region in the hole, whose problems only cost its files */
+         * region, whose problems only cost Math Xpander */
         for (i = 0; i < nk_nwindows; i++) {
             const nkwindow *w = &nk_windows[i];
             pending[i] = 0;
@@ -124,7 +126,13 @@ int hhk_main(int argc, char **argv, char **envp)
         if (!pending[0] && !memcmp((const char *)NK_FLASH, "\xff\xff\xff\xff", 4) && memcmp((const char *)NK_FLASH + 0x40, "ECEC", 4))
             nk_say("(the embedded test guest would run)");
         nk_say("EXE: %s and boot CE   Clear: cancel", any ? "flash" : "go");
-        if (!ui_wait_exe_or_clear()) return 0;
+        if (nk_nwindows > 1 && pending[1]) nk_say("Keyboard: boot now, EXT not flashed");
+        i = ui_wait_key(nk_nwindows > 1 && pending[1]);
+        if (i == 0) return 0;
+        if (i == 2) {
+            pending[1] = 0;
+            nk_say("EXT skipped: CE %s", window_has_our_image(&nk_windows[1]) ? "keeps the EXT it has" : "boots without Math Xpander");
+        }
         for (i = 0; i < nk_nwindows; i++) {
             if (!pending[i]) continue;
             if (nkflash_open(&nk_windows[i]) != NKF_READY || nkflash_write()) {

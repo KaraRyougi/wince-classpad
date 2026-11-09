@@ -42,7 +42,7 @@ bsp/tests/test_peghelp: bsp/tests/test_peghelp.c $(PEGHELP)/hpcore.c $(PEGHELP)/
 bsp/tests/test_timer50: bsp/tests/test_timer50.c bsp/classpad50/SRC/OAL/OALLIB/timer.c bsp/classpad50/SRC/INC/bsp_base_regs.h
 	$(CC) $(CFLAGS) -Wno-unused-parameter -o $@ $<
 
-bsp/tests/test_extrom: bsp/tests/test_extrom.c bsp/classpad/SRC/INC/classpad_extrom.h
+bsp/tests/test_extrom: bsp/tests/test_extrom.c bsp/classpad50/SRC/INC/classpad_extrom.h
 	$(CC) $(CFLAGS) -o $@ $<
 
 # the extrom guest's two-file region (the full Xpander one needs the app's files)

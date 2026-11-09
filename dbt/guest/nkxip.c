@@ -20,7 +20,7 @@ struct romhdr {                        /* ROMHDR, CE 6.0 layout */
 };
 
 #ifndef ROM_BASE
-#define ROM_BASE 0x81000000u            /* dbt/Makefile passes NK_FLASH */
+#define ROM_BASE 0x80EE0000u            /* dbt/Makefile passes NK_FLASH */
 #endif
 #define ROM_MASK 0xFFF00000u
 

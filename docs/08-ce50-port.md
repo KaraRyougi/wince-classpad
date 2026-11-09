@@ -68,6 +68,27 @@ Frequency`、`curridlelow/high`、`idleconv`、`dwNKDrWatsonSize`。
   （25 个模块 5.1 MiB）。于是 NK 数据 01F00000..02000000、代码
   02200000..04000000；EXT 数据 01400000..01F00000、代码 02100000..02200000。
   按 ce.bib 统计 NK 约 4.9 MB、EXT 约 4.0 MB，两个区都放得下，合成一个区放不下。
+- **两个区对调（2026-11-09）**：NK 进空洞（`NK 80EE0000 00500000`，
+  `ROMSTART=80EE0000`），EXT 进 eActivity 区（ext.bib.hdr：
+  `EXT 83860000 007A0000`）。理由见 docs/03 "The regions swapped"：空洞是
+  Casio OS 在 OS 更新之外从不写的地方，放进去的 NK 一次烧写长期有效；
+  eActivity 区每次 Casio OS 开机都会重新格式化，放那里的只有 Math Xpander
+  和 mfcce300，缺了 CE 照常启动（OEMInit 校验不过就不挂链）。BSP 自己的程序
+  （Plotter-Z、PegHelp、classpad_rotate/rotatekey、sh3crt、DocList、
+  plotterz.lnk，共约 120 KiB）改到 NK，所以 NK.bin 一个文件就是完整系统。
+  对调前的 NK 实占 4.88 MiB，加这 120 KiB、减 romexclude 新删的 ws2.dll
+  （32 KiB，CE 5.0 镜像里没有导入者；servicesd 早已不在镜像里），余量约
+  120 KiB，5 MiB 的空洞放得下但不宽裕；WordPad（约 720 KB）和三个游戏
+  （约 200 KB）是下一步可删的。DLL 地址范围不变。同步改的常量：
+  image_cfg.h `IMAGE_WINCE_CODE_PA`、classpad_extrom.h `CLASSPAD_EXT_ROM_PA/
+  BYTES`、dbt/Makefile 的 `NK_WINDOW=hole`（新默认：NK 0x00EE0000/5 MiB，
+  EXT 0x83860000/7.625 MiB；`eact` 保留为对调前镜像的布局）、rt/main.c 与
+  hhk 的后备常量、tools/mkextrom.py 与 bench 脚本的默认地址。wince.hhk 的
+  提示多了一项：**Keyboard 键 = 不重烧 EXT 直接启动**（EXT.bin 与 flash
+  不一致时才出现），省掉 Casio OS 格式化之后 4 MB 的重烧。KDEV 的
+  `rt/kernel_dev50.h` 记的是旧镜像里的地址（hint），新镜像上 kdev.c 会退回
+  扫描；重建后用 `tools/kernel_devfuncs.py NK.bin kern.map --table
+  kdev_funcs50 -o rt/kernel_dev50.h` 重做。
 - `FSRAMPERCENT=08080808`、`COMPRESSION=OFF`、`KERNELFIXUPS=ON`、
   `AUTOSIZE=OFF`、`ROMFLAGS=00` 照旧。`ROMFLAGS` bit 1 必须为 0：CE 5.0 的
   驱动和 GWES 要在内核模式跑，驱动的固定 P2 地址 MMIO 才能用。

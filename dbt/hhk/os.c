@@ -124,19 +124,26 @@ static void keys(u32 *k1, u32 *k2)
     *k2 = ((u32)hw[2] << 16) | hw[3];
     (void)hw[4]; (void)hw[5];
 }
-#define KEY1_EXE   0x04000000u
-#define KEY1_CLEAR 0x00020000u
+/* KIUDATA[w] bit b is bit (16 * (1 - w % 2) + b) of k1 (w = 0, 1) or k2
+ * (w = 2, 3); the fx-CP400 key at matrix code c (casio-emu's numbering, the
+ * BSP's kbd_layout.cpp) has w = (c % 10) / 2, b = c / 10 - 1 + 8 * (c % 2). */
+#define KEY1_EXE      0x04000000u      /* code 31 */
+#define KEY1_CLEAR    0x00020000u      /* code 20 */
+#define KEY2_KEYBOARD 0x80000000u      /* code 85: the Keyboard key */
 
-int ui_wait_exe_or_clear(void)
+int ui_wait_key(int keyboard_too)
 {
     u32 k1, k2;
-    do keys(&k1, &k2); while (k1 & (KEY1_EXE | KEY1_CLEAR));   /* released first */
+    do keys(&k1, &k2); while ((k1 & (KEY1_EXE | KEY1_CLEAR)) || (k2 & KEY2_KEYBOARD));   /* released first */
     for (;;) {
         keys(&k1, &k2);
         if (k1 & KEY1_EXE) return 1;
         if (k1 & KEY1_CLEAR) return 0;
+        if (keyboard_too && (k2 & KEY2_KEYBOARD)) return 2;
     }
 }
+
+int ui_wait_exe_or_clear(void) { return ui_wait_key(0); }
 
 void *os_malloc(unsigned n) { return os_ok ? Mem_Malloc(n) : 0; }
 void  os_free(void *p)      { if (os_ok && p) Mem_Free(p); }

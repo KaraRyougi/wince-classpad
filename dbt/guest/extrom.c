@@ -1,11 +1,11 @@
 /* extrom.c - the EXT region seen from a translated guest (docs/03): the test
- * region of guest/extrom.txt is put at 0x80EE0000 in the emulated NOR
- * (make NK_WINDOW=eact GUEST=extrom run), found with the OAL's own check
+ * region of guest/extrom.txt is put at CLASSPAD_EXT_ROM_PA in the emulated
+ * NOR (make GUEST=extrom run), found with the OAL's own check
  * (classpad_extrom.h) through little-endian loads of the big-endian NOR, and
  * its module and files read back the way the kernel's loader and ROM file
  * code would. */
 #include "hyper.h"
-#include "../../bsp/classpad/SRC/INC/classpad_extrom.h"
+#include "../../bsp/classpad50/SRC/INC/classpad_extrom.h"
 
 static const char expect[] = "wince-classpad EXT region test\n";
 static int fails;
@@ -32,10 +32,10 @@ void guest_main(void)
 {
     unsigned toc = ClasspadExtRomFind((const void *)CLASSPAD_EXT_ROM_PA, CLASSPAD_EXT_ROM_PA, CLASSPAD_EXT_ROM_BYTES);
     const unsigned *h, *f;
-    check("EXT region found at 80EE0000", toc != 0);
+    check("EXT region found at CLASSPAD_EXT_ROM_PA", toc != 0);
     if (!toc) hc_exit(1);
     h = (const unsigned *)toc;
-    check("ROMHDR: one module, two files, physfirst 80EE0000", h[4] == 1 && h[12] == 2 && h[2] == CLASSPAD_EXT_ROM_PA);
+    check("ROMHDR: one module, two files, physfirst = the region base", h[4] == 1 && h[12] == 2 && h[2] == CLASSPAD_EXT_ROM_PA);
     f = h + CLASSPAD_EXTROM_ROMHDR_BYTES / 4;
     /* TOCentry: the module's name, e32 (one object), o32 over its bytes */
     check("module extrom.dll with one section", streq((const char *)f[4], "extrom.dll")

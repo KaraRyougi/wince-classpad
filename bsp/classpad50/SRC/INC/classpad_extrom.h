@@ -1,13 +1,15 @@
 //------------------------------------------------------------------------------
-//  classpad_extrom.h - the EXT XIP region in the NOR hole (docs/03)
+//  classpad_extrom.h - the EXT XIP region in the eActivity area (docs/03)
 //
 //  The second RAMIMAGE region of config.bib (EXT, CLASSPAD_EXT_ROM_PA), built
 //  by makeimg next to NK and flashed on its own (\fls0\EXT.bin, dbt/hhk) into
-//  the erased hole inside Casio's OS image, which the OS never writes after
-//  an update. OEMInit hands it to the kernel through g_pOemGlobal->pROMChain,
-//  so its modules run in place from the NOR and its files appear in \Windows
-//  like the NK region's. Casio's boots leave it alone; an OS update erases it,
-//  and then CE boots without it.
+//  the eActivity area of the chip. OEMInit hands it to the kernel through
+//  g_pOemGlobal->pROMChain, so its modules run in place from the NOR and its
+//  files appear in \Windows like the NK region's. Casio's OS reformats the
+//  area at every boot that finds it holding something else, so the region
+//  is often gone when CE starts (wince.hhk reflashes it unless told not to),
+//  and then CE boots without it. Until 2026-11-09 the regions were the other
+//  way round (NK in the eActivity area, EXT in the hole of Casio's OS image).
 //
 //  ClasspadExtRomFind checks what the kernel will dereference before the
 //  region is chained: the signature, the ROMHDR inside the window, every
@@ -18,11 +20,10 @@
 #ifndef CLASSPAD_EXTROM_H
 #define CLASSPAD_EXTROM_H
 
-// The hole is 0x00EE0000-0x013E0000 in the chip (5 MiB): config.bib's EXT
-// line. Only together with the NK region in the eActivity area (83860000): an
-// NK image in the hole window (81000000) would overlap it.
-#define CLASSPAD_EXT_ROM_PA             0x80EE0000u
-#define CLASSPAD_EXT_ROM_BYTES          0x00500000u
+// The eActivity area is 0x3860000-0x3FFFFFF in the chip (7.625 MiB):
+// config.bib's EXT line. The NK region is in the hole 0x00EE0000-0x013E0000.
+#define CLASSPAD_EXT_ROM_PA             0x83860000u
+#define CLASSPAD_EXT_ROM_BYTES          0x007A0000u
 
 #define CLASSPAD_EXTROM_SIGNATURE       0x43454345u     // ROM_SIGNATURE, "ECEC" in memory
 #define CLASSPAD_EXTROM_ROMHDR_BYTES    84u             // sizeof(ROMHDR)

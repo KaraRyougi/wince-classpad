@@ -23,7 +23,7 @@ presses += [(122,141,t) for t in range(4100000, 6800000, 300000)]
 env = dict(os.environ, CALCEMU_MODEL='fx-cp400', SDL_VIDEODRIVER='dummy',
            SDL_RENDER_DRIVER='software', HLE_RTC_RUNNING='1', HLE_FBDUMP_ALL='1',
            HLE_FBDUMP=str((a.output/'final.ppm').resolve()),
-           HLE_OSROM=str(a.flash.resolve()), HLE_OSROM_PAD='0x03860000',
+           HLE_OSROM=str(a.flash.resolve()), HLE_OSROM_PAD='0x00EE0000',
            HLE_CB_TOUCHSEQ=';'.join(f'{x},{y},{t},4000' for x,y,t in presses),
            HLE_DBT_SAMPLE='4000000', HLE_EXIT_AT='7000000')
 env.pop('HLE_FB_EXPECT', None)
