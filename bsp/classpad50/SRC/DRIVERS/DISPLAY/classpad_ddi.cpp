@@ -220,7 +220,15 @@ ULONG ClasspadGPE::DrvEscape(SURFOBJ *pso, ULONG code, ULONG inSize,
         return GPE::DrvEscape(pso, code, inSize, in, outSize, out);
     }
     if (code == DRVESC_GETSCREENROTATION) {
-        if (!out || outSize < sizeof(DWORD)) return DISP_CHANGE_BADPARAM;
+        // CE 5.0's GWES (GdiGetScreenRotation) asks with cjOut = 0 and pvOut
+        // pointing at a 16-bit word it keeps: the current angle in the low
+        // byte, the supported angles above it; the CE 5.0 sample drivers
+        // store a DWORD there without looking at cjOut, and so do we. With
+        // the CE 6.0 size check (cjOut >= 4) the query failed, GWES recorded
+        // "no rotation supported" once and for all, and every
+        // ChangeDisplaySettingsEx(DM_DISPLAYORIENTATION) returned
+        // DISP_CHANGE_BADMODE (the Rotate strip icon did nothing, 2026-11-09).
+        if (!out) return DISP_CHANGE_BADPARAM;
         *(DWORD *)out = ((DMDO_90 | DMDO_180 | DMDO_270) << 8) | m_iRotate;
         return DISP_CHANGE_SUCCESSFUL;
     }

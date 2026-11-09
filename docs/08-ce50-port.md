@@ -300,6 +300,42 @@ shell 阶段（16–45 s）翻译器 C 代码从 64% 降到 57%，`finish_invali
 （`dbt_translate_block` 7% + `sh4_decode` 3% + `emit_flush_lits` 2%，bank 回收
 19 次/100 s）和查找 stub 本身（`_dbt_lki_ts` 7%，这是正常的快路径）。
 
+## 十、真机反馈（2026-11-09）
+
+第一次真机运行 CE 5.0（`dbt/build-dev50/wince.hh3` + NK.bin/EXT.bin）后的两个问题：
+
+- **Plotter-Z 载入任意 sample 后 Recalc 一开始就死机。** 模拟器里复现
+  （Start → Programs → Plotter-Z → File → Samples → Saddle Surface →
+  Render）：翻译器打印 `[dbt] fpu op 0000f34d status 00000002` 然后 halt。
+  0xF34D 是 `fneg fr3`，此时 FPSCR.PR=1（双精度模式），fpuemu 把"PR=1 下的奇数
+  寄存器"当作保留编码拒绝了。fneg/fabs 只翻/清 FRn 的符号位，PR=1、偶数 n 时
+  那正是 DRn 的符号；CE 5.0 的 SH-4 编译器在双精度模式下也对奇数寄存器发
+  fneg，硬件照样处理。改成无论 PR 都按 FRn 操作（`fpuemu/src/fpuemu.c`，
+  host 测试加了回归项）。模拟器里 Recalc 随后正常推进到 100%。
+  真机上看不到 halt 信息（没开面板控制台），表现为卡死。
+- **点触摸条上的 Rotate 不转屏。** 模拟器里 `ROTATEKEY: mode=1 result=-2`
+  （DISP_CHANGE_BADMODE）。反汇编 CE 5.0 的 gwes.exe：
+  `Gwe::ChangeDisplaySettingsEx_I` 第一次被调用时用
+  `GdiGetScreenRotation(short*)` 向驱动发 `DRVESC_GETSCREENROTATION`，
+  **cjOut = 0**、pvOut 指向一个 16 位字（低字节当前角度，高字节支持的角度
+  集合，CE 5.0 的示例驱动都不看 cjOut 直接写一个 DWORD）；驱动失败就把这个字
+  记成 0，以后所有 `DM_DISPLAYORIENTATION` 请求都因"不支持该角度"返回 -2，
+  只有 CDS_TEST 查询能过。我们的驱动沿用 CE 6.0 的 `cjOut >= 4` 检查，于是
+  每次都失败。`classpad_ddi.cpp` 去掉了这个检查（只要 pvOut 非空就写）。
+  需要在 VM 里重新 Build and Sysgen Current BSP + Make Run-Time Image。
+
+顺带量了 Recalc 为什么慢（模拟器里 20×20 的 Saddle Surface 要约 100 s）：
+按翻译记录把心跳采样的宿主 PC 映射回 guest 符号（`hbguest.py`），计算本身
+（coredll `pow`）只占 0.2%；40% 在显示驱动的 GPE 软件 blit
+（`MaskColorConverter::MaskedSrcToMaskedDst`、`EmulatedBlt_Internal`）：
+每算完一列 `DrawRecalcProgress` 就 `InvalidateRect(NULL)` + `UpdateWindow`，
+整个画布 BitBlt 一次，而画布 DIB 是 16 位 BI_RGB（即 RGB555），面板是
+RGB565，GPE 走逐像素的通用转换路径；另有约 20% 在内核 `OpenADll` →
+filesys `CreateFileW`/CEDB 查询（有人在反复 LoadLibrary 一个找不到的 DLL，
+来源未查明），7% 在 GWES 字形测量（命令栏随整窗失效重绘）。可做的事：
+Plotter-Z 用 BI_BITFIELDS 565 建 DIB（blit 变成直拷）、进度条只失效自己
+的矩形；驱动侧给 555→565 SRCCOPY 加快路径；查清 LoadLibrary 的来源。
+
 ## 九、还没做的
 
 - 在 VM 里构建（第一次构建会暴露 SDK 的差异：头文件、`WARNISERROR`）。
