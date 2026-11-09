@@ -89,6 +89,16 @@ Frequency`、`curridlelow/high`、`idleconv`、`dwNKDrWatsonSize`。
   `rt/kernel_dev50.h` 记的是旧镜像里的地址（hint），新镜像上 kdev.c 会退回
   扫描；重建后用 `tools/kernel_devfuncs.py NK.bin kern.map --table
   kdev_funcs50 -o rt/kernel_dev50.h` 重做。
+  第一次按新布局构建（2026-11-09）的两个教训：PB 的 Copy Files to Release
+  Directory 跳过了被 PB 自己打开着的 config.bib 和 platform.bib（共享上这两个
+  文件读写都被拒），镜像仍按旧布局出来，关掉它们再复制一次才对；
+  **romimage 把区的 .bin/.nb0 写到第一个模块所在的目录**（NK.bin 落在
+  release 目录只是因为 nk.exe 在那里），EXT 的第一个模块从 DocList.dll
+  （release 目录）变成 mfcce300.dll 之后，EXT.bin 出现在
+  `PLATFORM\CLASSPAD\FILES\legacy-mfc\`，PostRomImage.bat 现在按
+  ext.modules.bib 第一项的目录把它搬回来。新镜像：NK.bin 实占 5,226,576
+  字节，离 5 MiB 只差 16 KiB；EXT.bin 4.17 MiB，ROMHDR 的 CPU 字段随第一个
+  模块变成 SH3（内核链接区时不看它）。
 - `FSRAMPERCENT=08080808`、`COMPRESSION=OFF`、`KERNELFIXUPS=ON`、
   `AUTOSIZE=OFF`、`ROMFLAGS=00` 照旧。`ROMFLAGS` bit 1 必须为 0：CE 5.0 的
   驱动和 GWES 要在内核模式跑，驱动的固定 P2 地址 MMIO 才能用。

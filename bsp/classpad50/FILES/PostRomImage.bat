@@ -30,15 +30,28 @@ if not exist "%REL%\ext.bib.hdr" (
   echo.
 ) > "%REL%\ext.bib"
 echo PostRomImage: romimage ext.bib (the EXT region, 83860000)
-del /q "%REL%\EXT.bin" 2>nul
+del /q "%REL%\EXT.bin" "%REL%\EXT.nb0" 2>nul
 romimage "%REL%\ext.bib"
 if errorlevel 1 (
   echo PostRomImage: romimage ext.bib failed, EXT.bin not built
   exit /b 1
 )
-if not exist "%REL%\EXT.bin" (
-  echo PostRomImage: romimage ran but wrote no EXT.bin
-  exit /b 1
-)
+rem romimage writes the region's EXT.bin and EXT.nb0 into the directory of
+rem the FIRST module listed (NK.bin lands in the release directory because
+rem nk.exe is there). Since 2026-11-09 the first EXT module is mfcce300.dll
+rem in PLATFORM\CLASSPAD\FILES\legacy-mfc, so fetch them from there.
+set "FIRSTMOD="
+for /f "tokens=2" %%P in ('findstr /r /c:"^ *[^ ;]" "%REL%\ext.modules.bib"') do if not defined FIRSTMOD set "FIRSTMOD=%%P"
+for %%F in ("%FIRSTMOD%") do set "OUTDIR=%%~dpF"
+if exist "%REL%\EXT.bin" goto extdone
+if not exist "%OUTDIR%EXT.bin" goto extmissing
+echo PostRomImage: moving EXT.bin and EXT.nb0 from %OUTDIR%
+move /y "%OUTDIR%EXT.bin" "%REL%\EXT.bin" >nul
+move /y "%OUTDIR%EXT.nb0" "%REL%\EXT.nb0" >nul
+goto extdone
+:extmissing
+echo PostRomImage: romimage ran but wrote no EXT.bin (not in %REL% nor %OUTDIR%)
+exit /b 1
+:extdone
 for %%F in ("%REL%\EXT.bin") do echo PostRomImage: EXT.bin %%~zF bytes
 exit /b 0
