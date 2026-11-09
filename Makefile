@@ -11,7 +11,7 @@ DBT_TEST := dbt/tests/test_translate
 PEGHELP  := bsp/classpad50/SRC/APPS/PEGHELP
 # Math Xpander's \Windows files (stage.py's --xpander); the test skips them when absent
 XPANDER_WINDOWS ?= $(HOME)/Downloads/Xpander_SH3/files/Windows
-test: $(TEST) $(DBT_TEST) bsp/tests/test_touch_bus bsp/tests/test_timer bsp/tests/test_timer50 bsp/tests/test_extrom bsp/tests/extrom-test.bin bsp/tests/test_peghelp
+test: $(TEST) $(DBT_TEST) bsp/tests/test_touch_bus bsp/tests/test_timer bsp/tests/test_timer50 bsp/tests/test_extrom bsp/tests/extrom-test.bin bsp/tests/test_peghelp bsp/tests/test_lcdrot
 	./$(TEST)
 	./$(DBT_TEST)
 	./bsp/tests/test_touch_bus
@@ -19,6 +19,7 @@ test: $(TEST) $(DBT_TEST) bsp/tests/test_touch_bus bsp/tests/test_timer bsp/test
 	./bsp/tests/test_timer50
 	./bsp/tests/test_peghelp "$(XPANDER_WINDOWS)"
 	./bsp/tests/test_extrom bsp/tests/extrom-test.bin
+	./bsp/tests/test_lcdrot
 
 $(DBT_TEST): dbt/tests/test_translate.c $(DBT_SRC) dbt/src/sh4dec.h dbt/src/sh4emit.h dbt/src/translate.h $(HDR)
 	$(CC) $(CFLAGS) -Idbt/src -Ifpuemu/src -o $@ dbt/tests/test_translate.c $(DBT_SRC)
@@ -27,7 +28,7 @@ $(TEST): fpuemu/tests/test_host.c $(SRC) $(HDR)
 	$(CC) $(CFLAGS) -Ifpuemu/src -o $@ fpuemu/tests/test_host.c $(SRC) -lm
 
 clean:
-	rm -f $(TEST) $(DBT_TEST) bsp/tests/test_touch_bus bsp/tests/test_timer bsp/tests/test_timer50 bsp/tests/test_extrom bsp/tests/extrom-test.bin bsp/tests/test_peghelp
+	rm -f $(TEST) $(DBT_TEST) bsp/tests/test_touch_bus bsp/tests/test_timer bsp/tests/test_timer50 bsp/tests/test_extrom bsp/tests/extrom-test.bin bsp/tests/test_peghelp bsp/tests/test_lcdrot
 
 bsp/tests/test_touch_bus: bsp/tests/test_touch_bus.c bsp/classpad/SRC/INC/classpad_touch_bus.h bsp/classpad/SRC/INC/classpad_touch.h
 	$(CC) $(CFLAGS) -o $@ $<
@@ -41,6 +42,9 @@ bsp/tests/test_peghelp: bsp/tests/test_peghelp.c $(PEGHELP)/hpcore.c $(PEGHELP)/
 
 bsp/tests/test_timer50: bsp/tests/test_timer50.c bsp/classpad50/SRC/OAL/OALLIB/timer.c bsp/classpad50/SRC/INC/bsp_base_regs.h
 	$(CC) $(CFLAGS) -Wno-unused-parameter -o $@ $<
+
+bsp/tests/test_lcdrot: bsp/tests/test_lcdrot.c bsp/classpad50/SRC/INC/classpad_lcdrot.h
+	$(CC) $(CFLAGS) -o $@ bsp/tests/test_lcdrot.c
 
 bsp/tests/test_extrom: bsp/tests/test_extrom.c bsp/classpad50/SRC/INC/classpad_extrom.h
 	$(CC) $(CFLAGS) -o $@ $<

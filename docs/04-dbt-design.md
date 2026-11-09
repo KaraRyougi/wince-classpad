@@ -393,7 +393,13 @@ via hypercall 0xF1):
   same for the DCS panel with CASET/PASET/RAMWR issued inside the hypercall
   (`hc_lcd_push`: r4 = pixels, r5 = first row, r6 = rows, r7 = width; the
   `dcs` guest checks it), so the panel console cannot write between the
-  driver's window commands and its pixels.
+  driver's window commands and its pixels. Its rotated form (2026-11-09,
+  `bsp/classpad50/SRC/INC/classpad_lcdrot.h`): r7 = 0xA5000000 | DMDO angle,
+  r4 = an unrotated logical frame of the panel turned by that angle (528x320
+  for 90/270), r5 = physical rows py0 | py1 << 16, r6 = physical columns
+  px0 | px1 << 16; the translator sets that window and streams it in panel
+  order from transposed reads of the frame, so the display driver never
+  shows GPE a rotated surface (docs/08). The `dcsrot` guest checks it.
 - Address spaces: blocks are keyed by virtual pc. A block of TLB-mapped
   code (pc < 0x80000000) also records the ASID it was translated under and
   the physical address of its first instruction, found by scanning the UTLB

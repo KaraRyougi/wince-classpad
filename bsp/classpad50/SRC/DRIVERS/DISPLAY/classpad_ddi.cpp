@@ -23,6 +23,7 @@
 #include <pwingdi.h>
 #include "classpad_lcd.h"
 #include "classpad_hc.h"
+#include "classpad_lcdrot.h"
 
 #define DISP_PUSH_MS        50
 #define DISP_CONSOLE_ROWS   96              // rows the translator's console keeps (rt/lcdcon.c LINES * CELL_H)
@@ -54,6 +55,18 @@ VOID RegisterDDHALAPI(void)
 {
 }
 
+// The primary surface: the panel's 320x528x2 bytes, laid out as an
+// unrotated surface of the logical size (320x528 in portrait, 528x320 in
+// landscape; classpad_lcdrot.h). GPESurf keeps the stride protected, so a
+// subclass sets it when the layout changes.
+class ClasspadSurf : public GPESurf
+{
+public:
+    ClasspadSurf(int width, int height, void *pBits, int stride, EGPEFormat format) : GPESurf(width, height, pBits, stride, format) {}
+    ClasspadSurf(int width, int height, EGPEFormat format) : GPESurf(width, height, format) {}
+    void Relayout(int width, int height) { m_nStrideBytes = width * 2; SetRotation(width, height, DMDO_0); }
+};
+
 class ClasspadGPE : public GPE
 {
     GPEMode             m_mode;
@@ -72,6 +85,7 @@ class ClasspadGPE : public GPE
     ULONG               m_framePa;          // its physical address
     int                 m_blit;             // registry "Blit": 1 = HC_LCD_PUSH (default), 2 = HC_LCD_BLIT with our window commands, 0 = translated stores
     int                 m_consoleRows;      // top rows left to the translator's console (registry "Console"), else 0
+    ClasspadSurf       *m_pPrimary;         // m_pPrimarySurface, with Relayout
     USHORT             *m_cvt16;            // 16 -> 16 bpp colour conversion table for ConvertedCopyBlt16 (65536 entries)
     ULONG               m_cvtProbe[4];      // what the table's converter made of CVT_PROBE: identifies it
 
@@ -98,7 +112,7 @@ public:
     SCODE           WrappedLine(GPELineParms *pParms);
     SCODE           WrappedBlt(GPEBltParms *pParms);
     SCODE           ConvertedCopyBlt16(GPEBltParms *pParms);
-    SCODE           RotatedLookupBlt16(GPEBltParms *pParms);
+    void            SetWindow(unsigned x0, unsigned x1, unsigned y0, unsigned y1);
     void            Dirty(int top, int bottom);
     void            PushRows(int top, int bottom);
     static DWORD WINAPI PushThread(LPVOID pThis);
@@ -164,8 +178,9 @@ ClasspadGPE::ClasspadGPE()
     m_blit    = (int)RegDword(TEXT("Blit"), 1);
     m_framePa = 0;
     m_pFrame  = (BYTE *)AllocPhysMem(width * 2 * height, PAGE_READWRITE, 0, 0, &m_framePa);
-    if (m_pFrame) m_pPrimarySurface = new GPESurf(width, height, m_pFrame, width * 2, gpe16Bpp);
-    else          m_pPrimarySurface = new GPESurf(width, height, gpe16Bpp);
+    if (m_pFrame) m_pPrimary = new ClasspadSurf(width, height, m_pFrame, width * 2, gpe16Bpp);
+    else          m_pPrimary = new ClasspadSurf(width, height, gpe16Bpp);
+    m_pPrimarySurface = m_pPrimary;
     if (m_pPrimarySurface && m_pPrimarySurface->Buffer()) {
         m_pPrimarySurface->SetRotation(width, height, DMDO_0);
         memset(m_pPrimarySurface->Buffer(), 0, m_pPrimarySurface->Stride() * height);
@@ -255,11 +270,17 @@ LONG ClasspadGPE::RotateDisplay(int angle)
         m_nScreenHeight = sideways ? m_nScreenWidthSave : m_nScreenHeightSave;
         m_mode.width = m_nScreenWidth;
         m_mode.height = m_nScreenHeight;
-        // GPE renders logical coordinates into the unchanged native buffer.
-        // Keep the physical stride, allocation, LCD window and push ABI.
-        m_pPrimarySurface->SetRotation(m_nScreenWidth, m_nScreenHeight, angle);
+        // Rotation below GPE (classpad_lcdrot.h): the frame stays the
+        // panel's bytes, now laid out as an unrotated surface of the turned
+        // size (stride = logical width), and PushRows turns it on the way to
+        // the panel. GWES and GPE draw exactly as in portrait, so none of
+        // GPE's rotated-surface code runs (its generic rotated blit drew
+        // icons wrong, 2026-11-09). The old layout means nothing in the new
+        // one: clear it, GWES repaints everything after the mode change.
+        m_pPrimary->Relayout(m_nScreenWidth, m_nScreenHeight);
+        memset(m_pPrimary->Buffer(), 0, m_nScreenWidthSave * 2 * m_nScreenHeightSave);
         m_dirtyTop = 0;
-        m_dirtyBottom = m_nScreenHeightSave;
+        m_dirtyBottom = m_nScreenHeight;
         SetEvent(m_hEvent);
     }
     LeaveCriticalSection(&m_cs);
@@ -275,10 +296,11 @@ SCODE ClasspadGPE::AllocSurface(GPESurf **ppSurf, int width, int height, EGPEFor
     return S_OK;
 }
 
+// Logical rows [top, bottom) changed (the surface's own rows, whatever the rotation)
 void ClasspadGPE::Dirty(int top, int bottom)
 {
     if (top < 0) top = 0;
-    if (bottom > m_nScreenHeightSave) bottom = m_nScreenHeightSave;
+    if (bottom > m_nScreenHeight) bottom = m_nScreenHeight;
     if (top >= bottom) return;
     EnterCriticalSection(&m_cs);
     // One wakeup per pending batch. Additional drawing widens the range
@@ -301,12 +323,8 @@ SCODE ClasspadGPE::WrappedLine(GPELineParms *pParms)
 {
     SCODE sc = EmulatedLine(pParms);
     if (pParms->pDst == m_pPrimarySurface) {
-        if (pParms->prclClip) {
-            // The clip is in logical (rotated) coordinates, like Blt's prclDst.
-            RECTL physical = *pParms->prclClip;
-            m_pPrimarySurface->RotateRectl(&physical);
-            Dirty(physical.top, physical.bottom);
-        } else Dirty(0, m_nScreenHeightSave);
+        if (pParms->prclClip) Dirty(pParms->prclClip->top, pParms->prclClip->bottom);
+        else Dirty(0, m_nScreenHeight);
     }
     return sc;
 }
@@ -333,92 +351,8 @@ SCODE ClasspadGPE::BltPrepare(GPEBltParms *pParms)
         pParms->pSrc->Format() == gpe16Bpp && pParms->pDst->Format() == gpe16Bpp &&
         pParms->prclSrc && pParms->prclDst &&
         pParms->prclSrc->right - pParms->prclSrc->left == pParms->prclDst->right - pParms->prclDst->left &&
-        pParms->prclSrc->bottom - pParms->prclSrc->top == pParms->prclDst->bottom - pParms->prclDst->top &&
-        !pParms->pSrc->IsRotate() && !pParms->pDst->IsRotate())
+        pParms->prclSrc->bottom - pParms->prclSrc->top == pParms->prclDst->bottom - pParms->prclDst->top)
         pParms->pBlt = (SCODE (GPE::*)(GPEBltParms *))&ClasspadGPE::ConvertedCopyBlt16;
-    // Sources that need a colour translation onto the rotated primary: a 1,
-    // 4 or 8 bpp source through a lookup table, a 16 bpp source through a
-    // converter, or a transparent blit. emulrotate declines all of these
-    // (pLookup, pConvert, BLT_TRANSPARENT) and GPE's generic rotated path
-    // gets them wrong: GWES draws icons as SRCAND of the mono mask followed
-    // by SRCPAINT of the image, and on a rotated screen the desktop icons
-    // came out OR-ed with the background (the 1 bpp AND, 2026-11-09), then
-    // the Start menu's icons came out as black silhouettes (the image blit
-    // through a lookup or converter). Done here pixel by pixel through
-    // GPESurf::GetPtr(x, y); a 16 bpp copy without translation stays with
-    // emulrotate's own routines.
-    else if (pParms->pSrc && pParms->pDst && pParms->pDst->IsRotate() && !pParms->pSrc->IsRotate() &&
-        pParms->pDst->Format() == gpe16Bpp && !pParms->pMask &&
-        !(pParms->bltFlags & (BLT_STRETCH | BLT_ALPHABLEND)) &&
-        pParms->prclSrc && pParms->prclDst &&
-        (pParms->rop4 == 0x8888 || pParms->rop4 == 0xEEEE || pParms->rop4 == 0x6666 || pParms->rop4 == 0xCCCC) &&
-        (((pParms->pSrc->Format() == gpe1Bpp || pParms->pSrc->Format() == gpe4Bpp || pParms->pSrc->Format() == gpe8Bpp) &&
-          pParms->pLookup && !pParms->pConvert) ||
-         (pParms->pSrc->Format() == gpe16Bpp && !pParms->pLookup &&
-          ((pParms->pConvert && pParms->pColorConverter) || (pParms->bltFlags & BLT_TRANSPARENT)))))
-        pParms->pBlt = (SCODE (GPE::*)(GPEBltParms *))&ClasspadGPE::RotatedLookupBlt16;
-    return S_OK;
-}
-
-SCODE ClasspadGPE::RotatedLookupBlt16(GPEBltParms *pParms)
-{
-    RECTL dst = *pParms->prclDst;
-    int sx = pParms->prclSrc->left, sy = pParms->prclSrc->top, x, y, w, h;
-    const BYTE *srcBase = (const BYTE *)pParms->pSrc->Buffer();
-    int sstride = pParms->pSrc->Stride();
-    EGPEFormat sfmt = pParms->pSrc->Format();
-    const ULONG *lut = pParms->pLookup;
-    ColorConverter *cvt = pParms->pColorConverter;
-    unsigned long (ColorConverter::*convert)(unsigned long) = pParms->pConvert;
-    int transparent = (pParms->bltFlags & BLT_TRANSPARENT) != 0;
-    ULONG transparentColor = pParms->solidColor;             // in the source's own pixel format (GPE swblt.cpp)
-    if (pParms->prclClip) {
-        RECTL *c = pParms->prclClip;
-        if (c->left > dst.left)     { sx += c->left - dst.left; dst.left = c->left; }
-        if (c->top > dst.top)       { sy += c->top - dst.top;   dst.top = c->top; }
-        if (c->right < dst.right)   dst.right = c->right;
-        if (c->bottom < dst.bottom) dst.bottom = c->bottom;
-    }
-    if (dst.left < 0)   { sx -= dst.left; dst.left = 0; }
-    if (dst.top < 0)    { sy -= dst.top;  dst.top = 0; }
-    if (sx < 0)         { dst.left -= sx; sx = 0; }
-    if (sy < 0)         { dst.top -= sy;  sy = 0; }
-    if (dst.right > pParms->pDst->Width())   dst.right = pParms->pDst->Width();     // logical (rotated) size
-    if (dst.bottom > pParms->pDst->Height()) dst.bottom = pParms->pDst->Height();
-    w = dst.right - dst.left; h = dst.bottom - dst.top;
-    if (sx + w > pParms->pSrc->Width())  w = pParms->pSrc->Width() - sx;
-    if (sy + h > pParms->pSrc->Height()) h = pParms->pSrc->Height() - sy;
-    for (y = 0; y < h; y++) {
-        const BYTE *srow = srcBase + (sy + y) * sstride;
-        for (x = 0; x < w; x++) {
-            int bx = sx + x;
-            ULONG raw;
-            USHORT v;
-            switch (sfmt) {
-            case gpe1Bpp: raw = (srow[bx >> 3] >> (7 - (bx & 7))) & 1; break;        // the leftmost pixel is the high bit
-            case gpe4Bpp: raw = (bx & 1) ? (srow[bx >> 1] & 0xF) : (srow[bx >> 1] >> 4); break;
-            case gpe8Bpp: raw = srow[bx]; break;
-            default:      raw = ((const USHORT *)srow)[bx]; break;
-            }
-            if (transparent && raw == transparentColor) continue;
-            if (lut) v = (USHORT)lut[raw];
-            else if (convert) v = (USHORT)(cvt->*convert)(raw);
-            else v = (USHORT)raw;
-            USHORT *d = (USHORT *)pParms->pDst->GetPtr(dst.left + x, dst.top + y);
-            switch (pParms->rop4) {
-            case 0x8888: *d &= v; break;
-            case 0xEEEE: *d |= v; break;
-            case 0x6666: *d ^= v; break;
-            default:     *d = v;  break;
-            }
-        }
-    }
-    if (pParms->pDst == m_pPrimarySurface && w > 0 && h > 0) {
-        RECTL physical = dst;
-        physical.right = dst.left + w; physical.bottom = dst.top + h;
-        m_pPrimarySurface->RotateRectl(&physical);
-        Dirty(physical.top, physical.bottom);
-    }
     return S_OK;
 }
 
@@ -474,27 +408,11 @@ SCODE ClasspadGPE::ConvertedCopyBlt16(GPEBltParms *pParms)
 
 SCODE ClasspadGPE::WrappedBlt(GPEBltParms *pParms)
 {
-    static int logged, rotLogged;
+    static int logged;
     SCODE sc = EmulatedBlt(pParms);
-    // Diagnostic (2026-11-09): what still reaches GPE's generic path on a
-    // rotated screen (the Start menu's icons were wrong there).
-    if (pParms->pDst == m_pPrimarySurface && m_pPrimarySurface->IsRotate() && rotLogged < 64) {
-        rotLogged++;
-        RETAILMSG(1, (TEXT("CLASSPAD DDI: rotated blt rop4=%04X dst=%d,%d-%d,%d src=%d lookup=%d convert=%d mask=%d brush=%d flags=%08X -> %08X\r\n"),
-                      (UINT)pParms->rop4,
-                      pParms->prclDst ? pParms->prclDst->left : -1, pParms->prclDst ? pParms->prclDst->top : -1,
-                      pParms->prclDst ? pParms->prclDst->right : -1, pParms->prclDst ? pParms->prclDst->bottom : -1,
-                      pParms->pSrc ? (int)pParms->pSrc->Format() : -1, pParms->pLookup != NULL, pParms->pConvert != NULL,
-                      pParms->pMask ? (int)pParms->pMask->Format() : -1,
-                      pParms->pBrush ? (int)pParms->pBrush->Format() : -1,
-                      (UINT)pParms->bltFlags, (UINT)sc));
-    }
     if (pParms->pDst == m_pPrimarySurface) {
-        if (pParms->prclDst) {
-            RECTL physical = *pParms->prclDst;
-            m_pPrimarySurface->RotateRectl(&physical);
-            Dirty(physical.top, physical.bottom);
-        } else Dirty(0, m_nScreenHeightSave);
+        if (pParms->prclDst) Dirty(pParms->prclDst->top, pParms->prclDst->bottom);
+        else Dirty(0, m_nScreenHeight);
     }
     // Diagnostic (2026-11-04): exact-colour fills and lines reach the frame
     // buffer, blits with a dithered brush or a glyph mask seem not to. Log
@@ -526,61 +444,95 @@ void ClasspadGPE::PanelInit()
     LcdParam(LCD_DCS_COLMOD_16BPP);
 }
 
-// DCS: stream dirty rows [top,bottom). R61524: retain its bottom-of-frame presentation rule.
+// The panel's write window: physical columns [x0, x1), rows [y0, y1), then
+// the pixel stream (DCS: RAMWR; R61524: its address registers and data select).
+void ClasspadGPE::SetWindow(unsigned x0, unsigned x1, unsigned y0, unsigned y1)
+{
+    if (m_panel == LCD_PANEL_DCS) {
+        LcdCommand(LCD_DCS_CASET);
+        LcdParam((UCHAR)(x0 >> 8));         LcdParam((UCHAR)x0);
+        LcdParam((UCHAR)((x1 - 1) >> 8));   LcdParam((UCHAR)(x1 - 1));
+        LcdCommand(LCD_DCS_PASET);
+        LcdParam((UCHAR)(y0 >> 8));         LcdParam((UCHAR)y0);
+        LcdParam((UCHAR)((y1 - 1) >> 8));   LcdParam((UCHAR)(y1 - 1));
+        LcdCommand(LCD_DCS_RAMWR);
+    } else {
+        LcdWriteReg(LCD_REG_HSTART, (USHORT)((LCD_CG100_GRAM_COLS - 1) - (LCD_CG100_COL0 + x1 - 1)));
+        LcdWriteReg(LCD_REG_HEND,   (USHORT)((LCD_CG100_GRAM_COLS - 1) - (LCD_CG100_COL0 + x0)));
+        LcdWriteReg(LCD_REG_VSTART, (USHORT)y0);
+        LcdWriteReg(LCD_REG_VEND,   (USHORT)(y1 - 1));
+        LcdWriteReg(LCD_REG_HADDR,  0);
+        LcdWriteReg(LCD_REG_VADDR,  0);
+        LcdSelect(LCD_REG_DATA);
+    }
+}
+
+// Push the logical rows [top, bottom) of the frame to the panel. Portrait:
+// the rows as they are, by the translator (HC_LCD_PUSH, "Blit"=1), its
+// pixel-only hypercall after our window commands ("Blit"=2) or translated
+// stores. Rotated: the logical buffer is the panel turned by the angle
+// (classpad_lcdrot.h), so the rows are a physical window (columns for 90 and
+// 270) streamed in panel order from transposed reads, by the translator's
+// rotated form of HC_LCD_PUSH or, without it, here. R61524 (fx-CG100):
+// portrait only, with its bottom-of-frame presentation rule kept.
 void ClasspadGPE::PushRows(int top, int bottom)
 {
     const BYTE *fb = (const BYTE *)m_pPrimarySurface->Buffer();
     int stride = m_pPrimarySurface->Stride(), width = m_nScreenWidthSave, height = m_nScreenHeightSave, x, y;
+    unsigned rot = (unsigned)m_iRotate, x0, x1, y0, y1;
     if (!fb) return;
-    if (top < m_consoleRows) top = m_consoleRows;          // the console's rows are not ours
-    if (m_panel == LCD_PANEL_DCS && bottom < height) height = bottom;
-    if (top >= height) return;
-    if (m_panel == LCD_PANEL_DCS && m_pFrame && m_blit == 1 && ClasspadCanTrap()) {
-        // Native push by the translator with the window set there too
-        // (HC_LCD_PUSH, docs/04): write the rows back from the cache, then
-        // hand it the P2 alias of their physical address. One hypercall
-        // replaces width*rows translated stores, each of which cost a swap
-        // sequence, and nothing the translator prints (its panel console)
-        // can land between the window commands and the pixels.
-        const BYTE *src = fb + top * stride;
-        DWORD len = (DWORD)(height - top) * stride;
-        CacheRangeFlush((LPVOID)src, len, CACHE_SYNC_WRITEBACK);
-        // Each trap runs with BL=1. Bound it to four rows and return to
-        // guest code between strips so pending input/timer IRQs can run.
-        for (y = top; y < height; y += 4) {
-            DWORD rows = (DWORD)((height - y < 4) ? height - y : 4);
-            ClasspadHcLcdPush(0xA0000000 | ((m_framePa + y * stride) & 0x1FFFFFFF), (DWORD)y, rows, (DWORD)width);
+    if (top < 0) top = 0;
+    if (bottom > m_nScreenHeight) bottom = m_nScreenHeight;
+    if (top >= bottom) return;
+    ClasspadRotWindow(rot, (unsigned)width, (unsigned)height, (unsigned)top, (unsigned)bottom, &x0, &x1, &y0, &y1);
+    if (m_panel != LCD_PANEL_DCS) y1 = (unsigned)height;
+    if (y0 < (unsigned)m_consoleRows) y0 = (unsigned)m_consoleRows;      // the console's physical rows are not ours
+    if (y0 >= y1 || x0 >= x1) return;
+    if (rot == DMDO_0) {
+        const BYTE *src = fb + y0 * stride;
+        DWORD len = (DWORD)(y1 - y0) * stride;
+        if (m_panel == LCD_PANEL_DCS && m_pFrame && m_blit == 1 && ClasspadCanTrap()) {
+            // Native push by the translator with the window set there too
+            // (HC_LCD_PUSH, docs/04): write the rows back from the cache, then
+            // hand it the P2 alias of their physical address. One hypercall
+            // replaces width*rows translated stores, each of which cost a swap
+            // sequence, and nothing the translator prints (its panel console)
+            // can land between the window commands and the pixels.
+            CacheRangeFlush((LPVOID)src, len, CACHE_SYNC_WRITEBACK);
+            // Each trap runs with BL=1. Bound it to four rows and return to
+            // guest code between strips so pending input/timer IRQs can run.
+            for (y = (int)y0; y < (int)y1; y += 4) {
+                DWORD rows = (DWORD)(((int)y1 - y < 4) ? (int)y1 - y : 4);
+                ClasspadHcLcdPush(0xA0000000 | ((m_framePa + y * stride) & 0x1FFFFFFF), (DWORD)y, rows, (DWORD)width);
+            }
+        } else {
+            SetWindow(0, (unsigned)width, y0, y1);
+            if (m_pFrame && m_blit && ClasspadCanTrap()) {
+                // pixels by the translator (HC_LCD_BLIT), the window by us: "Blit"=2, or the R61524
+                CacheRangeFlush((LPVOID)src, len, CACHE_SYNC_WRITEBACK);
+                ClasspadHcLcdBlit(0xA0000000 | ((m_framePa + y0 * stride) & 0x1FFFFFFF), (DWORD)(y1 - y0) * width, LCD_DATA_PORT);
+            } else {
+                for (y = (int)y0; y < (int)y1; y++) {
+                    const USHORT *row = (const USHORT *)(fb + y * stride);
+                    for (x = 0; x < width; x++) LcdWriteData(row[x]);
+                }
+            }
         }
     } else {
-        if (m_panel == LCD_PANEL_DCS) {
-            // window columns 0..width-1, rows top..height-1; RAMWR resets the cursor to its corner
-            LcdCommand(LCD_DCS_CASET);
-            LcdParam(0);                        LcdParam(0);
-            LcdParam((UCHAR)((width - 1) >> 8)); LcdParam((UCHAR)(width - 1));
-            LcdCommand(LCD_DCS_PASET);
-            LcdParam((UCHAR)(top >> 8));         LcdParam((UCHAR)top);
-            LcdParam((UCHAR)((height - 1) >> 8)); LcdParam((UCHAR)(height - 1));
-            LcdCommand(LCD_DCS_RAMWR);
-        } else {
-            LcdWriteReg(LCD_REG_HSTART, (USHORT)((LCD_CG100_GRAM_COLS - 1) - (LCD_CG100_COL0 + width - 1)));
-            LcdWriteReg(LCD_REG_HEND,   (USHORT)((LCD_CG100_GRAM_COLS - 1) - LCD_CG100_COL0));
-            LcdWriteReg(LCD_REG_VSTART, (USHORT)top);
-            LcdWriteReg(LCD_REG_VEND,   (USHORT)(height - 1));
-            LcdWriteReg(LCD_REG_HADDR,  0);
-            LcdWriteReg(LCD_REG_VADDR,  0);
-            LcdSelect(LCD_REG_DATA);
-        }
-        if (m_pFrame && m_blit && ClasspadCanTrap()) {
-            // pixels by the translator (HC_LCD_BLIT), the window by us: "Blit"=2, or the R61524
-            const BYTE *src = fb + top * stride;
-            DWORD len = (DWORD)(height - top) * stride;
+        // The logical rows [top, bottom) hold every pixel of the window, contiguous in the buffer
+        const BYTE *src = fb + top * stride;
+        DWORD len = (DWORD)(bottom - top) * stride;
+        if (m_panel == LCD_PANEL_DCS && m_pFrame && m_blit == 1 && ClasspadCanTrap()) {
             CacheRangeFlush((LPVOID)src, len, CACHE_SYNC_WRITEBACK);
-            ClasspadHcLcdBlit(0xA0000000 | ((m_framePa + top * stride) & 0x1FFFFFFF), (DWORD)(height - top) * width, LCD_DATA_PORT);
-        } else {
-            for (y = top; y < height; y++) {
-                const USHORT *row = (const USHORT *)(fb + y * stride);
-                for (x = 0; x < width; x++) LcdWriteData(row[x]);
+            for (y = (int)y0; y < (int)y1; y += 4) {
+                unsigned ye = (unsigned)y + 4 < y1 ? (unsigned)y + 4 : y1;
+                ClasspadHcLcdPush(0xA0000000 | (m_framePa & 0x1FFFFFFF), (DWORD)y | (ye << 16), x0 | (x1 << 16), CLASSPAD_ROT_PUSH_TAG | rot);
             }
+        } else {
+            SetWindow(x0, x1, y0, y1);
+            for (y = (int)y0; y < (int)y1; y++)
+                for (x = (int)x0; x < (int)x1; x++)
+                    LcdWriteData(*(const USHORT *)(fb + ClasspadRotOffset(rot, (unsigned)width, (unsigned)height, (unsigned)x, (unsigned)y)));
         }
     }
     if (m_panel == LCD_PANEL_DCS && !m_displayOn) {
@@ -589,7 +541,7 @@ void ClasspadGPE::PushRows(int top, int bottom)
     }
     m_pushes++;
     if (m_pushes <= 3 || (m_pushes % 200) == 0)
-        RETAILMSG(1, (TEXT("CLASSPAD DDI: push %d from row %d\r\n"), m_pushes, top));
+        RETAILMSG(1, (TEXT("CLASSPAD DDI: push %d, logical rows %d..%d, window %u..%u x %u..%u\r\n"), m_pushes, top, bottom, x0, x1, y0, y1));
 }
 
 // Power off / on from GWES. Called with the system mostly stopped: register
@@ -672,11 +624,11 @@ DWORD WINAPI ClasspadGPE::PushThread(LPVOID pThis)
             if (p->m_suspended) continue;
             LcdCommand(LCD_DCS_WRDISBV);         // the backlight back (PowerHandler set it to 0)
             LcdParam(p->m_brightness);
-            p->Dirty(0, p->m_nScreenHeightSave);
+            p->Dirty(0, p->m_nScreenHeight);
         }
         EnterCriticalSection(&p->m_cs);
         top = p->m_dirtyTop; bottom = p->m_dirtyBottom;
-        p->m_dirtyTop = p->m_nScreenHeightSave; p->m_dirtyBottom = 0;
+        p->m_dirtyTop = p->m_nScreenHeight; p->m_dirtyBottom = 0;
         LeaveCriticalSection(&p->m_cs);
         if (top < bottom) {
             p->PushRows(top, bottom);

@@ -424,12 +424,29 @@ logo 都对。GPE 的 sysgen 版 gpe.lib 已经包含 emulrotate（gperotate.lib
 菜单图标来自 commctrl 的 image list，图像位图不是 16 bpp 直拷（带 lookup 的
 4/8 bpp 或带 converter 的 16 bpp），emulrotate 的 `EmulatedBltSelect16` 凡带
 lookup/convert/BLT_TRANSPARENT 的都不接，GPE 的通用旋转路径又画错。驱动里把
-`RotatedMonoBlt16` 扩成 `RotatedLookupBlt16`：旋转的 16 bpp 目标 + 未旋转的
-1/4/8 bpp 源经 lookup，或 16 bpp 源经 converter 或带 BLT_TRANSPARENT（透明色
-按源格式比较原始像素，与 GPE swblt.cpp 一致），rop SRCAND/SRCPAINT/SRCINVERT/
-SRCCOPY，逐像素经 `GetPtr`；不带转换的 16 bpp 拷贝仍交给 emulrotate。另外给
-转屏后仍走通用路径的前 64 次 blit 加了日志（`rotated blt rop4=…`），重建后
-用它确认菜单图标走的到底是哪种源，再决定删不删。待重建验证。
+`RotatedMonoBlt16` 先扩成了覆盖 lookup/converter/透明色的 `RotatedLookupBlt16`，
+但这只是又补一个洞：图案画刷、屏到屏拷贝（源也旋转）、拉伸、Alpha 仍走 GPE
+的通用旋转路径，正确性未知，而且旋转表面上每个像素都经 `GetPtr` 虚函数，
+横屏比竖屏慢好几倍。于是改为**在 GPE 之下旋转**（同日，重建待验证）：
+
+- 帧缓冲还是那 320×528×2 字节，但转屏后把它重新布局成**不旋转的** 528×320
+  线性表面（`ClasspadSurf::Relayout`：stride 改 1056，`SetRotation(w, h,
+  DMDO_0)`；GPESurf 的 stride 是 protected，所以要一个子类）。`IsRotate()`
+  永远为假，GWES/GPE 画什么都是竖屏那套线性路径，emulrotate 和通用旋转例程
+  不再参与；`RotatedLookupBlt16`、`RotateRectl` 换算全部删掉，脏行就是逻辑行。
+  GWES 和应用不靠这个标志重排 UI：它们看到的是 `DRVESC_SETSCREENROTATION`
+  的返回和 `GetModeInfo` 的新尺寸（GWES 据此改 SM_CXSCREEN、广播
+  WM_SETTINGCHANGE、旋转触摸坐标），主表面是 `EngCreateDeviceSurface` 的设备
+  表面，GWES 不直接碰位图。
+- 旋转发生在推屏（`classpad_lcdrot.h`，驱动、翻译器、主机测试共用）：逻辑
+  (lx, ly) 在面板上的位置沿用 GPE `GetPtr` 的约定（90°：(ly, 527−lx)；
+  180°：(319−lx, 527−ly)；270°：(319−ly, lx)），所以触摸映射和之前一致。
+  逻辑行 [top, bottom) 对应一个物理窗口（90/270 时是列带），`PushRows` 用
+  `HC_LCD_PUSH` 的旋转形式（r7 = 0xA5000000 | 角度，r5/r6 = 物理行/列窗口）
+  让翻译器按面板顺序转置读出并写入，每次 4 个物理行一段；没有翻译器时驱动
+  自己转置写。`bsp/tests/test_lcdrot` 对 320×528 和 7×5 两种尺寸穷举校验映射
+  与窗口，`dcsrot` guest 在模拟器里把一帧横屏图推出来，四个象限、标记、边框
+  都落在预期位置。
 
 **重建镜像上 Recalc 的剩余分布（Render 到 100% 约 60 s，采样 398 个）：**
 Plotter-Z 自己的 `PaintCanvas16Bpp` 52%、驱动的 `ConvertedCopyBlt16` 8%、

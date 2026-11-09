@@ -2605,6 +2605,9 @@ static void invalidate_all_but_rom(void)
 
 /* ------------------------------------------------------------ hypercalls */
 
+#include "../../bsp/classpad50/SRC/INC/classpad_lcdrot.h"
+#define LCD_PANEL_W 320u                /* the fx-CP400 panel, portrait (HC_LCD_PUSH rotated form) */
+#define LCD_PANEL_H 528u
 #define HC_EXIT   0xF0
 #define HC_PUTS   0xF1
 #define HC_FLUSH  0xF2
@@ -2621,7 +2624,7 @@ static void invalidate_all_but_rom(void)
                                          * the complete list is kept in bsp/classpad/SRC/INC/classpad_hc.h) */
 #define HC_DEVRANGE 0xFC                /* tests: translate [r4, r5) device-aware from now on (drops all translations at the next lookup) */
 #define HC_LCD_BLIT 0xFD                /* r4 = pixels as the guest stores them (P1/P2 address), r5 = pixel count, r6 = 16-bit LCD data port: written natively */
-#define HC_LCD_PUSH 0xFE                /* DCS panel: r4 = pixels (P1/P2), r5 = first row, r6 = rows, r7 = width: CASET/PASET/RAMWR and the pixels in one go */
+#define HC_LCD_PUSH 0xFE                /* DCS panel: r4 = pixels (P1/P2), r5 = first row, r6 = rows, r7 = width: CASET/PASET/RAMWR and the pixels in one go; r7 = CLASSPAD_ROT_PUSH_TAG | angle: the rotated form of classpad_lcdrot.h */
 #define HC_STANDBY 0xFF                 /* SH7305 R-standby (docs/06): r4 = flags (unused) -> r0 = 1 after a wake-up, 0 if the machine did not enter it */
 
 #define REG_EXPEVT (*(volatile sf_u32 *)0xFF000024u)
@@ -3150,6 +3153,28 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
         sf_u32 top = ctx->r[5], rows = ctx->r[6], width = ctx->r[7], x1 = width - 1, y1 = top + rows - 1;
 #define DCS_CMD(c) dbt_lcd_select(prdr, port, (c))
 #define DCS_PARAM(v) dbt_lcd_param(port, (v))
+        if ((ctx->r[7] & CLASSPAD_ROT_PUSH_MASK) == CLASSPAD_ROT_PUSH_TAG) {
+            /* Rotated form (classpad_lcdrot.h): the driver's frame is an
+             * unrotated logical surface of the panel turned by the angle;
+             * stream the physical window r6 (columns px0 | px1 << 16) x r5
+             * (rows py0 | py1 << 16), end-exclusive, in panel order from
+             * transposed reads of the buffer at r4. */
+            sf_u32 rot = ctx->r[7] & 0xFFu, py0 = ctx->r[5] & 0xFFFFu, py1 = ctx->r[5] >> 16;
+            sf_u32 px0 = ctx->r[6] & 0xFFFFu, px1 = ctx->r[6] >> 16, px, py;
+            const sf_u8 *base = (const sf_u8 *)ctx->r[4];
+            if (px0 >= px1 || py0 >= py1 || px1 > LCD_PANEL_W || py1 > LCD_PANEL_H) return RT_ACT_RESUME;
+            DCS_CMD(0x2A); DCS_PARAM(px0 >> 8); DCS_PARAM(px0 & 0xFF); DCS_PARAM((px1 - 1) >> 8); DCS_PARAM((px1 - 1) & 0xFF);
+            DCS_CMD(0x2B); DCS_PARAM(py0 >> 8); DCS_PARAM(py0 & 0xFF); DCS_PARAM((py1 - 1) >> 8); DCS_PARAM((py1 - 1) & 0xFF);
+            DCS_CMD(0x2C);
+            for (py = py0; py < py1; py++)
+                for (px = px0; px < px1; px++) {
+                    const sf_u8 *s = base + ClasspadRotOffset(rot, LCD_PANEL_W, LCD_PANEL_H, px, py);
+                    *port = (sf_u16)(s[0] | ((sf_u16)s[1] << 8));
+                }
+            dbt_stat.lcd_pixels += (px1 - px0) * (py1 - py0);
+            dbt_lcd_sync();
+            return RT_ACT_RESUME;
+        }
         DCS_CMD(0x2A); DCS_PARAM(0); DCS_PARAM(0); DCS_PARAM(x1 >> 8); DCS_PARAM(x1 & 0xFF);
         DCS_CMD(0x2B); DCS_PARAM(top >> 8); DCS_PARAM(top & 0xFF); DCS_PARAM(y1 >> 8); DCS_PARAM(y1 & 0xFF);
         DCS_CMD(0x2C);
