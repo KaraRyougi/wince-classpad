@@ -251,11 +251,34 @@ static void SetPixelCanvas(int x, int y, int iColor) {
     ( ((x) < 0 || (x) >= g_iCanvasW || (y) < 0 || (y) >= g_iCanvasH) ? 0 : \
       (g_pCanvas[canvasByteIndex((x), (y))] >> canvasShift((x))) & 0x03 )
 
+/* ClassPad (2026-11-09): one pixel of a canvas row, for loops that have
+ * already clipped (a SetPixelCanvas call per pixel cost about 200 host
+ * instructions under the translator, most of it the call and the return). */
+#define CANVAS_ROW(y)               (g_pCanvas + (y) * g_iCanvasPitch)
+#define CANVAS_PUT(pRow, x, c)      ((pRow)[(x) >> 2] = (unsigned char)(((pRow)[(x) >> 2] & canvasMask(x)) | (((c) & 0x03) << canvasShift(x))))
+
+/* ClassPad (2026-11-09): clipped once, then row by row with whole bytes
+ * (four pixels) through memset. The per-pixel version was 81% of every
+ * redraw while dragging: Redraw clears the whole canvas with it. */
 static void FillRectCanvas(int dx, int dy, int w, int h, int iColor) {
-    int x, y;
-    for (y = 0; y < h; ++y)
-        for (x = 0; x < w; ++x)
-            SetPixelCanvas(dx + x, dy + y, iColor);
+    int x, y, x0 = dx, y0 = dy, x1 = dx + w, y1 = dy + h;
+    unsigned char ucFill = (unsigned char)((iColor & 0x03) * 0x55);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > g_iCanvasW) x1 = g_iCanvasW;
+    if (y1 > g_iCanvasH) y1 = g_iCanvasH;
+    if (g_pCanvas == NULL || x0 >= x1 || y0 >= y1) return;
+    for (y = y0; y < y1; ++y) {
+        unsigned char* pRow = CANVAS_ROW(y);
+        x = x0;
+        while (x < x1 && (x & 3)) { CANVAS_PUT(pRow, x, iColor); ++x; }
+        if (x1 - x >= 4) {
+            int iBytes = (x1 - x) >> 2;
+            memset(pRow + (x >> 2), ucFill, (size_t)iBytes);
+            x += iBytes << 2;
+        }
+        while (x < x1) { CANVAS_PUT(pRow, x, iColor); ++x; }
+    }
 }
 
 static void DrawLineCanvas(int x0, int y0, int x1, int y1, int iColor) {
@@ -263,7 +286,11 @@ static void DrawLineCanvas(int x0, int y0, int x1, int y1, int iColor) {
     int dy = -ABS(y1 - y0), sy = y0 < y1 ? 1 : -1;
     int err = dx + dy, e2;
     for (;;) {
-        SetPixelCanvas(x0, y0, iColor);
+        /* ClassPad (2026-11-09): SetPixelCanvas in line */
+        if (x0 >= 0 && x0 < g_iCanvasW && y0 >= 0 && y0 < g_iCanvasH) {
+            unsigned char* pRow = CANVAS_ROW(y0);
+            CANVAS_PUT(pRow, x0, iColor);
+        }
         if (x0 == x1 && y0 == y1) break;
         e2 = 2 * err;
         if (e2 >= dy) { err += dy; x0 += sx; }
@@ -276,10 +303,14 @@ static void Draw1bppCanvas(const unsigned char *raw, int dx, int dy, int w, int 
     int x, y, dot;
     unsigned char ucEight;
     for (y = 0; y < h; ++y) {
+        /* ClassPad (2026-11-09): rows off the canvas skipped, pixels written in line */
+        unsigned char* pRow;
+        if (dy + y < 0 || dy + y >= g_iCanvasH) continue;
+        pRow = CANVAS_ROW(dy + y);
         for (x = 0; x < w; ++x) {
             ucEight = raw[y * pitch + (x >> 3)];
             dot = (ucEight >> (7 - (x & 7))) & 1;
-            if (dot) SetPixelCanvas(dx + x, dy + y, iColor);
+            if (dot && dx + x >= 0 && dx + x < g_iCanvasW) CANVAS_PUT(pRow, dx + x, iColor);
         }
     }
 }
@@ -287,13 +318,22 @@ static void Draw1bppCanvas(const unsigned char *raw, int dx, int dy, int w, int 
 /*====================================================
  * Invert colors in a rectangle (0<->3, 1<->2)
  *====================================================*/
+/* ClassPad (2026-11-09): 3 - c is the pixel's two bits inverted, so a whole
+ * byte inverts four pixels; clipped once, row by row. */
 static void InvertRectCanvas(int dx, int dy, int w, int h) {
-    int x, y, iColor;
-    for (y = 0; y < h; ++y)
-        for (x = 0; x < w; ++x) {
-            iColor = GetPixelCanvas(dx + x, dy + y);
-            SetPixelCanvas(dx + x, dy + y, 3 - iColor);
-        }
+    int x, y, x0 = dx, y0 = dy, x1 = dx + w, y1 = dy + h;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > g_iCanvasW) x1 = g_iCanvasW;
+    if (y1 > g_iCanvasH) y1 = g_iCanvasH;
+    if (g_pCanvas == NULL || x0 >= x1 || y0 >= y1) return;
+    for (y = y0; y < y1; ++y) {
+        unsigned char* pRow = CANVAS_ROW(y);
+        x = x0;
+        while (x < x1 && (x & 3)) { pRow[x >> 2] ^= (unsigned char)(0x03 << canvasShift(x)); ++x; }
+        for (; x + 4 <= x1; x += 4) pRow[x >> 2] ^= 0xFF;
+        while (x < x1) { pRow[x >> 2] ^= (unsigned char)(0x03 << canvasShift(x)); ++x; }
+    }
 }
 
 static void PutCharCanvas(int x, int y, unsigned char ch, int iColor) {
@@ -836,6 +876,18 @@ static void DrawAxes(void (*xyz2xy)(NUMERIC, NUMERIC, NUMERIC, int*, int *)) {
  * Full redraw (clear -> box -> surface -> footer)
  *====================================================*/
 static void RefreshCameraTrigBuf(void) {
+#if defined(USE_FIXED_POINT) && defined(PZ_TRIG_TABLE_FIXED)
+    /* ClassPad (2026-11-09): the angles are whole degrees; the table
+     * (pz_trig_table.h, the values of the expressions below) keeps four
+     * double precision sin/cos calls per redraw off the emulated FPU. */
+    if (Camera.iAlphaDeg >= 0 && Camera.iAlphaDeg < 360 && Camera.iBetaDeg >= 0 && Camera.iBetaDeg < 360) {
+        Camera.uTrigBuf.sFixed.sinA = g_pzSinFixed[Camera.iAlphaDeg];
+        Camera.uTrigBuf.sFixed.cosA = g_pzCosFixed[Camera.iAlphaDeg];
+        Camera.uTrigBuf.sFixed.sinB = g_pzSinFixed[Camera.iBetaDeg];
+        Camera.uTrigBuf.sFixed.cosB = g_pzCosFixed[Camera.iBetaDeg];
+        return;
+    }
+#endif
 #ifdef USE_FIXED_POINT
     Camera.uTrigBuf.sFixed.sinA = PZ_FLOAT_TO_FIXED(sin(Camera.iAlphaDeg * PZ_PI / 180));
     Camera.uTrigBuf.sFixed.cosA = PZ_FLOAT_TO_FIXED(cos(Camera.iAlphaDeg * PZ_PI / 180));
@@ -2461,6 +2513,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         || dwNow < g_dwLastMouseRefresh) {
                         Redraw(hWnd);
                         InvalidateRect(hWnd, NULL, FALSE);
+                        /* ClassPad (2026-11-09): paint now. WM_PAINT waits
+                         * for an empty queue, and the stylus keeps it full:
+                         * nothing was painted before the pen came up. */
+                        UpdateWindow(hWnd);
                         g_dwLastMouseRefresh = dwNow;
                     }
                 }

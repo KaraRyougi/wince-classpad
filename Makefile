@@ -11,9 +11,10 @@ DBT_TEST := dbt/tests/test_translate
 PEGHELP  := bsp/classpad50/SRC/APPS/PEGHELP
 # Math Xpander's \Windows files (stage.py's --xpander); the test skips them when absent
 XPANDER_WINDOWS ?= $(HOME)/Downloads/Xpander_SH3/files/Windows
-test: $(TEST) $(DBT_TEST) bsp/tests/test_touch_bus bsp/tests/test_timer bsp/tests/test_timer50 bsp/tests/test_extrom bsp/tests/extrom-test.bin bsp/tests/test_peghelp bsp/tests/test_lcdrot
+test: $(TEST) $(DBT_TEST) $(DBT_TEST)_icrefill bsp/tests/test_touch_bus bsp/tests/test_timer bsp/tests/test_timer50 bsp/tests/test_extrom bsp/tests/extrom-test.bin bsp/tests/test_peghelp bsp/tests/test_lcdrot
 	./$(TEST)
 	./$(DBT_TEST)
+	./$(DBT_TEST)_icrefill
 	./bsp/tests/test_touch_bus
 	./bsp/tests/test_timer
 	./bsp/tests/test_timer50
@@ -24,11 +25,15 @@ test: $(TEST) $(DBT_TEST) bsp/tests/test_touch_bus bsp/tests/test_timer bsp/test
 $(DBT_TEST): dbt/tests/test_translate.c $(DBT_SRC) dbt/src/sh4dec.h dbt/src/sh4emit.h dbt/src/translate.h $(HDR)
 	$(CC) $(CFLAGS) -Idbt/src -Ifpuemu/src -o $@ dbt/tests/test_translate.c $(DBT_SRC)
 
+# the same with the inline cache's block-index word (the target build's default, dbt/Makefile USER_IC_REFILL)
+$(DBT_TEST)_icrefill: dbt/tests/test_translate.c $(DBT_SRC) dbt/src/sh4dec.h dbt/src/sh4emit.h dbt/src/translate.h $(HDR)
+	$(CC) $(CFLAGS) -DDBT_USER_IC_REFILL -Idbt/src -Ifpuemu/src -o $@ dbt/tests/test_translate.c $(DBT_SRC)
+
 $(TEST): fpuemu/tests/test_host.c $(SRC) $(HDR)
 	$(CC) $(CFLAGS) -Ifpuemu/src -o $@ fpuemu/tests/test_host.c $(SRC) -lm
 
 clean:
-	rm -f $(TEST) $(DBT_TEST) bsp/tests/test_touch_bus bsp/tests/test_timer bsp/tests/test_timer50 bsp/tests/test_extrom bsp/tests/extrom-test.bin bsp/tests/test_peghelp bsp/tests/test_lcdrot
+	rm -f $(TEST) $(DBT_TEST) $(DBT_TEST)_icrefill bsp/tests/test_touch_bus bsp/tests/test_timer bsp/tests/test_timer50 bsp/tests/test_extrom bsp/tests/extrom-test.bin bsp/tests/test_peghelp bsp/tests/test_lcdrot
 
 bsp/tests/test_touch_bus: bsp/tests/test_touch_bus.c bsp/classpad/SRC/INC/classpad_touch_bus.h bsp/classpad/SRC/INC/classpad_touch.h
 	$(CC) $(CFLAGS) -o $@ $<

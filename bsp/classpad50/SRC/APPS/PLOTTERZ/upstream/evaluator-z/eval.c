@@ -218,6 +218,17 @@ PZ_FLOAT EzMachine_Eval (EzMachine* pVm) {
             case EZOP_POW:
                 fRight = evalPop();
                 fLeft = evalPop();
+                /* ClassPad (2026-11-09): a small whole exponent (x^2 ...) by
+                 * multiplication; pow() in double precision on the emulated
+                 * FPU was most of a recalculation's arithmetic. */
+                if (fRight >= -8.0f && fRight <= 8.0f && (PZ_FLOAT)(int)fRight == fRight) {
+                    int iExp = (int)fRight, iNeg = iExp < 0;
+                    PZ_FLOAT fPow = 1.0f;
+                    if (iNeg) iExp = -iExp;
+                    for (; iExp > 0; --iExp) fPow *= fLeft;
+                    evalPush(iNeg ? 1.0f / fPow : fPow);
+                    break;
+                }
                 evalPush((PZ_FLOAT)pow(fLeft, fRight));
                 break;
             case EZOP_INTDIV:

@@ -36,6 +36,29 @@ the translator and almost none of it was arithmetic, docs/08 section 10):
   the whole window (which repainted the command bar's text and the whole
   canvas after every column).
 
+Second round, same day (docs/08 section 8, "Plotter-Z: drag and first
+draw"): dragging redrew at about 37M emulated instructions a frame, 81% of
+it the canvas clear, and painted nothing until the pen came up.
+
+- `FillRectCanvas` and `InvertRectCanvas` clip once and work row by row,
+  whole bytes (four pixels) at a time; `DrawLineCanvas` and
+  `Draw1bppCanvas` write their pixels in line (`CANVAS_PUT`) instead of
+  calling `SetPixelCanvas` per pixel. Same pixels as before: checked on the
+  Mac against the old functions with 200000 random rectangles, lines and
+  glyphs.
+- `WM_MOUSEMOVE` calls `UpdateWindow` after its `InvalidateRect`, so each
+  redraw of a drag is painted at once; WM_PAINT alone waits for an empty
+  message queue, which a moving stylus never leaves.
+- `RefreshCameraTrigBuf` takes sin/cos of the camera's whole-degree angles
+  from `..\..\..\pz_trig_table.h` (ours, included by `plotterz.c`; without it
+  the file compiles as upstream's). The table holds the values of
+  upstream's own expressions, computed on the build host.
+- `upstream\evaluator-z\eval.c`, `EZOP_POW`: a whole exponent from -8 to 8
+  is evaluated by multiplication (`x^2` is the common case; `pow` in double
+  precision on the emulated FPU was most of a recalculation's arithmetic).
+  Exponents -1 to 2 give the same bits as `pow`, the others differ by a few
+  units in the last place of a float.
+
 When replacing upstream's files with a newer checkout, reapply them (or
 better, send them upstream).
 
