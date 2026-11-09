@@ -387,6 +387,14 @@ logo 都对。GPE 的 sysgen 版 gpe.lib 已经包含 emulrotate（gperotate.lib
 （`RotatedMonoBlt16`，经 `GPESurf::GetPtr(x, y)` 寻址，处理裁剪，标脏行）。
 重建后验证：转屏后 "My Device" 图标的 181 种颜色与未转屏时完全一致。
 
+**重建镜像上 Recalc 的剩余分布（Render 到 100% 约 60 s，采样 398 个）：**
+Plotter-Z 自己的 `PaintCanvas16Bpp` 52%、驱动的 `ConvertedCopyBlt16` 8%、
+FPU 模拟（`fpuemu_exec` + 辅助 stub + `dbt_fpu_c`）16%、GWES 字形 0%（字形
+缓存起效了）、`pow` 本身 0.3%。于是把 Plotter-Z 的前端改了三处（见
+`SRC\APPS\PLOTTERZ\README.md`）：16 位 DIB 建成 BI_BITFIELDS 565、按
+`ps.rcPaint` 的矩形逐行转换（一字节四像素）并只 BitBlt 那块、进度条只失效
+自己的矩形。预期 Recalc 剩下的主要是 FPU 模拟。待重建测量。
+
 ## 九、还没做的
 
 - 在 VM 里构建（第一次构建会暴露 SDK 的差异：头文件、`WARNISERROR`）。

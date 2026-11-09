@@ -89,6 +89,9 @@ volatile sf_u32 dbt_fast_rte_calls;      /* rtes completed by that fast path */
 dbt_stats dbt_stat;            /* diagnostics: where the emulator's counter snapshot can read it */
 #else
 dbt_stats dbt_stat DBT_XYRAM;
+#ifdef DBT_FPU_HIST
+static sf_u32 g_fpu_hist[34];   /* 0-15: Fnnnmmmm[sub] arithmetic/move classes, 16-31: F??[kind]D single-operand kinds, 32: lds/sts, 33: ops run with PR=1 */
+#endif
 #endif
 volatile sf_u32 dbt_lookup_sr; /* saved before lookup hash/IC tests alter T */
 
@@ -2911,6 +2914,9 @@ static void print_stats(void)
     dbt_puts(" survivor_bytes="); dbt_puthex(g_survivor_bytes);
 #endif
 #ifdef DBT_TLB_REFILL
+#ifdef DBT_FPU_HIST
+    { int k; dbt_puts("\n[dbt] fpu hist:"); for (k = 0; k < 34; ++k) { dbt_puts(" "); dbt_puthex(g_fpu_hist[k]); } }
+#endif
     dbt_puts(" tlb_refills="); dbt_puthex(dbt_stat.tlb_refills); dbt_puts(" tlb_revals="); dbt_puthex(dbt_stat.tlb_revals); dbt_puts("/"); dbt_puthex(dbt_stat.tlb_reval_skips); dbt_puts(" cpages="); dbt_puthex(g_ncpage); dbt_puts(g_cpage_over ? "!" : "");
 #endif
 #ifdef DBT_FAST_RTE
@@ -4254,6 +4260,14 @@ void dbt_fpu_c(dbt_gctx *ctx, sf_u32 arg)
     }
     mem.read32 = fpu_read32; mem.write32 = fpu_write32; mem.fetch16 = 0; mem.ctx = 0;
     dbt_stat.fpu_ops++;
+#ifdef DBT_FPU_HIST
+    /* -DDBT_FPU_HIST: which FPU instructions run (by their opcode's class), in the stats */
+    {
+        unsigned k = (opcode & 0xF000u) == 0xF000u ? ((opcode & 0xFu) == 0xDu ? 16 + ((opcode >> 4) & 0xFu) : (opcode & 0xFu)) : 32;
+        g_fpu_hist[k]++;
+        if (g_fpu.fpscr & FPSCR_PR) g_fpu_hist[33]++;
+    }
+#endif
     r = fpuemu_exec(&g_fpu, ctx->r, &ctx->sr, opcode, &mem);
     g_helper_ret = 0;
     if (r != FPU_OK) {
