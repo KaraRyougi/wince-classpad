@@ -507,6 +507,14 @@ Plotter-Z 改了五处（`SRC\APPS\PLOTTERZ\README.md`）：`FillRectCanvas`/
 Mac 上与旧实现逐字节对照过（20 万组随机输入），整个程序用 clang 对 CE 5.0
 SDK 头文件做了语法检查。**还没在 VM 里构建，效果待重建镜像后测量。**
 
+**合并 `claude/plotter-z-performance`（2026-11-09）：** Plotter-Z 的重绘与
+重算改动（按字节的填充/反色、相机 sin/cos 查表、整数次幂用乘法）加翻译器的
+用户 IC 回填（`USER_IC_REFILL=1`）。模拟器里同一套 Saddle Surface 计量：
+合并后的翻译器配旧镜像 2.71 亿条，配重建镜像 **0.96 亿条**（每秒一帧的
+分辨率下误差约 ±0.4 亿，已接近量程下限），Render 到出图约 5 s；最终帧的
+曲面区域与之前逐像素一致。对调前的 10.19 亿到现在约十倍。NK.bin 因 trig 表
+涨 2 KB，空洞余量 12 KiB。
+
 ## 九、还没做的
 
 - 在 VM 里构建（第一次构建会暴露 SDK 的差异：头文件、`WARNISERROR`）。
