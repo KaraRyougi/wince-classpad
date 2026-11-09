@@ -462,17 +462,8 @@ SCODE ClasspadGPE::WrappedBlt(GPEBltParms *pParms)
     // Diagnostic (2026-11-04): exact-colour fills and lines reach the frame
     // buffer, blits with a dithered brush or a glyph mask seem not to. Log
     // the first blits: what GWES asks for and what EmulatedBlt says.
-    // Diagnostic (2026-11-09): after a rotation the desktop icons come out
-    // OR-ed with the background (their AND-mask step has no effect); log the
-    // first blits drawn while rotated too, with the conversion details.
-    static int loggedRot;
-    if (logged < 48 || (m_iRotate != DMDO_0 && loggedRot < 96)) {
-        if (m_iRotate != DMDO_0) loggedRot++; else logged++;
-        RETAILMSG(1, (TEXT("CLASSPAD DDI: rot=%d lookup=%d convert=%d srcrect=%d,%d clip=%d,%d-%d,%d\r\n"), m_iRotate,
-                      pParms->pLookup != NULL, pParms->pConvert != NULL,
-                      pParms->prclSrc ? pParms->prclSrc->left : -1, pParms->prclSrc ? pParms->prclSrc->top : -1,
-                      pParms->prclClip ? pParms->prclClip->left : -1, pParms->prclClip ? pParms->prclClip->top : -1,
-                      pParms->prclClip ? pParms->prclClip->right : -1, pParms->prclClip ? pParms->prclClip->bottom : -1));
+    if (logged < 48) {
+        logged++;
         RETAILMSG(1, (TEXT("CLASSPAD DDI: blt rop4=%04X dst=%d,%d-%d,%d %s src=%d mask=%d brush=%d flags=%08X color=%08X -> %08X\r\n"),
                       (UINT)pParms->rop4,
                       pParms->prclDst ? pParms->prclDst->left : -1, pParms->prclDst ? pParms->prclDst->top : -1,

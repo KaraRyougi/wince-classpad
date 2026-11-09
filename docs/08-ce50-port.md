@@ -385,7 +385,7 @@ logo 都对。GPE 的 sysgen 版 gpe.lib 已经包含 emulrotate（gperotate.lib
 而那条路径对它不起作用。没有再追 GPE 里的具体原因：驱动里对"1 bpp 源 + lookup
 + 旋转的目标 + SRCAND/SRCPAINT/SRCINVERT/SRCCOPY"自己逐像素做
 （`RotatedMonoBlt16`，经 `GPESurf::GetPtr(x, y)` 寻址，处理裁剪，标脏行）。
-待重建验证。
+重建后验证：转屏后 "My Device" 图标的 181 种颜色与未转屏时完全一致。
 
 ## 九、还没做的
 
