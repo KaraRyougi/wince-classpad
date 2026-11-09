@@ -8,12 +8,16 @@ DBT_TEST := dbt/tests/test_translate
 
 .PHONY: test clean
 
-test: $(TEST) $(DBT_TEST) bsp/tests/test_touch_bus bsp/tests/test_timer bsp/tests/test_timer50 bsp/tests/test_extrom bsp/tests/extrom-test.bin
+PEGHELP  := bsp/classpad50/SRC/APPS/PEGHELP
+# Math Xpander's \Windows files (stage.py's --xpander); the test skips them when absent
+XPANDER_WINDOWS ?= $(HOME)/Downloads/Xpander_SH3/files/Windows
+test: $(TEST) $(DBT_TEST) bsp/tests/test_touch_bus bsp/tests/test_timer bsp/tests/test_timer50 bsp/tests/test_extrom bsp/tests/extrom-test.bin bsp/tests/test_peghelp
 	./$(TEST)
 	./$(DBT_TEST)
 	./bsp/tests/test_touch_bus
 	./bsp/tests/test_timer
 	./bsp/tests/test_timer50
+	./bsp/tests/test_peghelp "$(XPANDER_WINDOWS)"
 	./bsp/tests/test_extrom bsp/tests/extrom-test.bin
 
 $(DBT_TEST): dbt/tests/test_translate.c $(DBT_SRC) dbt/src/sh4dec.h dbt/src/sh4emit.h dbt/src/translate.h $(HDR)
@@ -23,13 +27,17 @@ $(TEST): fpuemu/tests/test_host.c $(SRC) $(HDR)
 	$(CC) $(CFLAGS) -Ifpuemu/src -o $@ fpuemu/tests/test_host.c $(SRC) -lm
 
 clean:
-	rm -f $(TEST) $(DBT_TEST) bsp/tests/test_touch_bus bsp/tests/test_timer bsp/tests/test_timer50 bsp/tests/test_extrom bsp/tests/extrom-test.bin
+	rm -f $(TEST) $(DBT_TEST) bsp/tests/test_touch_bus bsp/tests/test_timer bsp/tests/test_timer50 bsp/tests/test_extrom bsp/tests/extrom-test.bin bsp/tests/test_peghelp
 
 bsp/tests/test_touch_bus: bsp/tests/test_touch_bus.c bsp/classpad/SRC/INC/classpad_touch_bus.h bsp/classpad/SRC/INC/classpad_touch.h
 	$(CC) $(CFLAGS) -o $@ $<
 
 bsp/tests/test_timer: bsp/tests/test_timer.c bsp/classpad/SRC/OAL/OALLIB/timer.c bsp/classpad/SRC/INC/bsp_base_regs.h
 	$(CC) $(CFLAGS) -Wno-unused-parameter -o $@ $<
+
+# peghelp.exe's HTML core is plain C89, so the host builds it too
+bsp/tests/test_peghelp: bsp/tests/test_peghelp.c $(PEGHELP)/hpcore.c $(PEGHELP)/hpcore.h
+	$(CC) $(CFLAGS) -o $@ bsp/tests/test_peghelp.c $(PEGHELP)/hpcore.c
 
 bsp/tests/test_timer50: bsp/tests/test_timer50.c bsp/classpad50/SRC/OAL/OALLIB/timer.c bsp/classpad50/SRC/INC/bsp_base_regs.h
 	$(CC) $(CFLAGS) -Wno-unused-parameter -o $@ $<

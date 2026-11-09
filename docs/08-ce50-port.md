@@ -335,17 +335,35 @@ Save/RestoreFloatContext 里。剩下的风险是"PR=1 下的奇数寄存器"这
 那个线程；fpuemu 报告的使能 FPU 异常（FPSCR cause 已置、结果未写）同样作为
 0x120 交给 guest，不再静默丢结果。统计里 `fpudis=a/b` 的 b 是这类投递的次数。
 
-顺带量了 Recalc 为什么慢（模拟器里 20×20 的 Saddle Surface 要约 100 s）：
-按翻译记录把心跳采样的宿主 PC 映射回 guest 符号（`hbguest.py`），计算本身
-（coredll `pow`）只占 0.2%；40% 在显示驱动的 GPE 软件 blit
-（`MaskColorConverter::MaskedSrcToMaskedDst`、`EmulatedBlt_Internal`）：
-每算完一列 `DrawRecalcProgress` 就 `InvalidateRect(NULL)` + `UpdateWindow`，
-整个画布 BitBlt 一次，而画布 DIB 是 16 位 BI_RGB（即 RGB555），面板是
-RGB565，GPE 走逐像素的通用转换路径；另有约 20% 在内核 `OpenADll` →
-filesys `CreateFileW`/CEDB 查询（有人在反复 LoadLibrary 一个找不到的 DLL，
-来源未查明），7% 在 GWES 字形测量（命令栏随整窗失效重绘）。可做的事：
-Plotter-Z 用 BI_BITFIELDS 565 建 DIB（blit 变成直拷）、进度条只失效自己
-的矩形；驱动侧给 555→565 SRCCOPY 加快路径；查清 LoadLibrary 的来源。
+顺带量了 Recalc 为什么慢（模拟器里 20×20 的 Saddle Surface 约 100 s）。
+按翻译记录把心跳采样的宿主 PC 映射回 guest 符号（`hbguest.py`；翻译记录要带
+`hostlen`，并取样本时刻之前最新的那次翻译，否则 bank 回收过的旧块会把采样算到
+别的函数头上——第一版就把 Plotter-Z 的代码错算成 filesys/OpenADll，用
+`-DDBT_WATCH_GPC` 在 `LoadOneLibraryW` 入口放 trapa 一看，Recalc 期间根本没有
+LoadLibrary）。真实分布：
+
+| 占比 | 在哪 |
+|---|---|
+| 30% | Plotter-Z 自己的 `PaintCanvas16Bpp`：每次重绘把 8 位画布经 LUT 转成 16 位 DIB |
+| 27% | 显示驱动 GPE 软件 blit 的逐像素颜色转换（画布 DIB 是 16 位 BI_RGB 即 RGB555，面板 RGB565） |
+| 28% | GWES 的 TrueType 字形缩放（`scl_ComputeScaling`、`fs_ContourScan`、`mth_max_abs`）：命令栏随整窗失效一起重绘，字形每次重新光栅化 |
+| 0.4% | coredll `pow`，真正的计算 |
+
+起因是 `DrawRecalcProgress` 每算完一列就 `InvalidateRect(NULL)` + `UpdateWindow`。
+已做：驱动给"16 位 → 16 位、带颜色转换的 SRCCOPY"加了查表快路径
+（`classpad_ddi.cpp ConvertedCopyBlt16`：64K 项的表用 GWES 给的转换器填一次，
+用四个探针值辨认转换器是否还是同一个；不处理拉伸、透明、alpha、掩码和旋转，
+那些仍走 EmulatedBlt）；`platform.reg` 把 `SYSTEM\GDI\GLYPHCACHE\Limit` 提到
+64 KiB（gwes.exe 里读的就是这个值名）。两者都要重建镜像才能量。Plotter-Z 自己
+那 30% 和整窗失效是上游的事：进度条只失效自己的矩形、DIB 用 BI_BITFIELDS 565。
+
+**帮助文件打不开。** Math Xpander 的 Help 是
+`CreateProcess(L"PegHelp.exe", L"file:math1.htm#...")`，CE 5.0 镜像里没有
+PegHelp.exe（CE 的那个是 IE 的 htmlhelp.exe），于是什么都不发生。把 CE 6.0
+工作区里只依赖 coredll 的 `SRC\APPS\PEGHELP`（hpcore.c 解析/排版帮助文件用到的
+HTML 子集，peghelp.c 用 GDI 画）搬进 `bsp/classpad50`，`platform.bib` 放进 EXT；
+`make test` 的 `test_peghelp` 在宿主上解析 Xpander 的 6 个帮助文件、217 个链接。
+同样要重建镜像。
 
 ## 九、还没做的
 

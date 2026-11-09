@@ -30,3 +30,4 @@ bsp/tests/extrom-test.bin
 bsp/classpad/FILES/xpander/*
 !bsp/classpad/FILES/xpander/README.md
 !bsp/classpad/FILES/xpander/mathxpander.lnk
+bsp/tests/test_peghelp

@@ -40,6 +40,10 @@ FILES
 ; @CESYSGEN IF CE_MODULES_COMMDLG
 MODULES
     PlotterZ.exe        $(_FLATRELEASEDIR)\PlotterZ.exe        EXT  S
+; PegHelp.exe for the Help of Pocket PC programs (Math Xpander's Help button
+; runs PegHelp.exe file:math1.htm#...): a viewer for the simple HTML of help
+; files that needs only coredll (SRC\APPS\PEGHELP), instead of IE's htmlhelp.exe
+    peghelp.exe         $(_FLATRELEASEDIR)\peghelp.exe         EXT  S
 FILES
     plotterz.lnk        $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\plotterz.lnk     EXT  S
 ; @CESYSGEN ENDIF CE_MODULES_COMMDLG

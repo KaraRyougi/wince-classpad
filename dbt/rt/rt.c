@@ -2334,7 +2334,8 @@ static dbt_block *translate_at(sf_u32 gpc)
     /* -DDBT_TRACE_BLOCKS (EXTRA_CFLAGS) prints every block translated: the
      * cheapest way to follow a guest that dies without a word */
     dbt_puts("[dbt] translate gpc="); dbt_puthex(gpc); dbt_puts(" host="); dbt_puthex(host);
-    dbt_puts(" len="); dbt_puthex((sf_u32)b->guest_len); dbt_puts(" end="); dbt_puthex((sf_u32)b->end_reason); dbt_puts("\n");
+    dbt_puts(" len="); dbt_puthex((sf_u32)b->guest_len); dbt_puts(" hostlen="); dbt_puthex((sf_u32)b->host_len);
+    dbt_puts(" end="); dbt_puthex((sf_u32)b->end_reason); dbt_puts("\n");
 #endif
     dbt_stat.translations++;
     dbt_stat.blocks = g_allocated;

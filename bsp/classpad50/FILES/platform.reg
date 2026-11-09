@@ -13,6 +13,16 @@
 [HKEY_LOCAL_MACHINE\System\GDI\Drivers]
     "Display"="classpad_ddi.dll"
 
+;  GWES's glyph cache (the registry value is "Limit", read by gwes.exe at start).
+; A recalculation in Plotter-Z repaints its whole window after every column,
+; command bar included, and GWES was rasterising the menu text's glyphs through
+; the TrueType scaler each time (28% of the recalculation's samples under the
+; translator, 2026-11-09): the cache was too small for the menu bar, the
+; taskbar clock and the program's own text together. 64 KiB instead of the
+; default. Not yet measured on an image built with it.
+[HKEY_LOCAL_MACHINE\SYSTEM\GDI\GLYPHCACHE]
+    "Limit"=dword:10000
+
 [HKEY_LOCAL_MACHINE\Drivers\Display\ClassPad]
 ;   "Blit"=dword:1    ; the push: 1 = HC_LCD_PUSH by the translator (default), 2 = HC_LCD_BLIT with our window commands, 0 = translated stores
 ;   "Console"=dword:1 ; debug: leave the top 96 rows to the translator's panel console (rt/lcdcon.c), never push them

@@ -72,6 +72,8 @@ class ClasspadGPE : public GPE
     ULONG               m_framePa;          // its physical address
     int                 m_blit;             // registry "Blit": 1 = HC_LCD_PUSH (default), 2 = HC_LCD_BLIT with our window commands, 0 = translated stores
     int                 m_consoleRows;      // top rows left to the translator's console (registry "Console"), else 0
+    USHORT             *m_cvt16;            // 16 -> 16 bpp colour conversion table for ConvertedCopyBlt16 (65536 entries)
+    ULONG               m_cvtProbe[4];      // what the table's converter made of CVT_PROBE: identifies it
 
 public:
     ClasspadGPE();
@@ -95,6 +97,7 @@ public:
     void            PanelInit();
     SCODE           WrappedLine(GPELineParms *pParms);
     SCODE           WrappedBlt(GPEBltParms *pParms);
+    SCODE           ConvertedCopyBlt16(GPEBltParms *pParms);
     void            Dirty(int top, int bottom);
     void            PushRows(int top, int bottom);
     static DWORD WINAPI PushThread(LPVOID pThis);
@@ -139,6 +142,8 @@ ClasspadGPE::ClasspadGPE()
     m_brightness = LCD_BRIGHTNESS_DEFAULT;
 
     m_iRotate = DMDO_0;
+    m_cvt16 = NULL;
+    m_cvtProbe[0] = m_cvtProbe[1] = m_cvtProbe[2] = m_cvtProbe[3] = 0;
     m_mode.modeId    = 0;
     m_mode.width     = width;
     m_mode.height    = height;
@@ -305,9 +310,81 @@ SCODE ClasspadGPE::WrappedLine(GPELineParms *pParms)
     return sc;
 }
 
+// GWES hands a colour converter (an XLATEOBJ) to a blit whose source and
+// destination pixel formats differ. GPE's EmulatedBlt then converts pixel by
+// pixel through a virtual call inside its generic rop/mask/clip machinery:
+// Plotter-Z's back buffer is a 16 bpp BI_RGB DIB (RGB555) blitted onto the
+// RGB565 primary after every column of a recalculation, and that path was
+// 40% of the recalculation's time under the translator (2026-11-09). A plain
+// copy with a converter (SRCCOPY, no mask, no stretch, no alpha, same size,
+// 16 bpp both sides) goes through a 65536-entry table instead. The table is
+// filled from the converter itself (one virtual call per entry, once) and
+// identified by what the converter makes of four probe values, since GWES
+// may hand out a new converter object for the same translation.
+static const ULONG CVT_PROBE[4] = { 0x7FFF, 0x001F, 0x03E0, 0x7C00 };
+
 SCODE ClasspadGPE::BltPrepare(GPEBltParms *pParms)
 {
     pParms->pBlt = (SCODE (GPE::*)(GPEBltParms *))&ClasspadGPE::WrappedBlt;
+    if (pParms->rop4 == 0xCCCC && pParms->pSrc && pParms->pDst && !pParms->pMask &&
+        pParms->pConvert && pParms->pColorConverter && !pParms->pLookup &&
+        !(pParms->bltFlags & (BLT_STRETCH | BLT_TRANSPARENT | BLT_ALPHABLEND)) &&
+        pParms->pSrc->Format() == gpe16Bpp && pParms->pDst->Format() == gpe16Bpp &&
+        pParms->prclSrc && pParms->prclDst &&
+        pParms->prclSrc->right - pParms->prclSrc->left == pParms->prclDst->right - pParms->prclDst->left &&
+        pParms->prclSrc->bottom - pParms->prclSrc->top == pParms->prclDst->bottom - pParms->prclDst->top &&
+        !pParms->pSrc->IsRotate() && !pParms->pDst->IsRotate())
+        pParms->pBlt = (SCODE (GPE::*)(GPEBltParms *))&ClasspadGPE::ConvertedCopyBlt16;
+    return S_OK;
+}
+
+SCODE ClasspadGPE::ConvertedCopyBlt16(GPEBltParms *pParms)
+{
+    ColorConverter *cvt = pParms->pColorConverter;
+    unsigned long (ColorConverter::*convert)(unsigned long) = pParms->pConvert;
+    ULONG probe[4];
+    RECTL dst = *pParms->prclDst;
+    int sx = pParms->prclSrc->left, sy = pParms->prclSrc->top, x, y, w, h;
+    int i;
+    for (i = 0; i < 4; i++) probe[i] = (cvt->*convert)(CVT_PROBE[i]);
+    if (!m_cvt16) {
+        m_cvt16 = (USHORT *)LocalAlloc(LMEM_FIXED, 65536 * sizeof(USHORT));
+        if (!m_cvt16) return EmulatedBlt(pParms);
+        m_cvtProbe[0] = ~probe[0];                       // force the fill below
+    }
+    if (probe[0] != m_cvtProbe[0] || probe[1] != m_cvtProbe[1] || probe[2] != m_cvtProbe[2] || probe[3] != m_cvtProbe[3]) {
+        for (i = 0; i < 65536; i++) m_cvt16[i] = (USHORT)(cvt->*convert)((unsigned long)i);
+        for (i = 0; i < 4; i++) m_cvtProbe[i] = probe[i];
+    }
+    if (pParms->prclClip) {
+        RECTL *c = pParms->prclClip;
+        if (c->left > dst.left)     { sx += c->left - dst.left; dst.left = c->left; }
+        if (c->top > dst.top)       { sy += c->top - dst.top;   dst.top = c->top; }
+        if (c->right < dst.right)   dst.right = c->right;
+        if (c->bottom < dst.bottom) dst.bottom = c->bottom;
+    }
+    // stay inside both surfaces (GWES clips, but a table lookup must not read or write past a buffer)
+    if (dst.left < 0)   { sx -= dst.left; dst.left = 0; }
+    if (dst.top < 0)    { sy -= dst.top;  dst.top = 0; }
+    if (sx < 0)         { dst.left -= sx; sx = 0; }
+    if (sy < 0)         { dst.top -= sy;  sy = 0; }
+    if (dst.right > pParms->pDst->Width())   dst.right = pParms->pDst->Width();
+    if (dst.bottom > pParms->pDst->Height()) dst.bottom = pParms->pDst->Height();
+    w = dst.right - dst.left; h = dst.bottom - dst.top;
+    if (sx + w > pParms->pSrc->Width())  w = pParms->pSrc->Width() - sx;
+    if (sy + h > pParms->pSrc->Height()) h = pParms->pSrc->Height() - sy;
+    if (w > 0 && h > 0) {
+        const USHORT *tab = m_cvt16;
+        int sstride = pParms->pSrc->Stride(), dstride = pParms->pDst->Stride();
+        const BYTE *src = (const BYTE *)pParms->pSrc->Buffer() + sy * sstride + sx * 2;
+        BYTE *dp = (BYTE *)pParms->pDst->Buffer() + dst.top * dstride + dst.left * 2;
+        for (y = 0; y < h; y++, src += sstride, dp += dstride) {
+            const USHORT *s = (const USHORT *)src;
+            USHORT *d = (USHORT *)dp;
+            for (x = 0; x < w; x++) d[x] = tab[s[x]];
+        }
+        if (pParms->pDst == m_pPrimarySurface) Dirty(dst.top, dst.top + h);
+    }
     return S_OK;
 }
 

@@ -3,4 +3,5 @@ DIRS=\
     ROTATEKEY \
     SH3CRT \
     doclist \
-    PLOTTERZ
+    PLOTTERZ \
+    PEGHELP

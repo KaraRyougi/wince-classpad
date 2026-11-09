@@ -1443,6 +1443,12 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
     t.known_mask = 0;
 #endif
     emit_init(&t.em, buf, cap);
+#ifdef DBT_WATCH_GPC
+    /* -DDBT_WATCH_GPC=0x...: the block starting at that guest pc begins with
+     * trapa #0xEE, so every entry reaches rt.c's HC_WATCH, which prints the
+     * guest registers and the string r4 points at (diagnostic). */
+    if (guest_pc == (sf_u32)(DBT_WATCH_GPC)) emit16(&t.em, 0xC3EE);
+#endif
     b->guest_pc = guest_pc; b->host_base = host_base; b->end_reason = END_FULL; b->ic_off = -1;
     prepass(&t, guest_pc, max);
     b->borrow = t.bx;

@@ -1,0 +1,17 @@
+!if 0
+peghelp.exe - the Pocket PC help viewer (PegHelp.exe) without Internet
+Explorer: Pocket PC programs start it with a help page on the command line
+(Math Xpander's Help). hpcore.c is the HTML tokenizer and layout, also built
+by the host tests (bsp/tests/test_peghelp.c); peghelp.c draws it with GDI.
+!endif
+!INCLUDE $(_TARGETPLATROOT)\sources.cmn
+TARGETNAME=peghelp
+TARGETTYPE=PROGRAM
+RELEASETYPE=PLATFORM
+WINCEOEM=1
+EXEENTRY=WinMainCRTStartup
+TARGETLIBS= \
+    $(_PROJECTROOT)\cesysgen\sdk\lib\$(_CPUINDPATH)\coredll.lib
+SOURCES= \
+    hpcore.c \
+    peghelp.c
