@@ -427,7 +427,7 @@ lookup/convert/BLT_TRANSPARENT 的都不接，GPE 的通用旋转路径又画错
 `RotatedMonoBlt16` 先扩成了覆盖 lookup/converter/透明色的 `RotatedLookupBlt16`，
 但这只是又补一个洞：图案画刷、屏到屏拷贝（源也旋转）、拉伸、Alpha 仍走 GPE
 的通用旋转路径，正确性未知，而且旋转表面上每个像素都经 `GetPtr` 虚函数，
-横屏比竖屏慢好几倍。于是改为**在 GPE 之下旋转**（同日，重建待验证）：
+横屏比竖屏慢好几倍。于是改为**在 GPE 之下旋转**（同日，重建后验证通过：模拟器里 Rotate 条图标 → 横屏开始菜单的图标全部正常、桌面四个图标正常、再点 Rotate 回到竖屏桌面完好，`scratchpad/rot2`）：
 
 - 帧缓冲还是那 320×528×2 字节，但转屏后把它重新布局成**不旋转的** 528×320
   线性表面（`ClasspadSurf::Relayout`：stride 改 1056，`SetRotation(w, h,
