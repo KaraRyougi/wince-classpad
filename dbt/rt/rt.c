@@ -394,8 +394,8 @@ static sf_u8 g_ic_active_seen[MAX_BLOCKS];
 /* Only hash slots that received user code since the last ASID switch. */
 #ifndef DBT_HASH_ASID_TAG
 static sf_u16 g_user_hash[HSIZE];     /* untagged entries leave the hash at an ASID switch */
-#endif
 static sf_u8 g_user_hash_seen[HSIZE];
+#endif
 static unsigned g_nuser_hash;
 static int    g_nuser, g_nic; /* g_nic counts ICs filled with user targets this ASID */
 /* Conservative membership filter for 1 KiB virtual pages containing user
@@ -637,7 +637,7 @@ static sf_u32 hash_find(sf_u32 gpc)
 
 /* Empty slots carry gpc = 1 (odd: never a pc): the asm fast path compares
  * only the gpc, so a cleared slot must not keep its old key. */
-static sf_u8 g_asid_seen[32];
+static sf_u8 g_asid_seen[32], g_asid_list[64];
 static unsigned g_nasid_seen;
 static unsigned g_pend_hash;       /* DBT_INVAL_PENDING: a dead shared owner's hash entries wait for finish_invalidations' sweep */
 static void hash_remove(const dbt_block *b)
@@ -658,12 +658,10 @@ static void hash_remove(const dbt_block *b)
          * too many ASIDs for that gets the one sweep per batch in
          * finish_invalidations (pend_dead knows the dead ranges). */
         if (g_nasid_seen <= 64) {
-            unsigned a;
+            unsigned k;
             sf_u32 lo = b->host_base, hi = lo + b->host_len;
-            for (a = 0; a < 256; ++a) {
-                hent *e;
-                if (!(g_asid_seen[a >> 3] & (1u << (a & 7)))) continue;
-                e = &g_hash[fast_hidx(b->guest_pc, a)];
+            for (k = 0; k < g_nasid_seen; ++k) {
+                hent *e = &g_hash[fast_hidx(b->guest_pc, g_asid_list[k])];
                 if (e->host >= lo && e->host < hi) { e->gpc = 1; e->host = 0; }
 #ifdef DBT_HASH_TWO_WAY
                 if (e[1].host >= lo && e[1].host < hi) { e[1].gpc = 1; e[1].host = 0; }
@@ -808,7 +806,7 @@ static void unchain(dbt_block *o, int k)
  * which the next lookup restores). Nothing outlives the batch, so bank
  * recycling and second chance need not know about it. */
 #define DBT_INVAL_PENDING 1
-#define PEND_RANGES 16
+#define PEND_RANGES 4                  /* beyond this the 32-byte map: pend_dead runs for every IC and link target in the span */
 static sf_u32 g_pend_lo[PEND_RANGES], g_pend_len[PEND_RANGES];
 static unsigned g_npend, g_pend_over, g_pend_banks;
 static sf_u32 g_pend_min, g_pend_span;
@@ -1109,14 +1107,18 @@ static void invalidate_range(sf_u32 lo, sf_u32 hi, int user_only)
  * stay but both C and assembly require the current ASID on every user hit.
  * Monomorphic ICs still clear: their generated hit paths have no ASID tag.
  * Blocks stay for return to an ASID or validated shared-physical reuse. */
-static sf_u8 g_asid_seen[32] = { 1 };   /* every ASID the guest has run under (0 from reset): the slots a shared block's hash entries can be in */
+static sf_u8 g_asid_seen[32] = { 1 }, g_asid_list[64];   /* every ASID the guest has run under (0 from reset): the slots a shared block's hash entries can be in */
 static unsigned g_nasid_seen = 1;
 static void switch_asid(sf_u32 asid)
 {
     int j;
     if (asid == g_asid) { dbt_stat.asid_unchanged++; return; }
     g_asid = asid;
-    if (!(g_asid_seen[(asid & 255u) >> 3] & (1u << (asid & 7)))) { g_asid_seen[(asid & 255u) >> 3] |= (sf_u8)(1u << (asid & 7)); ++g_nasid_seen; }
+    if (!(g_asid_seen[(asid & 255u) >> 3] & (1u << (asid & 7)))) {
+        g_asid_seen[(asid & 255u) >> 3] |= (sf_u8)(1u << (asid & 7));
+        if (g_nasid_seen < 64) g_asid_list[g_nasid_seen] = (sf_u8)asid;
+        ++g_nasid_seen;
+    }
     dbt_stat.asid_switches++;
 #ifndef DBT_HASH_ASID_TAG
     for (j = 0; j < (int)g_nuser_hash; j++) {
@@ -1195,6 +1197,116 @@ static void tlb_hook(void)
     __asm__ volatile ("ldtlb" ::: "memory");
 }
 
+#ifdef DBT_TLB_REFILL
+/* The user code pages (CE 5.0 revalidation, tlb_reval5 below). One entry per
+ * (4 KiB page, ASID) that holds a user block: the physical page it was
+ * translated from. A TLB flush then costs one page walk per code page
+ * (hundreds) instead of a pass over every user block (up to 19200; 11% of
+ * the shell's boot in a heartbeat profile), and only a page whose mapping
+ * changed has its blocks looked at, through the page chains. Slot 0 is
+ * per process (key carries the ASID), slots 1-63 are shared (0xFF). Open
+ * addressing; key 0 empty, 1 deleted; PHYS_UNKNOWN means "treat as
+ * changed". Full (3/4) or an unencodable key: g_cpage_over, and the TLB
+ * flush falls back to the per-block pass until the next full flush. Two
+ * tables so that a bank recycle can copy the live entries into the other. */
+#define CPAGE_N 2048
+static sf_u32 g_cpage_tab[2][2][CPAGE_N];  /* [table][0 keys / 1 phys] */
+static unsigned g_cpage_cur, g_ncpage, g_cpage_over;
+#define CPAGE_KEY  (g_cpage_tab[g_cpage_cur][0])
+#define CPAGE_PHYS (g_cpage_tab[g_cpage_cur][1])
+static sf_u32 cpage_key(sf_u32 va, sf_u32 asid) { return (va & ~0xFFFu) | ((va >> 25) ? 0xFFu : (asid & 0xFFu)); }
+static unsigned cpage_slot(sf_u32 key) { return ((key >> 12) * 2654435761u >> 21) & (CPAGE_N - 1); }
+static int cpage_find(sf_u32 key)
+{
+    unsigned i, n;
+    for (i = cpage_slot(key), n = 0; n < CPAGE_N; i = (i + 1) & (CPAGE_N - 1), ++n) {
+        if (CPAGE_KEY[i] == key) return (int)i;
+        if (CPAGE_KEY[i] == 0) return -1;
+    }
+    return -1;
+}
+/* weak: an existing entry keeps its physical page (a second page whose
+ * UTLB entry is gone by now must not spoil a known one) */
+static void cpage_set(sf_u32 va, sf_u32 asid, sf_u32 phys, int weak)
+{
+    sf_u32 key = cpage_key(va, asid);
+    unsigned i, n, del = CPAGE_N;
+    if (g_cpage_over) return;
+    if (key < 2) { g_cpage_over = 1; return; }
+    for (i = cpage_slot(key), n = 0; n < CPAGE_N; i = (i + 1) & (CPAGE_N - 1), ++n) {
+        if (CPAGE_KEY[i] == key) {
+            if (!weak && CPAGE_PHYS[i] != phys) CPAGE_PHYS[i] = PHYS_UNKNOWN;    /* two mappings seen: the next flush drops the page's blocks */
+            return;
+        }
+        if (CPAGE_KEY[i] == 1) { if (del == CPAGE_N) del = i; }
+        else if (CPAGE_KEY[i] == 0) break;
+    }
+    if (del != CPAGE_N) i = del;
+    else if (g_ncpage >= CPAGE_N / 4 * 3) { g_cpage_over = 1; return; }
+    else ++g_ncpage;
+    CPAGE_KEY[i] = key; CPAGE_PHYS[i] = phys;
+}
+/* the user blocks touching this page (either end), under asid8 (0xFF: any) */
+static void cpage_kill(sf_u32 page, sf_u32 asid8)
+{
+    sf_u32 sub;
+    for (sub = page; sub < page + 0x1000u; sub += 0x400u) {
+        unsigned node;
+        for (node = g_page_head[user_page_bit(sub)]; node != CHAIN_NONE; node = g_page_next[node]) {
+            unsigned i = node >> 1;
+            dbt_block *b = &g_blocks[i];
+            if (g_binfo[i].dead || !g_binfo[i].user) continue;
+            if (b->guest_pc >= page + 0x1000u || b->guest_pc + b->guest_len <= page) continue;
+            if (asid8 != 0xFFu && g_binfo[i].asid != asid8 && g_binfo[i].asid != ASID_ANY) continue;
+            invalidate_block(b);
+        }
+    }
+}
+/* a user block has been committed: its page(s) */
+static void cpage_note(unsigned index)
+{
+    const dbt_block *b = &g_blocks[index];
+    sf_u32 asid = g_binfo[index].asid, p1 = g_binfo[index].phys;
+    sf_u32 lo = b->guest_pc & ~0xFFFu, hi = (b->guest_pc + b->guest_len - 1) & ~0xFFFu;
+    cpage_set(lo, asid, p1 == PHYS_UNKNOWN ? PHYS_UNKNOWN : p1 & ~0xFFFu, 0);
+    if (hi != lo) {
+        sf_u32 p2 = utlb_translate(hi, asid == ASID_ANY ? g_asid : asid);
+        cpage_set(hi, asid, p2 == PHYS_UNKNOWN ? PHYS_UNKNOWN : p2 & ~0xFFFu, p2 == PHYS_UNKNOWN);
+    }
+}
+static void cpage_reset(void)
+{
+    memset(g_cpage_tab[g_cpage_cur][0], 0, sizeof g_cpage_tab[0][0]);
+    g_ncpage = 0; g_cpage_over = 0;
+}
+/* after a bank recycle: keep the entries of the live user blocks only */
+static void cpage_gc(void)
+{
+    unsigned from = g_cpage_cur, i, j;
+    if (g_cpage_over) return;
+    g_cpage_cur ^= 1;
+    cpage_reset();
+    for (j = 0; j < (unsigned)g_nuser; ++j) {
+        unsigned index = g_user_idx[j];
+        const dbt_block *b = &g_blocks[index];
+        sf_u32 lo = b->guest_pc & ~0xFFFu, hi = (b->guest_pc + b->guest_len - 1) & ~0xFFFu, pg;
+        if (g_binfo[index].dead) continue;
+        for (pg = lo; ; pg = hi) {
+            sf_u32 key = cpage_key(pg, g_binfo[index].asid), phys = PHYS_UNKNOWN;
+            g_cpage_cur = from;
+            i = (unsigned)cpage_find(key);
+            if (i < CPAGE_N) phys = g_cpage_tab[from][1][i];
+            g_cpage_cur = from ^ 1;
+            cpage_set(pg, g_binfo[index].asid, phys, 1);
+            if (pg == hi) break;
+        }
+        /* a block shared across ASIDs in slot 0 was also entered under the
+         * other process (find_block_by_gpc); that entry is lost here and the
+         * block is dropped at the next flush, as before the table existed */
+    }
+}
+#endif
+
 /* A live block for gpc usable in the current address space. */
 static dbt_block *find_block_by_gpc(sf_u32 gpc)
 {
@@ -1212,6 +1324,9 @@ static dbt_block *find_block_by_gpc(sf_u32 gpc)
              * reuse to one minimum-size page; the first physical address
              * alone does not validate a second page in the new process. */
             g_binfo[i].asid = ASID_ANY;
+#ifdef DBT_TLB_REFILL
+            if (gpc < 0x02000000u) cpage_set(gpc & ~0xFFFu, g_asid, phys & ~0xFFFu, 0);   /* slot 0: this process's mapping too */
+#endif
             touch_code(b->host_base); ref_mark((unsigned)i); return b;
         }
     }
@@ -1347,10 +1462,15 @@ static void cache_flush_all(void)
     memset(g_bank_touch, 0, sizeof g_bank_touch); g_access_clock = 0;
     for (i = 0; i < MAX_BLOCKS; ++i) g_binfo[i].dead = 1;
     g_nuser = 0; g_nic = 0; g_nuser_hash = 0;
+#ifndef DBT_HASH_ASID_TAG
     memset(g_user_hash_seen, 0, sizeof g_user_hash_seen);
+#endif
     memset(g_ic_active_seen, 0, sizeof g_ic_active_seen);
     memset(g_user_pages, 0, sizeof g_user_pages);
     memset(g_page_head, 0xFF, sizeof g_page_head);
+#ifdef DBT_TLB_REFILL
+    cpage_reset();
+#endif
     g_cache_used = 0;
     g_arena_used = 0;
 #if defined(DBT_LAZY_META) || defined(DBT_SECOND_CHANCE)
@@ -1770,7 +1890,9 @@ static void cache_next_bank(void)
         kept = keep_survivors(bank, count, &kept_code, &kept_arena, live);
 #endif
         g_nuser = 0; g_nuser_hash = 0;
+#ifndef DBT_HASH_ASID_TAG
         memset(g_user_hash_seen, 0, sizeof g_user_hash_seen);
+#endif
 #ifdef DBT_PRUNE_INDEX_REUSE
         /* User-page bits are conservative: stale bits only cause extra
          * TLB checks, never a missed invalidation. */
@@ -1818,6 +1940,9 @@ static void cache_next_bank(void)
 #if defined(DBT_PRUNE_INDEX_REUSE) && defined(DBT_VERIFY_PRUNED_INDEX)
         verify_pruned_index(g_chain_head, HSIZE, g_chain_next, 0);
         verify_pruned_index(g_page_head, 8192, g_page_next, 1);
+#endif
+#ifdef DBT_TLB_REFILL
+        cpage_gc();
 #endif
         g_allocated -= count - kept;
         g_bank_evictions++;
@@ -2137,6 +2262,9 @@ static dbt_block *translate_at(sf_u32 gpc)
             index_user_block(index);
 #endif
             if (g_nuser < MAX_BLOCKS) g_user_idx[g_nuser++] = (sf_u16)index;
+#ifdef DBT_TLB_REFILL
+            cpage_note(index);
+#endif
         }
 
     }
@@ -2738,7 +2866,7 @@ static void print_stats(void)
     dbt_puts(" survivor_bytes="); dbt_puthex(g_survivor_bytes);
 #endif
 #ifdef DBT_TLB_REFILL
-    dbt_puts(" tlb_refills="); dbt_puthex(dbt_stat.tlb_refills); dbt_puts(" tlb_revals="); dbt_puthex(dbt_stat.tlb_revals); dbt_puts("/"); dbt_puthex(dbt_stat.tlb_reval_skips);
+    dbt_puts(" tlb_refills="); dbt_puthex(dbt_stat.tlb_refills); dbt_puts(" tlb_revals="); dbt_puthex(dbt_stat.tlb_revals); dbt_puts("/"); dbt_puthex(dbt_stat.tlb_reval_skips); dbt_puts(" cpages="); dbt_puthex(g_ncpage); dbt_puts(g_cpage_over ? "!" : "");
 #endif
 #ifdef DBT_FAST_RTE
     dbt_puts(" fast_rte="); dbt_puthex(dbt_fast_rte_calls);
@@ -3739,30 +3867,46 @@ static sf_u32 walk5_phys(sf_u32 va, sf_u32 asid, sf_u32 *mask_out)
 }
 static int tlb_reval5(void)
 {
-    /* one walk per (page, ASID) per call: blocks share pages */
-    static sf_u32 memo_key[256], memo_phys[256], memo_mask[256], memo_gen[256], gen;
+    unsigned i;
     int j;
     if (g_tlbr_ok != 5) return 0;
 #ifdef DBT_BATCH_RANGES
     g_range_batch = 1;
 #endif
     INVAL_CALL(3);
-    ++gen;
-    for (j = 0; j < g_nuser; ++j) {
-        unsigned i = g_user_idx[j], h;
-        dbt_block *b = &g_blocks[i];
-        sf_u32 p, mask = 0, key;
-        if (g_binfo[i].dead || g_binfo[i].phys == PHYS_UNKNOWN) { if (!g_binfo[i].dead) invalidate_block(b); continue; }
-        key = (b->guest_pc & ~0xFFFu) | (g_binfo[i].asid & 0xFFu);     /* 4 KiB pages; a larger page memoises per 4 KiB */
-        h = ((key >> 12) ^ (key >> 20) ^ key) & 255u;
-        if (memo_gen[h] == gen && memo_key[h] == key) { p = memo_phys[h]; mask = memo_mask[h]; }
-        else {
-            p = walk5_phys(b->guest_pc, g_binfo[i].asid, &mask);
-            if (p != PHYS_UNKNOWN) p &= mask;
-            memo_gen[h] = gen; memo_key[h] = key; memo_phys[h] = p; memo_mask[h] = mask;
+    if (!g_cpage_over) {
+        /* one walk per code page; only a changed page's blocks are visited */
+        for (i = 0; i < CPAGE_N; ++i) {
+            sf_u32 key = CPAGE_KEY[i], page, asid8, p, mask;
+            if (key < 2) continue;
+            page = key & ~0xFFFu; asid8 = key & 0xFFu;
+            p = walk5_phys(page, asid8, &mask);
+            if (p != PHYS_UNKNOWN) p &= ~0xFFFu;
+            if (p == CPAGE_PHYS[i]) continue;
+            cpage_kill(page, asid8);
+            if (p == PHYS_UNKNOWN) CPAGE_KEY[i] = 1; else CPAGE_PHYS[i] = p;
         }
-        if (p == PHYS_UNKNOWN || p != (g_binfo[i].phys & mask) ||
-            (b->guest_pc & mask) != ((b->guest_pc + b->guest_len - 1) & mask)) invalidate_block(b);
+    } else {
+        /* the table overflowed: every user block, one walk per (page, ASID) */
+        static sf_u32 memo_key[256], memo_phys[256], memo_mask[256], memo_gen[256], gen;
+        ++gen;
+        for (j = 0; j < g_nuser; ++j) {
+            unsigned h;
+            dbt_block *b;
+            sf_u32 p, mask = 0, key;
+            i = g_user_idx[j]; b = &g_blocks[i];
+            if (g_binfo[i].dead || g_binfo[i].phys == PHYS_UNKNOWN) { if (!g_binfo[i].dead) invalidate_block(b); continue; }
+            key = (b->guest_pc & ~0xFFFu) | (g_binfo[i].asid & 0xFFu);
+            h = ((key >> 12) ^ (key >> 20) ^ key) & 255u;
+            if (memo_gen[h] == gen && memo_key[h] == key) { p = memo_phys[h]; mask = memo_mask[h]; }
+            else {
+                p = walk5_phys(b->guest_pc, g_binfo[i].asid, &mask);
+                if (p != PHYS_UNKNOWN) p &= mask;
+                memo_gen[h] = gen; memo_key[h] = key; memo_phys[h] = p; memo_mask[h] = mask;
+            }
+            if (p == PHYS_UNKNOWN || p != (g_binfo[i].phys & mask) ||
+                (b->guest_pc & mask) != ((b->guest_pc + b->guest_len - 1) & mask)) invalidate_block(b);
+        }
     }
     INVAL_END(3);
     finish_invalidations();

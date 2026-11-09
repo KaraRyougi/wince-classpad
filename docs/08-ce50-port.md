@@ -251,7 +251,34 @@ OAL 对一次 InvalidateRange 先写 TI 再发 F9，两次之间除了 trapa 本
 在前 43 s 里翻译器 C 代码仍占 68%：`dbt_translate_block` 9%、
 `user_mappings_changed`（页表核对）7%、`invalidate_block` 7%、
 `finish_invalidations` 6%、`tlb_drops_block`（ldtlb 钩子）5%、`sh4_decode` 5%；
-翻译后的 guest 代码占 23%，片上 stub 8%。下一步看 ldtlb 钩子和翻译本身。
+翻译后的 guest 代码占 23%，片上 stub 8%。
+
+**按页而不是按块核对（`rt.c` cpage_*，2026-11-09）。** 更细的采样
+（`HLE_HB=2`）里页表核对在 shell 阶段（16–50 s）占 11%：每次都要走完
+`g_user_idx`（含死块，最多 19200 项）。现在翻译器维护一张"用户态代码页"表：
+每个有用户态块的 (4 KiB 页, ASID) 一项（slot 0 按 ASID 分，slot 1–63 共享），
+记翻译时的物理页；块提交时登记（跨页的块登记两页，第二页从 UTLB 读），
+slot 0 的块被另一个进程复用时也在该进程的 ASID 下登记。TLB 刷新时每页走一次
+页表（几百次），物理页没变就什么都不做，变了才沿页链表杀这一页的块。
+表 2048 项、开放寻址、满四分之三或遇到无法编码的键就退回逐块核对；bank
+回收后按存活块把表重建到另一份缓冲里。表占的 32 KiB 来自 ASID 标签构建里
+用不到的 `g_user_hash_seen`。
+
+同一轮里：ASID_ANY 块的哈希清理改成按"guest 用过的 ASID 列表"探测
+（原来是扫 256 位的位图），`PEND_RANGES` 从 16 降到 4（超过就用 32 字节粒度
+的位图，`pend_dead` 对每个 IC/链接目标都要跑）。
+
+| | run16 | run18 |
+|---|---|---|
+| first idle | 15.1 s | 13.6 s |
+| 桌面首帧 | 35.0 s | 30.1 s |
+| Explorer 任务栏 | 43.0 s | 38.2 s |
+
+shell 阶段的翻译器剩余热点：`finish_invalidations` 13%（每批失效两遍扫全部
+块头，批 = 每次 ldtlb 换页杀块 + 每次 TLB 刷新杀块，约 550 批/128 s）、
+`lookup_or_translate` 8%（其中 `hash_evicted` 4 万次：直接映射哈希里按
+(pc, ASID) 的条目互相挤出，退到 C 的块表查找）、`dbt_translate_block` 7%
+（bank 回收 27 次/128 s 引起的重翻）、ldtlb 钩子 4%。
 
 ## 九、还没做的
 
@@ -259,9 +286,11 @@ OAL 对一次 InvalidateRange 先写 TI 再发 F9，两次之间除了 trapa 本
 - `tools/windows/claude-build` 的 CE 5.0 版本（现在是 C:\WINCE600 的路径和
   kern.dll 重链接逻辑）。
 - 真机：R-standby、面板初始化黑屏问题与 CE 版本无关，仍待验证。
-- 翻译器：ldtlb 钩子（`tlb_drops_block`，每次 ldtlb 扫该页的块链）、
-  `finish_invalidations` 每批两遍全表、翻译本身（`dbt_translate_block`、
-  `sh4_decode`）还各占 5–9%；翻译器与 CE 共享 RAM 的划分未重新评估。
+- 翻译器：`finish_invalidations` 每批两遍全表（可选：死块入口打
+  trap、链接到 bank 回收时再摘，或把 IC 目标的 bank 也记进 `g_link_banks`，
+  后者要改 stubs.S 里的 IC 回填）；哈希冲突（`hash_evicted` 4 万次/128 s，
+  两路组相联 `DBT_HASH_TWO_WAY` 目前与 ASID 混合互斥，合并要改 `_dbt_lki_ts`）；
+  bank 回收引起的重翻（翻译器与 CE 共享 RAM 的划分未重新评估）。
 - 内核侧可选：`INC\kernel.h` 的 `InvalidateRange` 对 SH 传真实范围
   （一行改动，需在 VM 里重建 nk.lib），翻译器的 F9 有范围路径就能直接用，
   不必走页表核对；现在不改内核也已经不是瓶颈。
