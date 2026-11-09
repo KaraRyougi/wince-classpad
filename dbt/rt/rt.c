@@ -637,6 +637,9 @@ static sf_u32 hash_find(sf_u32 gpc)
 
 /* Empty slots carry gpc = 1 (odd: never a pc): the asm fast path compares
  * only the gpc, so a cleared slot must not keep its old key. */
+static sf_u8 g_asid_seen[32];
+static unsigned g_nasid_seen;
+static unsigned g_pend_hash;       /* DBT_INVAL_PENDING: a dead shared owner's hash entries wait for finish_invalidations' sweep */
 static void hash_remove(const dbt_block *b)
 {
 #ifdef DBT_HASH_ASID_MIX
@@ -644,6 +647,33 @@ static void hash_remove(const dbt_block *b)
      * original ASID no longer enumerates the possible direct-hash slots. */
     if (g_binfo[b - g_blocks].user && g_binfo[b - g_blocks].asid == ASID_ANY) {
         unsigned i;
+#ifdef DBT_INVAL_PENDING
+        /* CE 5.0 keeps every DLL's code in slot 1, shared by all processes,
+         * so most user blocks are ASID_ANY, and a range flush used to walk
+         * the 32768-entry hash for each of them (24 % of the boot in a
+         * heartbeat profile, 2026-11-09). Every entry was inserted under the
+         * ASID current at the time (hash_insert), so its slot is
+         * fast_hidx(pc, a) for an ASID a the guest has run under: probe
+         * those (CE 5.0 runs a dozen processes). Only a guest that has used
+         * too many ASIDs for that gets the one sweep per batch in
+         * finish_invalidations (pend_dead knows the dead ranges). */
+        if (g_nasid_seen <= 64) {
+            unsigned a;
+            sf_u32 lo = b->host_base, hi = lo + b->host_len;
+            for (a = 0; a < 256; ++a) {
+                hent *e;
+                if (!(g_asid_seen[a >> 3] & (1u << (a & 7)))) continue;
+                e = &g_hash[fast_hidx(b->guest_pc, a)];
+                if (e->host >= lo && e->host < hi) { e->gpc = 1; e->host = 0; }
+#ifdef DBT_HASH_TWO_WAY
+                if (e[1].host >= lo && e[1].host < hi) { e[1].gpc = 1; e[1].host = 0; }
+#endif
+            }
+            return;
+        }
+        g_pend_hash = 1;
+        return;
+#endif
         for (i = 0; i < HSIZE; ++i) {
             hent *a = &g_hash[i];
             if (a->host >= b->host_base && a->host < b->host_base + b->host_len) {
@@ -876,9 +906,10 @@ static void verify_sources(unsigned banks)
 /* Make block b unreachable: hash entry, inline caches and chained jumps that
  * lead into it. Its cache memory stays dead until the next full flush. */
 #ifdef DBT_INVAL_DIAG
-/* -DDBT_INVAL_DIAG: calls and blocks killed per origin (0 range, 1 all but ROM, 2 TLB) */
+/* -DDBT_INVAL_DIAG: calls and blocks killed per origin (0 range, 1 all but ROM, 2 TLB, 3 revalidated user blocks) */
 static unsigned g_inval_origin;
-static sf_u32 g_inval_calls[3], g_inval_kills[3], g_inval_multi[3];
+static sf_u32 g_inval_calls[4], g_inval_kills[4], g_inval_multi[4];
+static sf_u32 g_abr_kills[6];           /* all-but-ROM kills: phys unknown, RAM, other; pc slot 0, slots 1+, kernel */
 #define INVAL_CALL(o) do { g_inval_origin = (o); ++g_inval_calls[o]; g_inval_before = g_inval_kills[o]; } while (0)
 #define INVAL_END(o) do { if (g_inval_kills[o] - g_inval_before > 1) ++g_inval_multi[o]; } while (0)
 static sf_u32 g_inval_before;
@@ -971,6 +1002,14 @@ static void finish_invalidations(void)
             sf_u32 v = *(volatile sf_u32 *)(o->host_base + (sf_u32)o->links[k].lit_off);
             if (v - min < span && pend_dead(v)) unchain(o, k);
         }
+    }
+    if (g_pend_hash) {
+        /* hash entries of the shared owners that died in this batch (hash_remove) */
+        for (i = 0; i < HSIZE; ++i) {
+            hent *e = &g_hash[i];
+            if (e->host - min < span && pend_dead(e->host)) { e->gpc = 1; e->host = 0; }
+        }
+        g_pend_hash = 0;
     }
     if (g_pend_over) {
         sf_u32 a = (g_pend_min - g_cfg.cache_base) >> 8, b = (g_pend_min + g_pend_span - g_cfg.cache_base + 255u) >> 8;
@@ -1070,11 +1109,14 @@ static void invalidate_range(sf_u32 lo, sf_u32 hi, int user_only)
  * stay but both C and assembly require the current ASID on every user hit.
  * Monomorphic ICs still clear: their generated hit paths have no ASID tag.
  * Blocks stay for return to an ASID or validated shared-physical reuse. */
+static sf_u8 g_asid_seen[32] = { 1 };   /* every ASID the guest has run under (0 from reset): the slots a shared block's hash entries can be in */
+static unsigned g_nasid_seen = 1;
 static void switch_asid(sf_u32 asid)
 {
     int j;
     if (asid == g_asid) { dbt_stat.asid_unchanged++; return; }
     g_asid = asid;
+    if (!(g_asid_seen[(asid & 255u) >> 3] & (1u << (asid & 7)))) { g_asid_seen[(asid & 255u) >> 3] |= (sf_u8)(1u << (asid & 7)); ++g_nasid_seen; }
     dbt_stat.asid_switches++;
 #ifndef DBT_HASH_ASID_TAG
     for (j = 0; j < (int)g_nuser_hash; j++) {
@@ -2325,6 +2367,29 @@ void dbt_invalidate(sf_u32 lo, sf_u32 hi)
     invalidate_range(lo, hi, 0);
 }
 
+#ifdef DBT_TLB_REFILL
+static int tlb_reval5(void);           /* below, with tlb_refill5 */
+#endif
+/* "Every user mapping may have changed": MMUCR.TI written by the guest, a
+ * range-less HC_TLB_INVAL, a wake from R-standby. CE 5.0's page tables say
+ * what did change (tlb_reval5 below, when its refill handler is recognised);
+ * otherwise every user block goes. */
+#ifdef DBT_TLB_REFILL
+static sf_u32 g_umc_mark;          /* the event count after the last revalidation: a repeat with nothing in between is skipped */
+#define UMC_EVENTS() (dbt_stat.exceptions + dbt_stat.translations + dbt_stat.tlb_hooks + dbt_stat.invalidations)
+#endif
+static void user_mappings_changed(int in_exception)
+{
+#ifdef DBT_TLB_REFILL
+    /* The OAL writes TI and then traps HC_TLB_INVAL for the same change:
+     * the trap is the only event between the two (in_exception: it has
+     * been counted), so the second walk would find what the first did. */
+    if (UMC_EVENTS() - (sf_u32)in_exception == g_umc_mark) { dbt_stat.tlb_reval_skips++; return; }
+    if (tlb_reval5()) { g_umc_mark = UMC_EVENTS(); return; }
+#endif
+    invalidate_range(0, 0x80000000u, 1);
+}
+
 /* HC_FLUSH with no range: the kernel synchronised the whole instruction
  * cache (InitModule, CreateNewProcHelper) without saying what it wrote.
  * Blocks whose code lies in the ROM image (XIP: executed in place from the
@@ -2346,6 +2411,11 @@ static void invalidate_all_but_rom(void)
         pa = (b->guest_pc >= 0x80000000u && b->guest_pc < 0xC0000000u) ? (b->guest_pc & 0x1FFFFFFFu) : g_binfo[i].phys;
         if (pa != PHYS_UNKNOWN && ((g_cfg.rom_hi && pa >= g_cfg.rom_lo && pa + b->guest_len <= g_cfg.rom_hi) ||
                                    (g_cfg.rom2_hi && pa >= g_cfg.rom2_lo && pa + b->guest_len <= g_cfg.rom2_hi))) { kept++; continue; }
+#ifdef DBT_INVAL_DIAG
+        /* what the whole-cache flush drops: physical unknown / RAM / elsewhere, and by the pc's region */
+        ++g_abr_kills[pa == PHYS_UNKNOWN ? 0 : (pa >= 0x0C000000u && pa < 0x0E000000u) ? 1 : 2];
+        ++g_abr_kills[3 + (b->guest_pc >= 0x80000000u ? 2 : b->guest_pc >= 0x02000000u ? 1 : 0)];
+#endif
         invalidate_block(b);
     }
     INVAL_END(1);
@@ -2668,7 +2738,7 @@ static void print_stats(void)
     dbt_puts(" survivor_bytes="); dbt_puthex(g_survivor_bytes);
 #endif
 #ifdef DBT_TLB_REFILL
-    dbt_puts(" tlb_refills="); dbt_puthex(dbt_stat.tlb_refills);
+    dbt_puts(" tlb_refills="); dbt_puthex(dbt_stat.tlb_refills); dbt_puts(" tlb_revals="); dbt_puthex(dbt_stat.tlb_revals); dbt_puts("/"); dbt_puthex(dbt_stat.tlb_reval_skips);
 #endif
 #ifdef DBT_FAST_RTE
     dbt_puts(" fast_rte="); dbt_puthex(dbt_fast_rte_calls);
@@ -2684,11 +2754,12 @@ static void print_stats(void)
     {
         int o;
         dbt_puts("\n[dbt] inval calls/kills/multi:");
-        for (o = 0; o < 3; ++o) {
+        for (o = 0; o < 4; ++o) {
             dbt_puts(" "); dbt_puthex(g_inval_calls[o]); dbt_puts("/"); dbt_puthex(g_inval_kills[o]);
             dbt_puts("/"); dbt_puthex(g_inval_multi[o]);
         }
         dbt_puts(" utlb="); dbt_puthex(g_utlb_calls);
+        dbt_puts(" abr_kills:"); for (o = 0; o < 6; ++o) { dbt_puts(" "); dbt_puthex(g_abr_kills[o]); }
     }
 #endif
     dbt_puts("\n");
@@ -2828,7 +2899,7 @@ static sf_u32 dbt_standby(void)
     *(volatile sf_u32 *)0xA4150020u = block[(0x40 + 0x14) / 4];     /* STBCR */
     if (r) {
         g_standby_wakes++;
-        invalidate_range(0, 0x80000000u, 1);    /* the UTLB is empty: user mappings are gone */
+        user_mappings_changed(0);               /* the UTLB is empty; the page tables survived */
     }
     dbt_puts(r ? "[dbt] R-standby wake\n" : "[dbt] R-standby not entered\n");
 #ifdef DBT_STANDBY_DIAG
@@ -2856,13 +2927,24 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
     case HC_FLUSH:                                          /* r4 = address, r5 = length (0,0: everything) */
         dbt_stat.hc_flush++;
         if (ctx->r[5] == 0) { dbt_stat.hc_flush_all++; invalidate_all_but_rom(); }
-        else dbt_invalidate(ctx->r[4], ctx->r[4] + ctx->r[5]);
+        else {
+#ifdef DBT_INVAL_DIAG
+            sf_u32 before = g_inval_kills[0];
+#endif
+            dbt_invalidate(ctx->r[4], ctx->r[4] + ctx->r[5]);
+#ifdef DBT_INVAL_DIAG
+            if (g_inval_kills[0] - before > 8) {
+                dbt_puts("[f2] "); dbt_puthex(ctx->r[4]); dbt_puts(" +"); dbt_puthex(ctx->r[5]);
+                dbt_puts(" kills "); dbt_puthex(g_inval_kills[0] - before); dbt_puts(" pr "); dbt_puthex(ctx->pr); dbt_puts("\n");
+            }
+#endif
+        }
         return RT_ACT_RESUME;
     case HC_STATS: print_stats(); return RT_ACT_RESUME;
     case HC_STANDBY: ctx->r[0] = dbt_standby(); return RT_ACT_RESUME;
     case HC_BENCH: ctx->r[0] = dbt_bench_native(ctx->r[4], ctx->r[5]); return RT_ACT_RESUME;
     case HC_TLB_INVAL:
-        if (ctx->r[5] == 0) invalidate_range(0, 0x80000000u, 1);
+        if (ctx->r[5] == 0) user_mappings_changed(1);
         else invalidate_range(ctx->r[4], ctx->r[4] + ctx->r[5], 1);
         return RT_ACT_RESUME;
     case HC_ASID: switch_asid(ctx->r[4] & 0xFF); return RT_ACT_RESUME;
@@ -3013,6 +3095,7 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
 #ifdef DBT_TLB_REFILL
         case 430: v = dbt_stat.tlb_refills; break;
         case 431: v = 1; break;          /* TLB_REFILL built in */
+        case 434: v = dbt_stat.tlb_revals; break;
 #endif
         case 61: v = 1; break;         /* statistics ABI version */
         case 62:
@@ -3610,6 +3693,85 @@ static int tlb_refill5(const dbt_gctx *ctx)
     if (!(rd32le(blk) & rd32le(th + 0x14))) return 0;    /* access lock vs the thread's key: tlb50 */
     return tlbr_load(ctx, entry & ~1u);
 }
+
+/* MMUCR.TI, or HC_TLB_INVAL without a range. CE 5.0's kernel never gives one: its
+ * InvalidateRange(addr, len) is OEMCacheRangeFlush(0, 0, CACHE_SYNC_FLUSH_TLB)
+ * (INC\kernel.h, "there might be aliasing somewhere"), so every decommit,
+ * VirtualProtect, stack scavenge and page-out meant "all user mappings may
+ * have changed" and cost every user block: 216 such calls dropped 77k blocks
+ * in the first 132 s of a boot, most of the translation churn. The page
+ * tables say what actually changed: a user block whose pc still maps, under
+ * its ASID, to the physical page it was translated from (binfo.phys, from
+ * the UTLB at translation time) is as valid as before the call; one whose
+ * page is gone or moved is dropped. Slot 0 is the current process's section
+ * (SectionTable[0], swapped in by SetCPUASID with the ASID) or, for another
+ * process's blocks, SectionTable[procnum + 1] (CE 5.0's ASID is the procnum;
+ * NK's section is NKSection, not in the table: its blocks are dropped unless
+ * current). Slots 1-63 are the same for every process. Blocks reachable from
+ * several ASIDs (ASID_ANY) in slot 0 and blocks crossing a page are dropped
+ * rather than argued about. Content changes are not this path's business:
+ * the kernel announces them with HC_FLUSH. Only with the CE 5.0 refill
+ * handler recognised (g_tlbr_ok == 5): the walk is that handler's. */
+static sf_u32 walk5_phys(sf_u32 va, sf_u32 asid, sf_u32 *mask_out)
+{
+    static const sf_u8 shift_of_sz[4] = { 10, 12, 16, 20 };
+    sf_u32 ttb = REG_TTB, a, sect, blk, entry, sz, mask, slot = va >> 25;
+    if (va & 0x80000000u) return PHYS_UNKNOWN;
+    if (!slot && asid != (REG_PTEH & 0xFF)) {
+        if (!asid || asid >= 0x3F) return PHYS_UNKNOWN;
+        slot = asid + 1;
+    }
+    a = ttb + (slot << 2);
+    if (!p12_word(ttb) || !p12_word(a)) return PHYS_UNKNOWN;
+    sect = rd32le(a);
+    a = sect + (((va >> 16) & 0x1FFu) << 2);
+    if (!p12_word(sect) || !p12_word(a)) return PHYS_UNKNOWN;
+    blk = rd32le(a);
+    if (!(blk & 0x80000000u)) return PHYS_UNKNOWN;
+    a = blk + 12 + ((va >> 12) & 15) * 4;
+    if (!p12_word(blk) || !p12_word(a)) return PHYS_UNKNOWN;
+    entry = rd32le(a);
+    if (!(entry & 1)) return PHYS_UNKNOWN;
+    sz = ((entry >> 4) & 1) | ((entry >> 6) & 2);
+    mask = ~((1u << shift_of_sz[sz]) - 1);
+    *mask_out = mask;
+    return (entry & 0x1FFFFC00u & mask) | (va & ~mask);
+}
+static int tlb_reval5(void)
+{
+    /* one walk per (page, ASID) per call: blocks share pages */
+    static sf_u32 memo_key[256], memo_phys[256], memo_mask[256], memo_gen[256], gen;
+    int j;
+    if (g_tlbr_ok != 5) return 0;
+#ifdef DBT_BATCH_RANGES
+    g_range_batch = 1;
+#endif
+    INVAL_CALL(3);
+    ++gen;
+    for (j = 0; j < g_nuser; ++j) {
+        unsigned i = g_user_idx[j], h;
+        dbt_block *b = &g_blocks[i];
+        sf_u32 p, mask = 0, key;
+        if (g_binfo[i].dead || g_binfo[i].phys == PHYS_UNKNOWN) { if (!g_binfo[i].dead) invalidate_block(b); continue; }
+        key = (b->guest_pc & ~0xFFFu) | (g_binfo[i].asid & 0xFFu);     /* 4 KiB pages; a larger page memoises per 4 KiB */
+        h = ((key >> 12) ^ (key >> 20) ^ key) & 255u;
+        if (memo_gen[h] == gen && memo_key[h] == key) { p = memo_phys[h]; mask = memo_mask[h]; }
+        else {
+            p = walk5_phys(b->guest_pc, g_binfo[i].asid, &mask);
+            if (p != PHYS_UNKNOWN) p &= mask;
+            memo_gen[h] = gen; memo_key[h] = key; memo_phys[h] = p; memo_mask[h] = mask;
+        }
+        if (p == PHYS_UNKNOWN || p != (g_binfo[i].phys & mask) ||
+            (b->guest_pc & mask) != ((b->guest_pc + b->guest_len - 1) & mask)) invalidate_block(b);
+    }
+    INVAL_END(3);
+    finish_invalidations();
+#ifdef DBT_BATCH_RANGES
+    g_range_batch = 0;
+#endif
+    dbt_stat.tlb_revals++;
+    return 1;
+}
 static int tlb_refill(const dbt_gctx *ctx)
 {
     sf_u32 tea = ctx->tea, mask = 0xFFFFFFFFu, dir, pde, pte, a;
@@ -3909,7 +4071,7 @@ static void dev_mem(dbt_gctx *ctx, const sh_insn *d)
         v = ctx->r[d->data];
         *(volatile sf_u32 *)ea = v;
         if (ea == 0xFF000000u) switch_asid(v & 0xFF);                               /* PTEH: ASID */
-        else if (ea == 0xFF000010u && (v & 4)) invalidate_range(0, 0x80000000u, 1); /* MMUCR.TI */
+        else if (ea == 0xFF000010u && (v & 4)) user_mappings_changed(0);             /* MMUCR.TI */
     } else {
         v = *(volatile sf_u32 *)ea;
         if (d->am == AM_POSTINC) ctx->r[d->base] += 4;

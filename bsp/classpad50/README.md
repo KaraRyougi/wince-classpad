@@ -7,9 +7,11 @@ SH7305 OAL rewritten against the CE 5.0 kernel interface, the build files
 against Platform Builder 5.0.
 
 Status 2026-11-09: builds in the PB 5.0 VM and **boots to the CE 5.0
-desktop in casio-emu's ClassPad profile** (POSTINIT 3 s, display driver
-45 s, desktop 111 s of wall clock with the merged translator;
-`notes/ce/desktop-cp400-ce50.png`, docs/08 section 7); a stylus double tap
+desktop in casio-emu's ClassPad profile** (POSTINIT 2.3 s, display driver
+15 s, desktop 35 s, Explorer taskbar 43 s of wall clock with the
+translator's CE 5.0 KDEV/TLB_REFILL tables and page-table revalidation of
+user blocks; `notes/ce/desktop-cp400-ce50.png`, docs/08 sections 7-8;
+it was 111 s before those); a stylus double tap
 opens My Device and the Main strip icon starts Math Xpander from the EXT
 region (`notes/ce/xpander-cp400-ce50.png`), without the SH3 loader patch:
 XIP modules are loaded without a CPU-type check. The Start menu, Plotter-Z,

@@ -189,10 +189,69 @@ sites.txt`：25 个函数全部定位到，14 个访问点全在其中。
 
 启动日志里 `[kdev] device-aware nk.exe ranges: …`（9 段）和 `[dbt] TLB
 refill in the translator: CE 5.0 handler (SectionTable walk)` 确认两者生效；
-My Device 照常打开。代价是启动时按特征码扫描 nk.exe 的 .text：在 casio-emu 里
-5.6 s，加了首字预过滤（`kdev.c`，原始首字不在表里的位置直接跳过）后 3.8 s，
-剩下的是模拟器逐字节读 NOR 的开销，真机上应是几十毫秒量级；POSTINIT 因此从
-3.4 s 变成 7.3 s，但后面全部赚回来。
+My Device 照常打开。
+
+**不扫描，先对地址。** 最初是启动时按特征码扫描 nk.exe 的 .text（casio-emu
+里 5.6 s，加首字预过滤后 3.8 s）。nk.exe 和翻译器是配套发行的，表里直接记下
+每个函数在生成镜像里的 P1 地址（`hint` 字段，`kernel_devfuncs.py` 输出的
+第四项），`kdev_locate` 先在记录的地址上核对首 4 字和 CRC，全部命中就跳过扫描
+（日志 `[kdev] nk.exe functions at their recorded addresses`），POSTINIT 回到
+2.3 s；只有重链接后函数挪了位才退回扫描，再找不到仍是整模块设备感知。
+CE 6.0 的 `kernel_dev.h` 同样带 hint（手工补为 0，走扫描）。
+
+**TLB 刷新为什么杀掉这么多块。** `-DDBT_INVAL_DIAG` 按来源统计失效：到 132 s
+时"范围"类失效 216 次杀 77k 块，无范围的 HC_FLUSH（保留 ROM 块）25 次只杀
+134 块，ldtlb 换页 14k 次杀 383 块。翻译总数是存活块数的 2.8 倍，几乎都是
+这 77k 次重翻。来源追到两处，都是"所有用户态映射可能变了"的全杀：
+
+1. CE 5.0 内核的 `InvalidateRange(addr, len)`：`INC\kernel.h` 里 SH 没有
+   `HARDWARE_PT_PER_PROC`，宏展开成 `OEMCacheRangeFlush(0, 0,
+   CACHE_SYNC_FLUSH_TLB)`——范围被丢掉（"there might be aliasing
+   somewhere"）。每次 decommit、VirtualProtect、栈回收、换页（`virtmem.c`、
+   `pgpool.c`、`physmem.c`）都走到这里。
+2. OAL 对它的实现先写 MMUCR.TI 再发 F9。翻译器把 guest 写 TI 也当作
+   "用户态映射全没了"（`rt.c` 设备感知存储钩子），所以用户态块在 F9 到达
+   之前就已经全被杀了；F9 无范围再杀一次已经没东西可杀。两条路径合计每次
+   约 357 块。
+
+**按页表核对，而不是全丢（`rt.c user_mappings_changed` → `tlb_reval5`，
+2026-11-09）。** TI 写、无范围的 F9、R-standby 唤醒三处都改走同一个函数：
+认出 CE 5.0 的 TLB 处理程序（`g_tlbr_ok == 5`）后不再清空，而是对每个存活的
+用户态块按它的 ASID 走一遍 CE 5.0 的页表（和 `tlb_refill5` 同一套：
+SectionTable → SECTION → MEMBLOCK → aPages）：pc 仍映射到翻译时记下的物理页
+（`binfo.phys`，翻译时从 UTLB 读出）就保留，页没了或换了才丢。slot 0 用
+当前进程的 SectionTable[0]，别的进程的块用 SectionTable[procnum+1]（CE 5.0 的
+ASID 就是 procnum；NK 的 NKSection 不在表里，非当前时丢）；slot 1–63 各进程
+相同。跨页的块和 slot 0 里 ASID_ANY 的块保守地丢。内容变化不归这条路管：内核
+写代码后会发 HC_FLUSH（有范围的 F2 在整个启动里没有一次杀超过 8 块）。
+内核未改，对 CE 6.0 无影响（它的 TI 仍是全杀：`g_tlbr_ok` 是 6）。
+
+两处细节：同一页上的块共用一次页表遍历（每次调用内按 (页, ASID) 记忆）；
+OAL 对一次 InvalidateRange 先写 TI 再发 F9，两次之间除了 trapa 本身没有任何
+事件（异常、翻译、ldtlb、失效计数都没变）时第二次直接跳过。
+
+顺手改掉的另一处：ASID_ANY（多个进程共用，CE 5.0 下 slot 1 的全部 DLL 代码）
+的块死掉时，`hash_remove` 原来要扫一遍 32768 项的哈希表，前一天先改成每批
+一次扫描，现在改成按"guest 运行过的 ASID 集合"逐个探测它可能在的槽位
+（`g_asid_seen`，switch_asid 记录；超过 64 个 ASID 才退回扫描）：条目只会在
+插入时的当前 ASID 对应的槽位上。
+
+结果（同一镜像、同一双击，墙钟，run9 → run16）：
+
+| | 改前 | 改后 |
+|---|---|---|
+| first idle / 显示驱动 | 26.5 s | 15.1 s |
+| 桌面首帧 | 69.1 s | 35.0 s |
+| Explorer 任务栏 | 80.5 s | 43.0 s |
+| 失效的块（到 ~130 s） | 77,823 | 1,156 |
+| 翻译次数（到 ~130 s） | ~100,000 | 50,000 |
+| 页表核对调用 / 其中跳过的重复 | — | 137 / 57 |
+
+心跳采样（`HLE_HB=5`，casio-emu 每 5M 条指令打一个 PC，`hbprof.py` 符号化）
+在前 43 s 里翻译器 C 代码仍占 68%：`dbt_translate_block` 9%、
+`user_mappings_changed`（页表核对）7%、`invalidate_block` 7%、
+`finish_invalidations` 6%、`tlb_drops_block`（ldtlb 钩子）5%、`sh4_decode` 5%；
+翻译后的 guest 代码占 23%，片上 stub 8%。下一步看 ldtlb 钩子和翻译本身。
 
 ## 九、还没做的
 
@@ -200,5 +259,9 @@ My Device 照常打开。代价是启动时按特征码扫描 nk.exe 的 .text�
 - `tools/windows/claude-build` 的 CE 5.0 版本（现在是 C:\WINCE600 的路径和
   kern.dll 重链接逻辑）。
 - 真机：R-standby、面板初始化黑屏问题与 CE 版本无关，仍待验证。
-- CE 5.0 下的性能测量（My Device 打开时间），以及 shell-performance 分支
-  的翻译器优化对 CE 5.0 的适配。
+- 翻译器：ldtlb 钩子（`tlb_drops_block`，每次 ldtlb 扫该页的块链）、
+  `finish_invalidations` 每批两遍全表、翻译本身（`dbt_translate_block`、
+  `sh4_decode`）还各占 5–9%；翻译器与 CE 共享 RAM 的划分未重新评估。
+- 内核侧可选：`INC\kernel.h` 的 `InvalidateRange` 对 SH 传真实范围
+  （一行改动，需在 VM 里重建 nk.lib），翻译器的 F9 有范围路径就能直接用，
+  不必走页表核对；现在不改内核也已经不是瓶颈。
