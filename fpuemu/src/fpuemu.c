@@ -150,11 +150,13 @@ static int exec_fxxd(fpu_state *st, fpu_state *dummy, sf_u32 op)
         if (n & 1) return FPU_UNIMPL;
         { sf_i32 v = f64_to_i32(&env, get_dr(FR + n));
           if ((r = finish(st, &env)) != FPU_OK) return r; st->fpul = (sf_u32)v; return FPU_OK; }
+    /* fneg/fabs touch the sign bit of FRn whatever PR says: with PR = 1 and
+     * an even n that is DRn's sign; the CE 5.0 SH-4 compiler also emits them
+     * on odd registers in double mode (Plotter-Z's recalculation stopped at
+     * fneg fr3, 0xF34D, 2026-11-09), which the hardware takes the same way. */
     case 0x4:                                                  /* fneg */
-        if (pr && (n & 1)) return FPU_UNIMPL;
-        FR[n] ^= 0x80000000u; return FPU_OK;                   /* upper word of DRn when pr */
+        FR[n] ^= 0x80000000u; return FPU_OK;
     case 0x5:                                                  /* fabs */
-        if (pr && (n & 1)) return FPU_UNIMPL;
         FR[n] &= 0x7FFFFFFFu; return FPU_OK;
     case 0x6:                                                  /* fsqrt */
         if (!pr) { f32 v = f32_sqrt(&env, FR[n]);

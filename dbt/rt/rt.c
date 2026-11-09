@@ -4211,8 +4211,8 @@ void dbt_fpu_c(dbt_gctx *ctx, sf_u32 arg)
     fpu_mem mem;
     int r;
     g_tail_from = 3;
-    sf_u32 opcode = arg & 0xFFFFu;
-    g_helper_ret = helper_return_address();
+    sf_u32 opcode = arg & 0xFFFFu, hret;
+    g_helper_ret = hret = helper_return_address();
     if (ctx->sr & SR_FD) {
         /* SR.FD: the FPU is disabled. The CE kernel runs every thread with
          * FD=1 and gives it the FPU on this exception (lazy context switch,
@@ -4235,7 +4235,9 @@ void dbt_fpu_c(dbt_gctx *ctx, sf_u32 arg)
     r = fpuemu_exec(&g_fpu, ctx->r, &ctx->sr, opcode, &mem);
     g_helper_ret = 0;
     if (r != FPU_OK) {
-        dbt_puts("[dbt] fpu op "); dbt_puthex(opcode); dbt_puts(" status "); dbt_puthex((sf_u32)r); dbt_puts("\n");
+        int insn;
+        dbt_puts("[dbt] fpu op "); dbt_puthex(opcode); dbt_puts(" status "); dbt_puthex((sf_u32)r);
+        dbt_puts(" at guest "); dbt_puthex(helper_guest_pc(hret, &insn)); dbt_puts(" fpscr "); dbt_puthex(g_fpu.fpscr); dbt_puts("\n");
         if (r != FPU_EXCEPTION) dbt_halt("fpu emulation failed");
         /* TODO: raise the guest FPU exception (vector 0x100, EXPEVT 0x800/0x820) */
     }

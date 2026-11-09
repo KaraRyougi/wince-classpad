@@ -347,6 +347,13 @@ static void test_insns(void)
     expect("fadd DR", fpuemu_exec(&st, gpr, &sr, 0xF240, &mem) == FPU_OK && st.fr[2] == 0x400E0000u && st.fr[3] == 0);
     /* odd register with PR=1 is reserved */
     expect("fadd DR odd", fpuemu_exec(&st, gpr, &sr, 0xF340, &mem) == FPU_UNIMPL);
+    /* fneg/fabs flip or clear the sign bit of FRn whatever PR is, odd n included
+     * (the CE 5.0 compiler emits fneg fr3 in double mode: Plotter-Z, 2026-11-09) */
+    st.fr[3] = 0x40490FDBu;
+    expect("fneg odd PR", fpuemu_exec(&st, gpr, &sr, 0xF34D, &mem) == FPU_OK && st.fr[3] == 0xC0490FDBu && st.fr[2] == 0x400E0000u);
+    expect("fabs odd PR", fpuemu_exec(&st, gpr, &sr, 0xF35D, &mem) == FPU_OK && st.fr[3] == 0x40490FDBu);
+    expect("fneg DR", fpuemu_exec(&st, gpr, &sr, 0xF24D, &mem) == FPU_OK && st.fr[2] == 0xC00E0000u && st.fr[3] == 0x40490FDBu);
+    st.fr[2] = 0x400E0000u; st.fr[3] = 0;
     /* fcnvds DR2,fpul -> 3.75f ; fcnvsd back */
     expect("fcnvds", fpuemu_exec(&st, gpr, &sr, 0xF2BD, &mem) == FPU_OK && st.fpul == 0x40700000u);
     expect("fcnvsd", fpuemu_exec(&st, gpr, &sr, 0xF6AD, &mem) == FPU_OK && st.fr[6] == 0x400E0000u && st.fr[7] == 0);
