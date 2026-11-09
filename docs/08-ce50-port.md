@@ -407,9 +407,10 @@ FPU 模拟（`fpuemu_exec` + 辅助 stub + `dbt_fpu_c`）16%、GWES 字形 0%（
 `lds Rm,FPSCR/FPUL` 的寄存器在 bit 8–11，解码器一直按 bit 4–7 记 touched/defs
 （辅助路径保存全部寄存器所以没出事；就地翻译选临时寄存器时撞上了，导致启动
 黑屏）。guest 测试 `fpu`（加了 bank 切换、T 保持、SZ=1 成对搬运的用例）和
-`fpudis` 通过。Recalc 的总指令数从约 19.2 亿降到约 18.8 亿（按 10 s 一帧的
-分辨率估计，差异在噪声边缘）；真正的大头还是 Plotter-Z 的重绘，等重建后的
-镜像量。
+`fpudis` 通过。用每秒一帧的屏幕快照（`HLE_FBDUMP_EVERY=1`）对 Render 到曲面
+出现之间的模拟指令数计量（`recalc_cost.py`，与宿主速度无关）：全部走 stub 时
+10.19 亿条，就地翻译后 9.07 亿条，少 11%，和估计一致。真正的大头还是
+Plotter-Z 的重绘，等重建后的镜像量。
 
 ## 九、还没做的
 
