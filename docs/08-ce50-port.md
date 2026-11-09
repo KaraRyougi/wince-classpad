@@ -448,6 +448,35 @@ Render 到曲面出现从模拟器里的 60 s 缩到 19 s。曲面区域逐像�
 只有状态行与任务栏时钟不同。Recalc 剩下的部分按之前的采样是字形光栅化、
 GPE 的 blit 和 Plotter-Z 自己的算术，各自都不再占大头。
 
+**Plotter-Z：拖动和首次画完（2026-11-09 下午，同一镜像）。** 用户反馈首次
+画完和拖动旋转仍然慢。量法：`HLE_HB=2` 心跳、`-DDBT_TRACE_BLOCKS`、
+`-DDBT_WATCH_GPC=<Redraw 或 PaintCanvasToWindow 的入口>`（每次进入打印一行，
+夹在心跳之间就是指令数时间戳），`HLE_CB_TOUCHSEQ` 的七次点按之后接 41 个
+首尾相接的条目（每 5000 tick 右移 3 像素，条目之间 1 tick 的抬笔触摸驱动看
+不到）当作拖动。注意 CE 5.0 的 exe 都装在 0x10000，`cesym` 会把 Plotter-Z 的块
+记到 filesys.exe 头上，exe 范围的 gpc 要直接对 PlotterZ.map。
+
+- 拖动：每次 `Redraw` 约 3700 万条指令，81% 是开头的整画布清屏
+  （`FillRectCanvas` 逐像素调 `SetPixelCanvas`，15 万次 `jsr @reg`/`rts`），
+  画线约 5%。而且 41 步拖动期间 `PaintCanvasToWindow` 一次都没进：`Redraw`
+  比触笔采样间隔慢，队列里总有鼠标消息，WM_PAINT 排不上，笔抬起才画。
+- Recalc 共 2.56 亿条：点 Render 到进度条首帧 5200 万（清屏 3000 万），20 列
+  每列约 800 万（约六成是 `pow` 的浮点模拟，约 15% 是进度条的逐像素填充和
+  反色），最后的 `Redraw` 加绘制 4000 万（又一次清屏）。
+- 翻译器侧看到的：`_dbt_lki_ts` 占拖动采样的 33–41%。`HASH_TAG=1`
+  （`DBT_USER_IC_HASH_HIT`）下用户态哈希命中不回填内联缓存，`switch_asid`
+  又会清缓存，于是用户态的每次间接跳转都走约 45 条指令的哈希探测。
+  已改（`USER_IC_REFILL=1`，docs/04 "User inline caches refilled from the
+  hash"）：同一镜像、同一个旧 PlotterZ.exe，拖动时 `Redraw` 间隔从 3740 万
+  降到 1770 万条，stub 的采样占比从四成多降到 2%，Recalc 从 2.18 亿到 1.90 亿。
+
+Plotter-Z 改了五处（`SRC\APPS\PLOTTERZ\README.md`）：`FillRectCanvas`/
+`InvertRectCanvas` 裁剪一次后按行按字节做，画线和字形循环就地写像素，
+`WM_MOUSEMOVE` 重画后立刻 `UpdateWindow`，相机角度的 sin/cos 查
+`pz_trig_table.h`（整数度），求值器里 -8 到 8 的整数次幂改连乘。画布图元在
+Mac 上与旧实现逐字节对照过（20 万组随机输入），整个程序用 clang 对 CE 5.0
+SDK 头文件做了语法检查。**还没在 VM 里构建，效果待重建镜像后测量。**
+
 ## 九、还没做的
 
 - 在 VM 里构建（第一次构建会暴露 SDK 的差异：头文件、`WARNISERROR`）。

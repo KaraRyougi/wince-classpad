@@ -330,6 +330,11 @@ int main(void)
       expect("rts meta", blk.meta[1].kind == META_TARGET_PR && blk.meta[1].host_off == 2);
       expect("rts ic literals", blk.ic_off > 0 && lit_of_movl(12) == 1 && lit_of_movl(24) == 0 && lit_of_movl(38) == HBASE + (sf_u32)blk.ic_off
              && lit_of_movl(42) == env.rt_lookup_ic && hbuf[blk.ic_off / 2 + 1] == 1 && hbuf[blk.ic_off / 2 + 2] == 0);
+#ifdef DBT_USER_IC_REFILL
+      /* the block-index word follows the pair, before the IC's own address */
+      expect("rts ic index word", hbuf[blk.ic_off / 2 + 4] == 0 && hbuf[blk.ic_off / 2 + 5] == 0
+             && (((sf_u32)hbuf[blk.ic_off / 2 + 6] << 16) | hbuf[blk.ic_off / 2 + 7]) == HBASE + (sf_u32)blk.ic_off);
+#endif
       { dbt_spill sp[4]; int n = dbt_block_pending_spills(&blk, 1, 26, sp, 4);
         expect("rts IC interrupt recovers GPRs and T", n == 3 && sp[0].gpr == DBT_SPILL_T && sp[0].slot == SLOT_X1); }
 

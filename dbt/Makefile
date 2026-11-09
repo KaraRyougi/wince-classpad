@@ -143,6 +143,10 @@ HOST_CFLAGS  += $(if $(filter 1,$(KDEV)),-DDBT_KDEV,)
 # from the hash in the stub instead of in C. HASH_ENTRIES: lookup hash size
 # (12 bytes each; 32768 since the 19200-header layout, docs/04).
 HASH_TAG      ?= 1
+# USER_IC_REFILL=1 (with HASH_TAG=1): such a hash hit also refills the site's
+# inline cache, so the next jump from there stays in translated code. Without
+# it a user IC emptied by an address-space switch was never filled again.
+USER_IC_REFILL ?= 1
 HASH_ENTRIES  ?= 32768
 # TLB_REFILL=1: UTLB misses in translated code are refilled by the translator
 # with the kernel's own page-table walk (rt.c tlb_refill: CE 6.0's page
@@ -159,7 +163,7 @@ HOST_CFLAGS  += $(if $(filter 1,$(TLB_REFILL)),-DDBT_TLB_REFILL,)
 # (DBT_FAST_RTE). docs/04 has the measurements.
 FAST_HELPERS  ?= 1
 HOST_CFLAGS  += $(if $(filter 1,$(FAST_HELPERS)),-DDBT_INLINE_DEVICE_READ -DDBT_FAST_LDC_SR -DDBT_FAST_LDC_SR_MD -DDBT_FAST_LDTLB -DDBT_FAST_RTE,)
-HOST_CFLAGS  += $(if $(filter 1,$(HASH_TAG)),-DDBT_HASH_ASID_TAG -DDBT_HASH_ASID_MIX -DDBT_USER_IC_HASH_HIT,) -DDBT_HASH_ENTRIES=$(HASH_ENTRIES)
+HOST_CFLAGS  += $(if $(filter 1,$(HASH_TAG)),-DDBT_HASH_ASID_TAG -DDBT_HASH_ASID_MIX -DDBT_USER_IC_HASH_HIT $(if $(filter 1,$(USER_IC_REFILL)),-DDBT_USER_IC_REFILL,),) -DDBT_HASH_ENTRIES=$(HASH_ENTRIES)
 NK_PADDED = $(BUILD)/nk-flash.bin
 NK_OFF_FILE = $(BUILD)/nk-flash.off
 NK_ENV = $(if $(NKBIN)$(EXTBIN),HLE_OSROM=$(abspath $(NK_PADDED)) HLE_OSROM_PAD=$$(cat $(NK_OFF_FILE)),)   # recursive: nkrun sets NKBIN per target

@@ -3164,3 +3164,54 @@ word after the IC pair pointing into the copy, written by the stub's
 refill, the C refill, resets and survivor moves), so that the
 invalidation pass and the recycle scans stop reading ICs from code
 memory. Over six tap ticks it was slower, 10.49 s against 10.20 s.
+
+### User inline caches refilled from the hash (2026-11-09)
+
+Found while profiling Plotter-Z on the CE 5.0 image (docs/08): a stylus
+drag spent 33-41% of its heartbeat samples in `_dbt_lki_ts`, the hash
+probe of the IC miss stub. Cause: with `DBT_USER_IC_HASH_HIT` a user
+target found in the hash was jumped to without filling the site's IC
+(filling it needs the block listed in `g_ic_active`, which was C's job),
+and `switch_asid` empties the user ICs. So a user IC was filled once, by
+C, when its target was first translated, and after the next address-space
+switch never again: every `jsr @Rn` and `rts` of user code took the stub's
+probe, about 45 host instructions. CE switches address space on every
+system call, so this was the steady state of all user code.
+
+`USER_IC_REFILL=1` (default, `-DDBT_USER_IC_REFILL`):
+
+- the translator puts a third word after the IC pair (`TAG_IC_I`,
+  `emit_lit_only`: a pool word no instruction loads); the runtime writes
+  the block's index there at commit and when a survivor moves
+  (`set_ic_index`);
+- the stub, on a user hash hit, masks interrupts, parks the host address
+  in the IC (pc still 1), lists the block in `g_ic_active` /
+  `g_ic_active_seen` unless it is there already, publishes the pc and
+  returns through the usual `ldc`; kernel targets keep the old unmasked
+  refill.
+
+The stubs' IL memory had 8 bytes left. The four literal pools repeated
+every literal; those only one region uses are now only in that pool
+(`POOL`), which freed 96 bytes; the section is at 4072 of 4096.
+
+Measured on the 2026-11-09 CE 5.0 image, emulated instructions:
+
+| | before | after |
+|---|---:|---:|
+| Plotter-Z `Redraw` to `Redraw` while dragging (old PlotterZ.exe, 150k calls per frame) | 37.4M | 17.7M |
+| stub share of the drag's samples | 42-51% | 2% |
+| Saddle Surface, Render tap to the final `Redraw` | 218M | 190M |
+| boot to "Explorer taskbar thread started" | 874M | 852M |
+
+All guests pass with the same output as `USER_IC_REFILL=0` (bench, tmu,
+lcd and flush differ in their timing figures only); `make test` runs
+`test_translate` a second time with the define.
+
+Not done, estimated from the same run: a recalculation still spends about
+60% in FPU emulation. Of the ~250k FPU instructions that reach the helper
+per recalculation, about 70% are `fmov.s` to or from memory (the CE
+compiler's loads, stores and register saves), each a full helper call of
+about 350 instructions for one swapped 32-bit move. Translating those in
+line means driving `tr_mem` from `tr_fpu_inline` with a borrowed register;
+the slots and the fault recovery of that combination have not been worked
+out.

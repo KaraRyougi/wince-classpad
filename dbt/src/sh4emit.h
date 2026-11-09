@@ -38,6 +38,9 @@ static inline void emit_patch16(emitter *e, int byte_off, sf_u32 op)
  * `tag` is returned by emit_lit_find so the caller can locate the literal's
  * byte offset after flushing (for link patching). Returns the lit index. */
 int  emit_mov_lit(emitter *e, int rn, sf_u32 value, int tag);
+/* A pool word no instruction loads: placed after the literals created before
+ * it, found by its tag (emit_lit_offset). */
+int  emit_lit_only(emitter *e, sf_u32 value, int tag);
 /* mov #imm,Rn when it fits, else a literal (tag -1) */
 void emit_mov_imm(emitter *e, int rn, sf_u32 value);
 /* Place the literal pool here (aligned); returns byte offset of pool start,

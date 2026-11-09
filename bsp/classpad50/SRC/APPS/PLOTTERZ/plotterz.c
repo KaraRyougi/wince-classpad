@@ -27,6 +27,9 @@
 #include "upstream/renderer-z/transform.c"
 #include "upstream/renderer-z/render.c"
 
+/* sin/cos of whole degrees for the front end's camera (README.md) */
+#include "pz_trig_table.h"
+
 /* the Windows CE front end, its WinMain renamed so ours runs first */
 #define WinMain PlotterZ_WinMain
 #include "upstream/plotter-z/win32-native/plotter-z-win32-native.c"

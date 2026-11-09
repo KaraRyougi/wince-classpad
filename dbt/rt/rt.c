@@ -392,15 +392,28 @@ static sf_u16 g_user_idx[MAX_BLOCKS];
 /* Only ICs filled with user targets since the last switch need clearing.
  * User-target stub misses enter C even on a hash hit to register the site.
  * Normal per-site IC hits stay entirely in translated code. */
+/* -DDBT_USER_IC_REFILL: the lookup_ic stub refills an IC from a user hash
+ * hit and lists it here itself (interrupts masked), finding the block's
+ * index in the word after the IC pair (set_ic_index). Without it a user IC
+ * emptied by an address-space switch stayed empty: every jsr @Rn / rts of
+ * user code then took the stub's hash probe (a third of Plotter-Z's redraw,
+ * docs/08). */
+#ifdef DBT_USER_IC_REFILL
+sf_u16 g_ic_active[MAX_BLOCKS];
+sf_u8 g_ic_active_seen[MAX_BLOCKS];
+int g_nic;
+#else
 static sf_u16 g_ic_active[MAX_BLOCKS];
 static sf_u8 g_ic_active_seen[MAX_BLOCKS];
+static int g_nic;
+#endif
 /* Only hash slots that received user code since the last ASID switch. */
 #ifndef DBT_HASH_ASID_TAG
 static sf_u16 g_user_hash[HSIZE];     /* untagged entries leave the hash at an ASID switch */
 static sf_u8 g_user_hash_seen[HSIZE];
 #endif
 static unsigned g_nuser_hash;
-static int    g_nuser, g_nic; /* g_nic counts ICs filled with user targets this ASID */
+static int    g_nuser;        /* g_nic counts ICs filled with user targets this ASID */
 /* Conservative membership filter for 1 KiB virtual pages containing user
  * code. Most ldtlb calls refill DATA, for which a block scan does no work.
  * Never clear individual bits (collisions/dead blocks only cause extra scans).
@@ -774,6 +787,16 @@ static sf_u32 utlb_translate(sf_u32 va, sf_u32 asid)
         return (d & 0x1FFFFC00u & mask) | (va & ~mask);
     }
     return PHYS_UNKNOWN;
+#endif
+}
+
+/* The word after a block's IC pair: its index, for the stub's own refill. */
+static void set_ic_index(unsigned index)
+{
+#ifdef DBT_USER_IC_REFILL
+    if (g_ic_site[index]) ((volatile sf_u32 *)g_ic_site[index])[2] = index;
+#else
+    (void)index;
 #endif
 }
 
@@ -1827,6 +1850,7 @@ static unsigned keep_survivors(unsigned bank, unsigned count, sf_u32 *code, sf_u
             *(volatile sf_u32 *)(base + (sf_u32)nb.links[k].lit_off) = base + (sf_u32)nb.links[k].stub_off;
         }
         if (nb.ic_off >= 0) reset_ic(&g_blocks[j]);
+        set_ic_index(j);
         dbt_sync_code(base, (sf_u32)nb.host_len);
         c += len; a += clen; ++n;
         g_survivor_bytes += nb.host_len;
@@ -2280,6 +2304,7 @@ static dbt_block *translate_at(sf_u32 gpc)
         binfo *bi = &g_binfo[index];
         g_link_banks[index] = 0;
         g_ic_site[index] = b->ic_off >= 0 ? host + (sf_u32)b->ic_off : 0;
+        set_ic_index(index);
 #ifdef DBT_INCOMING_BITMAP
         {
             unsigned bank, word = index >> 5;
@@ -3173,7 +3198,11 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
         case 9: v = g_env.dev_lo; break;
         case 10: v = g_env.dev_hi; break;
 #ifdef DBT_USER_IC_HASH_HIT
+#ifdef DBT_USER_IC_REFILL
+        case 30: v = 3; break;          /* bit 1: user hash hits refill the IC */
+#else
         case 30: v = 1; break;
+#endif
 #endif
 #ifdef DBT_INTERIOR_ENTRY
         case 17: v = g_interior_hits; break;

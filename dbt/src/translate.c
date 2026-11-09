@@ -32,6 +32,8 @@
 #define TAG_IC_G      400           /* inline cache: cached guest target (followed by TAG_IC_H in the pool) */
 #define TAG_IC_H      401           /* inline cache: its host address */
 #define TAG_IC_A      402           /* address of the TAG_IC_G literal (X1 for the lookup_ic stub) */
+#define TAG_IC_I      404           /* -DDBT_USER_IC_REFILL: the block's index, third word of the IC (filled by the runtime) */
+
 #define TAG_RET       403           /* helper return address: host_base + offset (relocated with the block) */
 #define TAG_NONE      (-1)
 
@@ -757,6 +759,19 @@ static void jump_direct(tctx *t, sf_u32 guest_target, sf_u32 avoid, int cond)
 #endif
 }
 
+/* -DDBT_USER_IC_REFILL: the IC pair is followed by a word the runtime sets
+ * to the block's index, so the lookup stub can list the IC among those an
+ * address-space switch clears without a trip to C (rt/stubs.S). Call right
+ * after the TAG_IC_H literal: pool words keep their order of creation. */
+static void ic_index_word(tctx *t)
+{
+#ifdef DBT_USER_IC_REFILL
+    emit_lit_only(&t->em, 0, TAG_IC_I);
+#else
+    (void)t;
+#endif
+}
+
 /* Jump to the guest address already placed in X0. */
 /* Shared miss tail of the inline caches: X0 must hold the guest target.
  * rT is a scratch already spilled to Y0 (its record is closed here). */
@@ -823,6 +838,7 @@ static void jump_indirect_ic_reg(tctx *t, int reg, int rT_kept)
     emit16(e, OP_BF(4));
     ic_restore_t(t, rT, 0);
     emit_mov_lit(e, rT, 0, TAG_IC_H);
+    ic_index_word(t);
     emit16(e, OP_JMP(rT));
     emit16(e, op_sts_slot(SLOT_Y0, rT));
     /* miss */
@@ -846,6 +862,7 @@ static void jump_indirect_ic_pr(tctx *t)
     ic_restore_t(t, rU, 0);
     emit16(e, op_sts_slot(SLOT_Y0, rT));
     emit_mov_lit(e, rU, 0, TAG_IC_H);
+    ic_index_word(t);
     emit16(e, OP_JMP(rU));
     emit16(e, op_sts_slot(SLOT_Y1, rU));
     /* miss */
@@ -877,6 +894,7 @@ static void jump_indirect_ic(tctx *t)
     ic_restore_t(t, rU, 0);
     emit16(e, op_sts_slot(SLOT_Y0, rT));                 /* w6 */
     emit_mov_lit(e, rU, 0, TAG_IC_H);                    /* w7 cached host address */
+    ic_index_word(t);
     emit16(e, OP_JMP(rU));                               /* w8 */
     emit16(e, op_sts_slot(SLOT_Y1, rU));                 /* w9 */
     /* miss */
@@ -1747,6 +1765,9 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
         if (g_off >= 0 && a_off >= 0) {
             sf_u32 v = host_base + (sf_u32)g_off;
             b->ic_off = g_off;
+#ifdef DBT_USER_IC_REFILL
+            if (emit_lit_offset(&t.em, TAG_IC_I) != g_off + 8) return DBT_ERR_OVERFLOW;   /* the stub reads the index at pair + 8 */
+#endif
             emit_patch16(&t.em, a_off, v >> 16); emit_patch16(&t.em, a_off + 2, v & 0xFFFFu);
         }
     }

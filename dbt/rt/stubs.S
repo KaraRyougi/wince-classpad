@@ -48,31 +48,51 @@
 /* One literal pool per region (mov.l @(disp,PC) reaches only 1 KiB). */
         .macro POOL sfx
         .align 2
+        /* The IL memory is 4 KiB and nearly full: a literal only one region
+         * uses is not repeated in the other pools (A: entry, lookup stubs;
+         * C also probes the hash). */
+        .ifc \sfx,A
 .Lvectors\sfx:      .long _dbt_vectors
 .Lsr_init\sfx:      .long 0x400010F0        /* MD | DSP | IMASK=15 */
+        .endif
+        .ifnc \sfx,B
+        .ifnc \sfx,D
 #ifdef DBT_HASH_TWO_WAY
 .Lhmask\sfx:        .long (DBT_HASH_ENTRIES - 2) /* even index, two adjacent ways */
 #else
 .Lhmask\sfx:        .long (DBT_HASH_ENTRIES - 1) /* HSIZE - 1, must match rt.c */
 #endif
 .Lhash\sfx:         .long _dbt_hash
+        .endif
+        .endif
+        .ifc \sfx,A
 #ifdef DBT_HASH_ASID_TAG
 .Lhash_asid\sfx:    .long _dbt_current_asid
 #endif
 .Llookup_sr\sfx:    .long _dbt_lookup_sr
+        .endif
 .Limask\sfx:        .long 0x000000F0
+        .ifc \sfx,A
 #ifdef DBT_ASM_FETCH_FAULT
 .Lfetch_limit\sfx: .long 0xE0000000
 .Lfetch_event\sfx: .long 0x000100E0
 #endif
+        .endif
 .Lctx_rt\sfx:       .long _dbt_ctx_rt
 .Lctx_rt_rend\sfx:  .long _dbt_ctx_rt + CTX_REND
 .Lctx_exc\sfx:      .long _dbt_ctx_exc
 .Lctx_exc_rend\sfx: .long _dbt_ctx_exc + CTX_REND
 .Lstack_rt\sfx:     .long _dbt_stack_rt_top
 .Lstack_exc\sfx:    .long _dbt_stack_exc_top
+        .ifc \sfx,A
 .Lresolve\sfx:      .long _dbt_resolve
 .Lresolve_ic\sfx:   .long _dbt_resolve_ic
+#ifdef DBT_USER_IC_REFILL
+.Lic_seen\sfx:      .long _g_ic_active_seen
+.Lic_count\sfx:     .long _g_nic
+.Lic_active\sfx:    .long _g_ic_active
+#endif
+        .endif
 .Lexc_c\sfx:        .long _dbt_exc_c
 .Lrte_c\sfx:        .long _dbt_rte_c
 .Lfpu_c\sfx:        .long _dbt_fpu_c
@@ -283,7 +303,48 @@ _dbt_\name:
          * directly without publishing an IC that would need C-side owner
          * registration. Cold/hash-miss targets retain the normal C path. */
         cmp/pz  r0
+#ifdef DBT_USER_IC_REFILL
+        bf      6f
+        /* A user target found in the hash: refill the IC here too, and list
+         * its block among the ICs the next address-space switch clears
+         * (g_ic_active, as dbt_resolve_ic does in C). Interrupts are masked
+         * for it: the list and its count are shared with C. The block's
+         * index is the word after the IC pair (rt.c set_ic_index). r1 = host
+         * is parked in the IC itself, which keeps pc = 1 until the end. */
+        mov.l   .Llookup_srA, r2
+        mov.l   @r2, r2
+        mov.l   .LimaskA, r0
+        or      r0, r2
+        ldc     r2, sr
+        STSX    SLOT_X1, 2
+        mov     #1, r0
+        mov.l   r0, @r2
+        mov.l   r1, @(4, r2)
+        mov.l   @(8, r2), r0           /* block index */
+        mov.l   .Lic_seenA, r1
+        mov.b   @(r0, r1), r2
+        tst     r2, r2
+        bf      7f                     /* already listed */
+        mov     #1, r2
+        mov.b   r2, @(r0, r1)
+        mov.l   .Lic_countA, r1
+        mov.l   @r1, r2
+        add     #1, r2
+        mov.l   r2, @r1
+        add     #-1, r2
+        shll    r2
+        mov.l   .Lic_activeA, r1
+        add     r2, r1
+        mov.w   r0, @r1
+7:      STSX    SLOT_X1, 2
+        STSX    SLOT_X0, 0
+        mov.l   @(4, r2), r1
+        bra     3f
+        mov.l   r0, @r2                /* publish: pc last */
+6:
+#else
         bt      3f
+#endif
 #endif
         /* Refill the inline cache. Interrupts are live here, and a handler
          * may run this very site: write the pair so that no interleaving

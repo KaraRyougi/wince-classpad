@@ -18,6 +18,17 @@ int emit_mov_lit(emitter *e, int rn, sf_u32 value, int tag)
     return idx;
 }
 
+int emit_lit_only(emitter *e, sf_u32 value, int tag)
+{
+    int idx = e->nlits;
+    if (idx >= EMIT_MAX_LITS) { e->overflow = 1; return -1; }
+    e->lits[idx].at = -1;              /* no instruction to patch */
+    e->lits[idx].value = value;
+    e->lits[idx].tag = tag;
+    e->nlits++;
+    return idx;
+}
+
 void emit_mov_imm(emitter *e, int rn, sf_u32 value)
 {
     sf_i32 v = (sf_i32)value;
@@ -48,11 +59,13 @@ int emit_flush_lits(emitter *e)
             }
         }
 #endif
-        /* mov.l @(disp,PC),Rn: address = (PC_of_insn + 4) & ~3 + disp*4 */
-        int base = (at + 4) & ~3;
-        int disp = (pool - base) / 4;
-        if (disp < 0 || disp > 255) e->overflow = 1;
-        emit_patch16(e, at, OP_MOVL_PC(disp, (e->buf[at / 2] >> 8) & 0xF));
+        if (at >= 0) {
+            /* mov.l @(disp,PC),Rn: address = (PC_of_insn + 4) & ~3 + disp*4 */
+            int base = (at + 4) & ~3;
+            int disp = (pool - base) / 4;
+            if (disp < 0 || disp > 255) e->overflow = 1;
+            emit_patch16(e, at, OP_MOVL_PC(disp, (e->buf[at / 2] >> 8) & 0xF));
+        }
         if (!shared) {
             emit16(e, e->lits[i].value >> 16);
             emit16(e, e->lits[i].value & 0xFFFFu);
