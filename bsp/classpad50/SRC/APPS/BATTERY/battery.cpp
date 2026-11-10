@@ -43,9 +43,9 @@ static void GetUsbDiag(void)
     cut = n;
     if (n > 34) for (cut = 34; cut > 0 && text[cut] != ' '; cut--) ;
     if (cut <= 0) cut = n > 60 ? 60 : n;
-    if (cut < n) { lstrcpyn(g_usb[1], text + cut + 1, 64); text[cut] = 0; }
+    if (cut < n) { text[cut] = 0; if (lstrlen(text + cut + 1) < 64) lstrcpy(g_usb[1], text + cut + 1); }
     lstrcpy(g_usb[0], TEXT("USB "));
-    lstrcpyn(g_usb[0] + 4, text, 60);
+    if (lstrlen(text) < 60) lstrcpy(g_usb[0] + 4, text);
 }
 static void Refresh(HWND w)
 {
