@@ -6,7 +6,9 @@ A/D channel AN2, Casio's own level thresholds, classpad_battery.h). The
 library carries Microsoft's stub PDD (sbattif.obj) too; battif.c defines every
 BatteryPDD* routine, so the linker never pulls it. Built under the public
 name, so common.bib and common.reg load it and this copy replaces the stub
-battdrvr.dll in the release directory.
+battdrvr.dll in the release directory. battdrvr.def is a copy of the public
+export list (PUBLIC\COMMON\OAK\DRIVERS\BATTDRVR): sysgen does not put that
+file into the project's cesysgen\oak\lib.
 !endif
 
 TARGETNAME=battdrvr
@@ -16,7 +18,7 @@ WINCEOEM=1
 SYNCHRONIZE_DRAIN=1
 
 DLLENTRY=_DllMainCRTStartup
-DEFFILE=$(_COMMONOAKROOT)\lib\$(_CPUINDPATH)\battdrvr.def
+DEFFILE=battdrvr.def
 
 INCLUDES=$(INCLUDES);$(_TARGETPLATROOT)\src\inc
 

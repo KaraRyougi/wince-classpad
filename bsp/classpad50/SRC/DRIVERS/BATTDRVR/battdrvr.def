@@ -1,0 +1,13 @@
+LIBRARY     BATTDRVR
+
+EXPORTS
+    Init
+    Deinit
+    Open
+    Close
+    Read
+    Write
+    Seek
+    PowerDown
+    PowerUp
+    IOControl
