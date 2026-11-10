@@ -14,7 +14,9 @@
 //    ACLineStatus        online while a USB cable supplies power: the USB
 //                        function controller's VBUS input (INTSTS0.VBSTS),
 //                        which Casio's OS reads the same way (0x80016742).
-//                        Nothing else of USB is touched.
+//                        Casio's OS stops the controller when it is not
+//                        using it, so the driver gives it its clock back
+//                        (UsbStart); it stays unconnected (USBE off).
 //  Registry, HKLM\Software\ClassPad\Battery (read again every 10 s, so a
 //  settings program can change it):
 //    "Type"                 dword 0 alkaline (default), 1 Ni-MH
@@ -38,6 +40,13 @@
 #define MSTPCR2         0xA4150038
 #define USB_INTSTS0     0xA4D80040      // bit 7 VBSTS: the level of the VBUS input
 #define USB_VBSTS       0x0080
+#define USB_SYSCFG      0xA4D80000      // bit 10 SCKE: the controller's clock, needed to read its other registers
+#define USB_SCKE        0x0400
+#define USB_UPONCR      0xA40501D4      // 0x0600 = the USB PHY powered (gint usb.c; Casio's power-down writes 0)
+#define USB_UPON        0x0600
+#define CPG_USBCLKCR    0xA4150014      // bit 8 CLKSTP: the 48 MHz USB clock stopped
+#define USBCLKCR_STOP   0x00000100
+#define MSTPCR2_USB     0x00100000      // the USB module stopped
 #define MSTPCR2_ADC     0x08000000
 
 #define BATT_REG_KEY    TEXT("Software\\ClassPad\\Battery")
@@ -68,14 +77,15 @@ static void ReadConfig(void)
     g_configTick = GetTickCount(); g_haveConfig = TRUE;
 }
 
-static void WriteDiag(LPCTSTR text)
+static void WriteDiagValue(LPCTSTR name, LPCTSTR text)
 {
     HKEY key; DWORD disp;
     if (RegCreateKeyEx(HKEY_LOCAL_MACHINE, BATT_REG_KEY, 0, NULL, 0, 0, NULL, &key, &disp) == ERROR_SUCCESS) {
-        RegSetValueEx(key, TEXT("Diag"), 0, REG_SZ, (const BYTE *)text, (lstrlen(text) + 1) * sizeof(TCHAR));
+        RegSetValueEx(key, name, 0, REG_SZ, (const BYTE *)text, (lstrlen(text) + 1) * sizeof(TCHAR));
         RegCloseKey(key);
     }
 }
+static void WriteDiag(LPCTSTR text) { WriteDiagValue(TEXT("Diag"), text); }
 
 // One single conversion of AN2: the 10-bit result, or -1 on a timeout.
 // The register sequence is the one Casio's battery read makes before every
@@ -131,25 +141,67 @@ static BOOL Sample(void)
 
 // A USB cable is supplying power. The level is read until three reads in a
 // row agree (the controller's manual asks for that: the bit is not latched).
-// The first read is guarded: where the controller is not there to read
+//
+// The first version only read INTSTS0 and never saw a cable on the
+// calculator (2026-11-10): Casio's OS stops the controller when it has no
+// use for it (its power-down, 0x8000C8FE and 0x8000CB90: SYSCFG = 0,
+// UPONCR = 0, MSTPCR2 bit 20 set, USBCLKCR bit 8 set), and a stopped
+// module reads 0. UsbStart undoes exactly that, in gint's power-on order
+// (usb.c hpoweron: USBCLKCR.CLKSTP = 0, MSTPCR2.USB0 = 0, UPONCR = 0x0600),
+// then SYSCFG.SCKE; USBE stays 0, so the controller does not show up on
+// the bus. What the registers held before and after goes to the registry
+// value "UsbDiag" (the Battery program shows it): there is no debug output
+// to read on the device. Not verified on hardware.
+//
+// Everything is guarded: where the controller is not there to read
 // (casio-emu's ClassPad profile has none, and every read raised an exception
 // in device.exe, twice a second with the taskbar polling) the driver stops
 // asking and reports battery power.
 static int g_usbThere;                  // 0 not tried, 1 readable, -1 faulted
+static UINT16 g_usbShown = 0xFFFF;
+static TCHAR g_usbStart[64];
+
+static void UsbStart(void)
+{
+    UINT32 clk0, clk1, mstp0, mstp1;
+    UINT16 upon0, upon1, sys0, sys1;
+    clk0 = MMIO_R32(CPG_USBCLKCR); mstp0 = MMIO_R32(MSTPCR2);
+    upon0 = MMIO_R16(USB_UPONCR);
+    if (clk0 & USBCLKCR_STOP) MMIO_W32(CPG_USBCLKCR, clk0 & ~USBCLKCR_STOP);
+    if (mstp0 & MSTPCR2_USB) MMIO_W32(MSTPCR2, MMIO_R32(MSTPCR2) & ~MSTPCR2_USB);
+    if (upon0 != USB_UPON) MMIO_W16(USB_UPONCR, USB_UPON);
+    sys0 = MMIO_R16(USB_SYSCFG);
+    if (!(sys0 & USB_SCKE)) MMIO_W16(USB_SYSCFG, (UINT16)(sys0 | USB_SCKE));
+    clk1 = MMIO_R32(CPG_USBCLKCR); mstp1 = MMIO_R32(MSTPCR2);
+    upon1 = MMIO_R16(USB_UPONCR); sys1 = MMIO_R16(USB_SYSCFG);
+    wsprintf(g_usbStart, TEXT("clk %X>%X mstp %u>%u upon %X>%X sys %X>%X"),
+             clk0, clk1, (mstp0 & MSTPCR2_USB) != 0, (mstp1 & MSTPCR2_USB) != 0, upon0, upon1, sys0, sys1);
+    RETAILMSG(1, (TEXT("CLASSPAD BATTERY: USB %s\r\n"), g_usbStart));
+}
+
 static BOOL UsbPowered(void)
 {
-    UINT16 a, b, c;
+    UINT16 a, b, c, raw;
+    TCHAR diag[96];
     int i;
     if (g_usbThere < 0) return FALSE;
     if (g_usbThere == 0) {
         __try {
+            UsbStart();
             a = MMIO_R16(USB_INTSTS0);
             g_usbThere = 1;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             g_usbThere = -1;
             RETAILMSG(1, (TEXT("CLASSPAD BATTERY: no USB controller to read, AC line reported offline\r\n")));
+            WriteDiagValue(TEXT("UsbDiag"), TEXT("no USB controller to read"));
         }
         if (g_usbThere < 0) return FALSE;
+    }
+    raw = MMIO_R16(USB_INTSTS0);
+    if (raw != g_usbShown) {            // the registry only when the value changes: this runs twice a second
+        g_usbShown = raw;
+        wsprintf(diag, TEXT("%s ints %04X"), g_usbStart, raw);
+        WriteDiagValue(TEXT("UsbDiag"), diag);
     }
     for (i = 0; i < 8; i++) {
         a = MMIO_R16(USB_INTSTS0) & USB_VBSTS;
@@ -172,7 +224,8 @@ BOOL WINAPI BatteryPDDInitialize(LPCTSTR pszRegistryContext)
 void WINAPI BatteryPDDDeinitialize(void) {}
 
 // After a suspend take a fresh reading (every conversion sets the converter up again)
-void WINAPI BatteryPDDResume(void) { g_haveSample = FALSE; }
+// and start the USB controller again if it is there: a suspend may have stopped it
+void WINAPI BatteryPDDResume(void) { g_haveSample = FALSE; if (g_usbThere > 0) g_usbThere = 0; }
 
 void WINAPI BatteryPDDPowerHandler(BOOL bOff) { UNREFERENCED_PARAMETER(bOff); }
 
