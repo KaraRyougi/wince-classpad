@@ -53,7 +53,7 @@ static void GetSuspendStats(void)
     if (st.seconds == 0xFFFFFFFF) wsprintf(g_susp[0], TEXT("Suspend %u: length unknown, woke by %s"), st.suspends, st.wokeByAlarm ? TEXT("alarm") : TEXT("Clear"));
     else wsprintf(g_susp[0], TEXT("Suspend %u: %u s, woke by %s"), st.suspends, st.seconds, st.wokeByAlarm ? TEXT("alarm") : TEXT("Clear"));
     if (st.path == CLASSPAD_SUSPEND_PATH_CPUSLEEP) wsprintf(g_susp[1], TEXT("CPU sleep only (standby entries %u)"), st.entries);
-    else wsprintf(g_susp[1], TEXT("Standby entries %u, stray wake-ups %u"), st.entries, st.unexplained);
+    else wsprintf(g_susp[1], TEXT("Standby x%u, stray wakes %u, hw off %u"), st.entries, st.unexplained, st.hardwareOff);
     if (st.unexplained) {
         SnapLine(g_susp[2], TEXT("1:"), &st.first);
         SnapLine(g_susp[3], TEXT("n:"), &st.last);

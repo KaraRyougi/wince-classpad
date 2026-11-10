@@ -765,6 +765,37 @@ Battery 程序显示。RTC 启动时不再保留周期中断设置（PES = 0）�
 - LCD 断电 0x80038A9A 的面板深度待机、PHDR bit 5、0xA44C0020 bit 2；
 - KEYSC 中断优先级清零（表 3.1 的 5）。
 
+**照 Casio 的关机流程做硬件断电（2026-11-10）。** 工具：`tools/sh4trace.py`，一个小的
+SH-4 解释器，直接执行 NOR 转储里的 OS 例程并按顺序记录它对硬件的读写（读回值分别
+填全 0 和全 1 各跑一遍，合并出每次读改写的 AND / OR 掩码；LCD 口按 RS 区分命令和
+参数，0xDA 返回指定的面板 ID）。`tools/casio_poweroff_tables.py` 用它生成
+`SRC/INC/classpad_pwrseq.h`。跑出来的 Casio 流程（顶层 0x800810CC）：
+- 关机侧：0x800812C4 引脚表（26 次写：PULCR、MSELCRA/B、HIZCRA、PSELx、PACR..PVCR；
+  与开机侧 0x800812CE 只差 PULCR、PHCR、PJCR、PRCR 四处）；0x800813A0 ADC（含 PHDR
+  bit 4 置 1）；0x80081380 面板熄灭（0x51 = 0、DISPOFF、SLPIN）；RCR1 &= 0x0F、
+  RCR2 &= 0x0F；0x80099A96 停 TMU1；0x8006F7DA 把 IRQ1 设成优先级 0xC 并解除屏蔽
+  （待机的唤醒源之一，CE 不用）；然后 0x80020E4C：PFC 几步、LCD 断电 0x80038A9A
+  （新面板 B9 FF 52 98 / BD 00 / B1 51，老面板 B1 01，随后 PHDR bit 5 清零、
+  0xA44C0020 bit 2 清零）。
+- 开机侧：引脚表、ADC、0x8008138C（LCD 接口：片选时序 FEC10014/34、LCD 引脚、
+  MSTPCR2 bit 6、0xA44C0004/06/20）、面板冷启动 0x80038018：六个 0xFF、PADR bit 4
+  拉低、**PHDR bit 5 拉高**、5 ms、PADR bit 4 拉高、120 ms，再是整套寄存器初始化
+  （新面板 204 个码，老面板 162 个）。由此确认 PHDR bit 5 是面板电源、PADR bit 4 是
+  面板复位；casio-emu 把 0xA44C0020 标为显示时钟控制。256 个面板 ID 逐个跑过：序列
+  只分 0x16/0x52 与其他两种。亮度例程 0x80038280 另外处理（新面板 0x51；等级 0 还改
+  0xA4050138 bit 4 和 B2/DF 的末参数）。
+CE 这边（`power.c` 的 `HardwareOff` / `HardwareOn`，只在进了 R-standby 的路径上、
+且显示驱动经 `IOCTL_HAL_CLASSPAD_PANEL` 报过面板类型时做）：屏蔽全部 IRQ 引脚；
+按表设引脚（逐个先读后写，唤醒后倒序写回）；PFDR bit 7、0xA4050162 bit 2；SLPIN
+后等 120 ms 发深度待机命令，PHDR bit 5 清零，0xA44C0020 bit 2 清零；RCR1 &= 0x0F。
+唤醒后恢复引脚和 0xA44C0004/06，重放面板冷启动到命令 0x38 为止（不发 DISPON，0x51
+的亮度写 0），再恢复 0xA44C0020 和 IRQ 屏蔽；之后显示驱动照旧 SLPOUT、恢复亮度、
+重画、DISPON。与 Casio 不同的地方：IRQ1 不留作唤醒源；没有照做 ADC 那一步和
+PHDR bit 4；片选时序寄存器没有重写（现有镜像唤醒后 LCD 能用，说明它们保住了）。
+casio-emu：`dbt/emu-patch/add_classpad_lcdpower.py`（深度待机后帧为空白，必须先见到
+冷启动的寄存器初始化再 SLPOUT 才恢复；`HLE_CP_LCD_LOG=1` 打印命令流；补上
+0xA44C0006）。尚未在 VM 编译，模拟器和真机都未验证。
+
 SpreadCE（casio-emu，心跳采样每 2M 指令一个，`-DDBT_TRACE_BLOCKS` 把宿主 PC 映射回
 客户机块）：启动约 2.8 G 指令，敲三个数加回车（6 个键）约 1 G 指令且全程不空闲，
 点四个单元格的 41 秒里大半空闲。敲数阶段：间接调用/返回查表（`_dbt_lki_ts`）

@@ -24,6 +24,9 @@
 #include "classpad_lcd.h"
 #include "classpad_hc.h"
 #include "classpad_lcdrot.h"
+#include <winioctl.h>
+#include <pkfuncs.h>
+#include "classpad_pwrstat.h"
 
 #define DISP_PUSH_MS        50
 #define DISP_CONSOLE_ROWS   96              // rows the translator's console keeps (rt/lcdcon.c LINES * CELL_H)
@@ -197,6 +200,11 @@ ClasspadGPE::ClasspadGPE()
         RETAILMSG(1, (TEXT("CLASSPAD DDI: panel ID %04X, %s, first column %u\r\n"),
                       m_panelId, m_panelNew ? TEXT("newer panel") : TEXT("older panel"), m_col0));
         PanelInit();
+        {
+            // the OAL powers this panel down and back up around the standby (power.c)
+            DWORD kind = m_panelNew ? CLASSPAD_PANEL_NEW : CLASSPAD_PANEL_OLD;
+            KernelIoControl(IOCTL_HAL_CLASSPAD_PANEL, &kind, sizeof kind, NULL, 0, NULL);
+        }
     }
 
     InitializeCriticalSection(&m_cs);

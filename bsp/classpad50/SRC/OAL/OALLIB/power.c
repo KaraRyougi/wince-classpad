@@ -21,6 +21,8 @@
 #include "classpad_keysc.h"
 #include "classpad_power.h"
 #include "classpad_pwrstat.h"
+#include "classpad_lcd.h"
+#include "classpad_pwrseq.h"
 
 static ClasspadPowerState g_power;              // the CPU-sleep fallback (classpad_power.h)
 extern VOID ClasspadSleepUntilInterrupt(volatile unsigned *wake);
@@ -46,6 +48,149 @@ static void WakeSnapshot(CLASSPAD_WAKE_SNAPSHOT *s)
     s->cmcsr    = MMIO_R16(0xA44A0060);         //      CMCSR
     s->rwtcsr   = MMIO_R16(0xA4520004);         // RWDT: RWTCSR
     s->r64cnt   = MMIO_R8(RTC_R64CNT);
+}
+
+//------------------------------------------------------------------------------
+//  The hardware around the standby, the way Casio's OS does it (docs/08,
+//  2026-11-10; OS 02.01.7003 0x800810CC and 0x80020E4C). CE's suspend used
+//  to enter R-standby with every pin as it was while running and the panel
+//  only asleep. The OS, before its SLEEP:
+//    - sets up every port for power-off (0x800812C4: pull-ups, pin
+//      functions, port control registers: g_pinsOff);
+//    - clears the RTC's carry interrupt enable and periodic setting;
+//    - a few more pin steps (0x80020E66.., 0x80020E9E..: after the table
+//      above only PFDR bit 7 and 0xA4050162 bit 2 still change);
+//    - powers the panel down (0x80038A9A): deep standby, then PHDR bit 5 low
+//      (the panel's supply: the power-on raises it between the reset pulse's
+//      two edges) and 0xA44C0020 bit 2 off (the module the LCD interface
+//      set-up 0x8008138C starts).
+//  After the wake-up the OS writes its running pin set-up again, restarts
+//  that module and runs the panel's cold power-on (0x80038018: reset, power,
+//  the whole register set-up). Here every register is read before it is
+//  changed and written back afterwards, in reverse order, and the panel's
+//  power-on is replayed from classpad_pwrseq.h up to the point where the
+//  display driver's own resume takes over (SLPOUT again, its backlight
+//  level, the repaint, DISPON).
+//  One thing differs on purpose: the OS leaves IRQ1 unmasked as a wake-up
+//  source (0x8006F7DA); CE has no handler for it and would only go back to
+//  sleep, so all eight IRQ pins are masked for the standby.
+//  Only when the display driver has named the panel (IOCTL_HAL_CLASSPAD_PANEL):
+//  the tables are the fx-CP400's.
+//
+#define PORT_PADR       0xA4050120      // bit 4: the panel's reset line
+#define PORT_PFDR       0xA405012A
+#define PORT_PHDR       0xA405012E      // bit 5: the panel's supply
+#define PORT_X162       0xA4050162
+#define LCDIF_CR4       0xA44C0004      // the LCD interface's module (16-bit)
+#define LCDIF_CR6       0xA44C0006
+#define LCDIF_START     0xA44C0020      // bit 2
+#define INTC_INTMSK00   0xA4140044
+#define INTC_INTMSKCLR00 0xA4140064
+
+static DWORD g_panelKind = CLASSPAD_PANEL_NONE;
+static UINT32 g_pinSaved[sizeof g_pinsOff / sizeof g_pinsOff[0]];
+static struct {
+    UINT8 pfdr, phdr, x162, lcdStart, lcdCr6, intmsk;
+    UINT16 lcdCr4;
+} g_hw;
+
+BOOL OALIoCtlHalClasspadPanel(UINT32 code, VOID *in, UINT32 insize,
+    VOID *out, UINT32 outsize, UINT32 *returned)
+{
+    if (returned) *returned = 0;
+    if (!in || insize < sizeof(DWORD)) return FALSE;
+    g_panelKind = *(DWORD *)in;
+    RETAILMSG(1, (L"CLASSPAD POWER: panel kind %u from the display driver\r\n", g_panelKind));
+    return TRUE;
+}
+
+// Milliseconds on the RTC's 128 Hz counter: nothing else counts here
+// (interrupts are off, TMU0 is reset by the standby). Bounded in reads.
+static void WaitMs(UINT32 ms)
+{
+    UINT32 ticks = (ms * 128 + 999) / 1000 + 1, last = MMIO_R8(RTC_R64CNT) & 0x7F, now, n = 0, reads;
+    for (reads = 0; n < ticks && reads < 40000000; reads++) {
+        now = MMIO_R8(RTC_R64CNT) & 0x7F;
+        n += (now - last) & 0x7F;
+        last = now;
+    }
+}
+
+static UINT32 PinRead(UINT32 addr, UINT8 size)
+{
+    return size == 1 ? MMIO_R8(addr) : size == 2 ? MMIO_R16(addr) : MMIO_R32(addr);
+}
+static void PinWrite(UINT32 addr, UINT8 size, UINT32 v)
+{
+    if (size == 1) MMIO_W8(addr, v); else if (size == 2) MMIO_W16(addr, v); else MMIO_W32(addr, v);
+}
+
+static void LcdPlay(const UINT16 *s, UINT32 count)
+{
+    UINT32 i;
+    for (i = 0; i < count; i++) {
+        UINT16 c = s[i];
+        if (c == LCDSEQ_RESET_LO)       MMIO_W8(PORT_PADR, MMIO_R8(PORT_PADR) & ~0x10);
+        else if (c == LCDSEQ_POWER_ON)  MMIO_W8(PORT_PHDR, MMIO_R8(PORT_PHDR) | 0x20);
+        else if (c == LCDSEQ_RESET_HI)  MMIO_W8(PORT_PADR, MMIO_R8(PORT_PADR) | 0x10);
+        else if (c & LCDSEQ_DELAY)      WaitMs(c & 0x0FFF);
+        else if (c & LCDSEQ_CMD)        LcdCommand((UCHAR)c);
+        else                            LcdParam((UCHAR)c);
+    }
+}
+
+static BOOL HardwareOff(void)
+{
+    UINT32 i;
+    if (g_panelKind != CLASSPAD_PANEL_NEW && g_panelKind != CLASSPAD_PANEL_OLD) return FALSE;
+
+    // the IRQ pins: none of them wakes CE
+    g_hw.intmsk = MMIO_R8(INTC_INTMSK00);
+    MMIO_W8(INTC_INTMSK00, 0xFF);
+
+    // the ports
+    for (i = 0; i < sizeof g_pinsOff / sizeof g_pinsOff[0]; i++) {
+        const CLASSPAD_PIN_OP *op = &g_pinsOff[i];
+        g_pinSaved[i] = PinRead(op->addr, op->size);
+        PinWrite(op->addr, op->size, (g_pinSaved[i] & op->andMask) | op->orValue);
+    }
+    g_hw.pfdr = MMIO_R8(PORT_PFDR); g_hw.x162 = MMIO_R8(PORT_X162);
+    MMIO_W8(PORT_PFDR, g_hw.pfdr | 0x80);
+    MMIO_W8(PORT_X162, g_hw.x162 | 0x04);
+
+    // the panel: the driver's power handler has sent backlight 0, DISPOFF
+    // and SLPIN; the OS waits 100 (120) ms after SLPIN before the deep standby
+    g_hw.lcdCr4 = MMIO_R16(LCDIF_CR4); g_hw.lcdCr6 = MMIO_R8(LCDIF_CR6); g_hw.lcdStart = MMIO_R8(LCDIF_START);
+    g_hw.phdr = MMIO_R8(PORT_PHDR);
+    WaitMs(120);
+    if (g_panelKind == CLASSPAD_PANEL_NEW) LcdPlay(g_lcdOffNew, sizeof g_lcdOffNew / sizeof g_lcdOffNew[0]);
+    else                                   LcdPlay(g_lcdOffOld, sizeof g_lcdOffOld / sizeof g_lcdOffOld[0]);
+    MMIO_W8(PORT_PHDR, MMIO_R8(PORT_PHDR) & ~0x20);
+    MMIO_W8(LCDIF_START, MMIO_R8(LCDIF_START) & ~0x04);
+
+    // the RTC: no carry interrupt, flags clear; the alarm enable stays
+    MMIO_W8(RTC_RCR1, MMIO_R8(RTC_RCR1) & 0x0F);
+    return TRUE;
+}
+
+static void HardwareOn(void)
+{
+    UINT32 i;
+    MMIO_W8(PORT_X162, g_hw.x162);
+    MMIO_W8(PORT_PFDR, g_hw.pfdr);
+    for (i = sizeof g_pinsOff / sizeof g_pinsOff[0]; i-- > 0; )
+        PinWrite(g_pinsOff[i].addr, g_pinsOff[i].size, g_pinSaved[i]);
+
+    // the LCD interface's module as it was (its clock, MSTPCR2, is back: StandbyRestore), then the panel from cold
+    MMIO_W16(LCDIF_CR4, g_hw.lcdCr4);
+    MMIO_W8(LCDIF_CR6, g_hw.lcdCr6);
+    if (g_panelKind == CLASSPAD_PANEL_NEW) LcdPlay(g_lcdOnNew, sizeof g_lcdOnNew / sizeof g_lcdOnNew[0]);
+    else                                   LcdPlay(g_lcdOnOld, sizeof g_lcdOnOld / sizeof g_lcdOnOld[0]);
+    MMIO_W8(LCDIF_START, g_hw.lcdStart);
+    if (!(g_hw.phdr & 0x20)) MMIO_W8(PORT_PHDR, MMIO_R8(PORT_PHDR) & ~0x20);   // was off before: leave it as it was
+
+    MMIO_W8(INTC_INTMSK00, 0xFF);
+    MMIO_W8(INTC_INTMSKCLR00, (UINT8)~g_hw.intmsk);
 }
 
 BOOL OALIoCtlHalClasspadSuspendStats(UINT32 code, VOID *in, UINT32 insize,
@@ -199,12 +344,15 @@ VOID OEMPowerOff(void)
     ClasspadRtcSuspend();
     g_stats.suspends++;
     g_stats.path = CLASSPAD_SUSPEND_PATH_NONE;
-    g_stats.entries = g_stats.unexplained = g_stats.wokeByAlarm = 0;
+    g_stats.entries = g_stats.unexplained = g_stats.wokeByAlarm = g_stats.hardwareOff = 0;
     g_stats.seconds = 0xFFFFFFFF;
 
     reason = STANDBY_NOT_ENTERED;
     if (ClasspadCanTrap()) {
+        BOOL hw;
         StandbySave();
+        hw = HardwareOff();
+        g_stats.hardwareOff = hw;
         do {
             reason = RStandbyOnce(key);
             if (reason != STANDBY_NOT_ENTERED) {
@@ -217,6 +365,7 @@ VOID OEMPowerOff(void)
             }
         } while (reason == 0);
         StandbyRestore();
+        if (hw) HardwareOn();
     }
     if (reason == STANDBY_NOT_ENTERED) {
         g_stats.path = CLASSPAD_SUSPEND_PATH_CPUSLEEP;

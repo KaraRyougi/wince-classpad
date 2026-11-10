@@ -18,6 +18,15 @@
 #define IOCTL_HAL_CLASSPAD_SUSPEND_STATS \
     CTL_CODE(FILE_DEVICE_HAL, 2100, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
+// The display driver tells the OAL which panel it found, so that
+// OEMPowerOff can power it down and bring it back the way Casio's OS does
+// (OAL power.c, classpad_pwrseq.h). in: one DWORD, CLASSPAD_PANEL_*.
+#define IOCTL_HAL_CLASSPAD_PANEL \
+    CTL_CODE(FILE_DEVICE_HAL, 2101, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define CLASSPAD_PANEL_NONE     0       // not an fx-CP400 panel: the OAL leaves pins and panel alone
+#define CLASSPAD_PANEL_NEW      1       // ID 0x16 / 0x52
+#define CLASSPAD_PANEL_OLD      2       // any other ID
+
 #define CLASSPAD_SUSPEND_PATH_NONE      0       // no suspend yet
 #define CLASSPAD_SUSPEND_PATH_RSTANDBY  1       // the core was powered off
 #define CLASSPAD_SUSPEND_PATH_CPUSLEEP  2       // the fallback: CPU sleep, clocks and SDRAM running
@@ -39,6 +48,7 @@ typedef struct {
     DWORD entries;              // R-standby entries
     DWORD unexplained;          // wake-ups without an accepted reason
     DWORD wokeByAlarm;          // 1 = the RTC alarm ended it, 0 = Clear/ON
+    DWORD hardwareOff;          // 1 = pins set for power-off and the panel powered down (Casio's sequence), 0 = not done
     CLASSPAD_WAKE_SNAPSHOT first, last;     // at the first and the last unexplained wake-up
 } CLASSPAD_SUSPEND_STATS;
 
