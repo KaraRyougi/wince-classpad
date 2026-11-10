@@ -222,13 +222,29 @@ static struct {
     int step[2][3];                 /* job step of erase/write/verify per file, -1 */
     int file;                       /* 0 NK, 1 EXT: the file being written */
     int phase, record, nrecords;
-    u32 units_done, units_total;    /* the whole job, for the second bar */
+    u32 units_done, units_total;    /* the whole job, for the second bar, in KiB-equivalents */
     u32 phase_units, phase_total;   /* units of the phase running */
     u32 t0;
+    u32 shown_step, shown_all;      /* what the bars show: never back, within a step */
     int full;                       /* redraw everything next time */
 } J;
 
-#define ERASE_UNITS 0x10000u        /* a sector's erase weighs about 64 KiB of programming */
+/* The second bar weighs the job's parts by how long they take, in units of
+ * 1 KiB programmed: a 128 KiB sector erase weighs ERASE_UNITS, a KiB written
+ * 1, a KiB compared VERIFY_DIV-th of that. Everything is counted in KiB so
+ * that "x 1000" for the per-mille stays far below 2^32 (counting in bytes it
+ * overflowed past 4.29 MB, which is what scrambled the bars). */
+#define ERASE_UNITS 64u
+#define VERIFY_DIV  4u
+#define KIB(b)      (((b) + 1023u) >> 10)
+
+static u32 permille(u32 done, u32 total)
+{
+    if (!total) return 1000;
+    if (done >= total) return 1000;
+    while (total > 4000000u) { total >>= 1; done >>= 1; }   /* keeps done * 1000 in range */
+    return done * 1000u / total;
+}
 
 static void mb(char *out, unsigned cap, u32 bytes)
 {
@@ -237,19 +253,21 @@ static void mb(char *out, unsigned cap, u32 bytes)
 }
 
 #define DAY_TICKS (86400u * 128u)            /* rtc_ticks() counts 1/128 s from midnight */
-static int seconds_left(u32 permille)
+static int seconds_left(u32 pm)
 {
     u32 now = rtc_ticks(), el = (now + DAY_TICKS - J.t0) % DAY_TICKS;
-    if (permille < 30 || el < 2 * 128) return -1;
-    return (int)((el * (1000 - permille) / permille + 127) / 128);
+    if (pm < 30 || el < 2 * 128) return -1;
+    return (int)(((el / 128u) * (1000u - pm) + pm - 1) / pm);
 }
 
 static void redraw(const char *detail, u32 phase_done, u32 phase_total)
 {
-    u32 step = phase_total ? phase_done * 1000u / phase_total : 0;
-    u32 all = J.units_total ? (J.units_done + J.phase_units) * 1000u / J.units_total : 1000;
-    if (step > 1000) step = 1000;
-    if (all > 1000) all = 1000;
+    u32 step = permille(phase_done, phase_total);
+    u32 all = permille(J.units_done + J.phase_units, J.units_total);
+    if (J.full) J.shown_step = 0;                   /* a new step starts its bar again */
+    if (step < J.shown_step) step = J.shown_step;
+    if (all < J.shown_all) all = J.shown_all;
+    J.shown_step = step; J.shown_all = all;
     ui_flash(&J.job, J.full, detail, (int)step, (int)all, seconds_left(all));
     J.full = 0;
     show();
@@ -274,9 +292,9 @@ static void on_progress(int what, u32 done, u32 total, u32 addr)
         set_state(J.step[J.file][0], UI_DONE);
         set_state(J.step[J.file][1], UI_NOW);
         J.units_done += J.phase_total;
-        J.phase = PH_WRITE; J.phase_total = total; J.full = 1;
+        J.phase = PH_WRITE; J.phase_total = KIB(total); J.full = 1;
     }
-    J.phase_units = what == NKP_COMPARE ? done / 4 : done;
+    J.phase_units = what == NKP_COMPARE ? KIB(done) / VERIFY_DIV : KIB(done);
     mb(a, sizeof a, done); mb(b, sizeof b, total);
     if (what == NKP_COMPARE) hhk_format(d, sizeof d, "Comparing with flash " GFX_MIDDOT " %s of %s", a, b);
     else if (J.nrecords) hhk_format(d, sizeof d, "Record %u of %u " GFX_MIDDOT " %s of %s", (u32)J.record, (u32)J.nrecords, a, b);
@@ -327,7 +345,7 @@ static int plan(int action)
         else hhk_format(l, sizeof l, "Write %s", file_name[i]);
         J.step[i][1] = add_step(l, UI_TODO);
         hhk_format(l, sizeof l, "Verify %s", file_name[i]);                J.step[i][2] = add_step(l, UI_TODO);
-        J.units_total += info.sectors * ERASE_UNITS + info.bytes + info.bytes / 4;
+        J.units_total += info.sectors * ERASE_UNITS + KIB(info.bytes) + KIB(info.bytes) / VERIFY_DIV;
     }
     add_step("Start Windows CE", UI_TODO);
     return 0;
@@ -350,13 +368,13 @@ static int write_file(int i)
     if (r) { set_state(J.step[i][J.phase == PH_ERASE ? 0 : 1], UI_FAILED); J.full = 1; redraw(reason(), 0, 1); return J.phase + 1; }
     set_state(J.step[i][1], UI_DONE);
     set_state(J.step[i][2], UI_NOW);
-    J.units_done += info.bytes; J.phase = PH_VERIFY; J.phase_units = 0; J.phase_total = info.bytes / 4; J.full = 1;
+    J.units_done += KIB(info.bytes); J.phase = PH_VERIFY; J.phase_units = 0; J.phase_total = KIB(info.bytes) / VERIFY_DIV; J.full = 1;
     J.nrecords = 0;
     if (nkflash_open(&nk_windows[win_of[i]]) != NKF_READY) r = -1;
     else { r = nkflash_compare(); nkflash_close(); }
     if (r != 1) { set_state(J.step[i][2], UI_FAILED); J.full = 1; redraw("What was written does not match the file", 0, 1); return PH_VERIFY + 1; }
     set_state(J.step[i][2], UI_DONE);
-    J.units_done += info.bytes / 4; J.phase_units = 0;
+    J.units_done += KIB(info.bytes) / VERIFY_DIV; J.phase_units = 0;
     return 0;
 }
 
