@@ -16,8 +16,7 @@
 //    "Type"                 dword 0 alkaline (default), 1 Ni-MH
 //    "MilliVoltsPerCount"   dword, default 10
 //  The level latches like Casio's: it only gets worse until the next boot.
-//  Not verified on hardware: the divider scale, and whether the A/D module
-//  needs more than its module-stop bit cleared after Casio's OS hands over.
+//  Not verified on hardware: the divider scale.
 //------------------------------------------------------------------------------
 #include <windows.h>
 #include <battimpl.h>
@@ -63,31 +62,52 @@ static void ReadConfig(void)
     g_configTick = GetTickCount(); g_haveConfig = TRUE;
 }
 
-// The A/D set-up Casio's OS makes at boot (0x800813CA), with the module clock on
-static void AdcInit(void)
+static void WriteDiag(LPCTSTR text)
 {
-    MMIO_W32(MSTPCR2, MMIO_R32(MSTPCR2) & ~MSTPCR2_ADC);
-    MMIO_W16(ADC_ADCCSR, MMIO_R16(ADC_ADCCSR) & 0xDFFF);
-    MMIO_W16(ADC_ADCUST, 0);
-    MMIO_W16(ADC_ADCSR, ADCSR_SETUP);
-    MMIO_W16(ADC_ADCUST, 0x8000);
-    MMIO_W16(ADC_ADCCSR, 0x01CF);
+    HKEY key; DWORD disp;
+    if (RegCreateKeyEx(HKEY_LOCAL_MACHINE, BATT_REG_KEY, 0, NULL, 0, 0, NULL, &key, &disp) == ERROR_SUCCESS) {
+        RegSetValueEx(key, TEXT("Diag"), 0, REG_SZ, (const BYTE *)text, (lstrlen(text) + 1) * sizeof(TCHAR));
+        RegCloseKey(key);
+    }
 }
 
-// One single conversion of AN2: the 10-bit result, or -1 on a timeout
+// One single conversion of AN2: the 10-bit result, or -1 on a timeout.
+// The register sequence is the one Casio's battery read makes before every
+// conversion (OS 02.01.7003, 0x8002A710 then 0x8002A6CC): ADCCSR bit 13
+// off, ADCUST = 0, ADCSR = 0x42, then start. The first version of this
+// driver made the OS's boot-time set-up instead (0x800813CA: ADCUST = 0x8000,
+// ADCCSR = 0x1CF, which belongs to the OS's other, multi-channel use of the
+// converter) and never saw a conversion end on the calculator (2026-11-10),
+// though casio-emu, which models only ADCSR, did. Casio also sets ADIE and
+// waits for the interrupt; this polls ADF instead and leaves ADIE off.
+// What the registers held goes to the registry value "Diag" (the Battery
+// program shows it): there is no debug output to read on the device.
 static int AdcConvert(void)
 {
-    UINT16 csr;
+    UINT16 csr0, csr1 = 0, csr2;
     int i, raw = -1;
+    TCHAR diag[96];
     MMIO_W32(MSTPCR2, MMIO_R32(MSTPCR2) & ~MSTPCR2_ADC);
-    csr = (UINT16)((MMIO_R16(ADC_ADCSR) & ~(ADCSR_ADIE | ADCSR_ADF | 0x0037)) | (ADCSR_SETUP & 0x0037));
-    MMIO_W16(ADC_ADCSR, csr | ADCSR_ADST);
+    csr0 = MMIO_R16(ADC_ADCSR);
+    MMIO_W16(ADC_ADCCSR, MMIO_R16(ADC_ADCCSR) & 0xDFFF);
+    MMIO_W16(ADC_ADCUST, 0);
+    MMIO_W16(ADC_ADCSR, MMIO_R16(ADC_ADCSR) & ~ADCSR_ADST);
+    MMIO_W16(ADC_ADCSR, ADCSR_SETUP);
+    MMIO_W16(ADC_ADCSR, MMIO_R16(ADC_ADCSR) | ADCSR_ADST);
     for (i = 0; i < 20; i++) {              // a conversion takes well under a millisecond
-        if (MMIO_R16(ADC_ADCSR) & ADCSR_ADF) { raw = MMIO_R16(ADC_ADDRC) >> 6; break; }
+        csr1 = MMIO_R16(ADC_ADCSR);
+        if (csr1 & ADCSR_ADF) { raw = MMIO_R16(ADC_ADDRC) >> 6; break; }
         Sleep(1);
     }
-    csr = MMIO_R16(ADC_ADCSR);              // ADF clears by reading it set, then writing 0
-    MMIO_W16(ADC_ADCSR, csr & ~(ADCSR_ADF | ADCSR_ADST | ADCSR_ADIE));
+    csr2 = MMIO_R16(ADC_ADCSR);             // ADF clears by reading it set, then writing 0
+    MMIO_W16(ADC_ADCSR, csr2 & ~(ADCSR_ADF | ADCSR_ADST | ADCSR_ADIE));
+    if (raw < 0 || !g_haveSample) {
+        wsprintf(diag, TEXT("%s csr %04X>%04X>%04X ccsr %04X cust %04X mstp %08X c %04X"),
+                 raw < 0 ? TEXT("timeout") : TEXT("ok"), csr0, csr1, csr2,
+                 MMIO_R16(ADC_ADCCSR), MMIO_R16(ADC_ADCUST), MMIO_R32(MSTPCR2), MMIO_R16(ADC_ADDRC));
+        WriteDiag(diag);
+        RETAILMSG(1, (TEXT("CLASSPAD BATTERY: %s\r\n"), diag));
+    }
     return raw;
 }
 
@@ -106,7 +126,6 @@ static BOOL Sample(void)
 BOOL WINAPI BatteryPDDInitialize(LPCTSTR pszRegistryContext)
 {
     UNREFERENCED_PARAMETER(pszRegistryContext);
-    AdcInit();
     ReadConfig();
     RETAILMSG(1, (TEXT("CLASSPAD BATTERY: A/D channel 2, %s curve, %u mV per count\r\n"),
                   g_type == CLASSPAD_BATT_NIMH ? TEXT("Ni-MH") : TEXT("alkaline"), g_mvPerCount));
@@ -115,8 +134,8 @@ BOOL WINAPI BatteryPDDInitialize(LPCTSTR pszRegistryContext)
 
 void WINAPI BatteryPDDDeinitialize(void) {}
 
-// After a suspend the conversion set-up may be gone (R-standby powers the core off)
-void WINAPI BatteryPDDResume(void) { AdcInit(); g_haveSample = FALSE; }
+// After a suspend take a fresh reading (every conversion sets the converter up again)
+void WINAPI BatteryPDDResume(void) { g_haveSample = FALSE; }
 
 void WINAPI BatteryPDDPowerHandler(BOOL bOff) { UNREFERENCED_PARAMETER(bOff); }
 

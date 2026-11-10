@@ -10,7 +10,7 @@
 #define ID_NIMH     101
 #define ID_CLOSE    110
 
-static TCHAR g_line[3][96];
+static TCHAR g_line[3][96], g_diag[128];
 
 static DWORD GetType(void)
 {
@@ -42,6 +42,16 @@ static void Refresh(HWND w)
         lstrcpy(g_line[1], TEXT("No reading from the battery driver"));
         g_line[2][0] = 0;
     }
+    // the driver's note on its first conversion (or its last failed one)
+    {
+        HKEY key; DWORD type, size = sizeof g_diag;
+        g_diag[0] = 0;
+        if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, BATT_REG_KEY, 0, 0, &key) == ERROR_SUCCESS) {
+            if (RegQueryValueEx(key, TEXT("Diag"), NULL, &type, (LPBYTE)g_diag, &size) != ERROR_SUCCESS || type != REG_SZ) g_diag[0] = 0;
+            g_diag[127] = 0;
+            RegCloseKey(key);
+        }
+    }
     InvalidateRect(w, NULL, TRUE);
 }
 static LRESULT CALLBACK WindowProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
@@ -66,6 +76,7 @@ static LRESULT CALLBACK WindowProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         FillRect(dc, &r, (HBRUSH)GetStockObject(WHITE_BRUSH));
         SetBkMode(dc, TRANSPARENT);
         for (i = 0; i < 3; i++) ExtTextOut(dc, 12, 16 + i * 24, 0, NULL, g_line[i], lstrlen(g_line[i]), NULL);
+        { RECT d = { 6, 244, r.right - 6, r.bottom - 2 }; DrawText(dc, g_diag, -1, &d, DT_LEFT | DT_WORDBREAK); }
         EndPaint(w, &ps);
         return 0;
     }
@@ -79,7 +90,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPTSTR, int)
     wc.lpfnWndProc = WindowProc; wc.hInstance = inst; wc.lpszClassName = TEXT("ClasspadBattery");
     RegisterClass(&wc);
     HWND w = CreateWindow(wc.lpszClassName, TEXT("Battery"), WS_VISIBLE | WS_CAPTION | WS_SYSMENU, 0, 0,
-                          GetSystemMetrics(SM_CXSCREEN), 290, NULL, NULL, inst, NULL);
+                          GetSystemMetrics(SM_CXSCREEN), 340, NULL, NULL, inst, NULL);
     if (!w) return 1;
     SetForegroundWindow(w);
     MSG m; while (GetMessage(&m, NULL, 0, 0)) { TranslateMessage(&m); DispatchMessage(&m); }
