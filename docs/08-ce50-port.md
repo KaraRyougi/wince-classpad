@@ -130,10 +130,11 @@ Frequency`、`curridlelow/high`、`idleconv`、`dwNKDrWatsonSize`。
 - SH3 二进制的 4 KiB 对齐问题在 CE 5.0 同样存在（页 4096），pe4k 照旧。
 - SpreadCE 2.05（Pocket PC SH3 英文版，1.5 MB，/FIXED，无 .reloc）放在 EXT：
   `tools/sh3prep.py` 用 `pe4k.reconstruct_relocs_pdata` 从 .pdata、literal pool
-  和 jsr/jmp 数据流重建 25549 个 fixup（人工复核，SHA-256 固定在
-  `sh3prep.RELOC_PINS`），再对齐、改 SH3CRT 导入（SH3CRT 新增 `_nextafter`）。
-  处理好的 exe 只在 VM 的 `FILES\spreadce`，见 `FILES/spreadce/README.md`。
-  还没在模拟器里跑过。
+  和 jsr/jmp 数据流（含沿控制流追踪的叶函数）重建 25556 个 fixup（人工复核，
+  SHA-256 固定在 `sh3prep.RELOC_PINS`），再对齐、改 SH3CRT 导入（SH3CRT 新增
+  `_nextafter`；EXE 的 SH3CRT IAT 放在 `.data` 末尾，因为 romimage 会把 EXE
+  新加的可写节变成只读）。处理好的 exe 只在 VM 的 `FILES\spreadce`，见
+  `FILES/spreadce/README.md`。模拟器里已能启动、计算整数公式。
 
 ## 六、翻译器
 

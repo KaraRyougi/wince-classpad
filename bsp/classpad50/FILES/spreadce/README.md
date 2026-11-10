@@ -30,12 +30,18 @@ rest of the BSP).
 `SpreadCE.exe` is linked /FIXED at 0x10000 with 1 KiB sections and no
 relocations, so neither romimage (4 KiB XIP sections only) nor a section
 move can take it as it is. `pe4k.reconstruct_relocs_pdata` rebuilds the
-HIGHLOW fixups (25,549) from the code's own structure, since in a 1.5 MB
+HIGHLOW fixups (25,556) from the code's own structure, since in a 1.5 MB
 image an own address is also a possible instruction pair or integer:
 
 - in `.text` only literal-pool words count: the targets of the
-  `mov.l @(disp,PC)` instructions decoded from the 2,377 `.pdata` functions
-  and the 264 import thunks;
+  `mov.l @(disp,PC)` instructions decoded from the 2,377 `.pdata` functions,
+  the 264 import thunks and the leaf functions (no `.pdata` entry), traced
+  along their control flow from every call, `bsr` and code pointer that
+  lands outside the `.pdata` functions. Without the leaf functions (the
+  first version) 7 pool pointers to `.data` stayed unmoved, among them the
+  one-instruction "is this the list separator / decimal point" helpers the
+  number parser uses, so `0.5` was taken for text and `=0.5` was a formula
+  error (found on the emulator, 2026-11-10);
 - a word into `.rdata`/`.data` is an address; a word into `.text` only when
   the target is a code entry: a `.pdata` function start, a thunk, a
   register target that reaches `jsr`/`jmp` (far branches inside a function),
@@ -70,8 +76,12 @@ imports while building and finds an rva only inside a section's raw data.
 
 ## Known gaps
 
-- The first two runs (2026-11-10) failed to load (the IAT above); the EXE
-  with its IAT in `.data` is not run yet.
+- Runs on the emulator (2026-11-10): it starts, `=1/3` and `=5/10` compute
+  and print (0.333333, 0.5). The build with the leaf-function fixups (decimal
+  numbers) is not run yet.
+- `_jn` and `_yn` (Bessel functions) take a double but stay with the SH-4
+  coredll (SH3CRT has no wrapper for them): BESSELJ/BESSELY give wrong
+  results.
 - `swprintf` with `%-.*G` / `%.*f` (the General and fixed number formats)
   stays with the SH-4 coredll. SHx `va_arg` reads a double as two words from
   memory with 4-byte steps (`stdlib.h`, `_M_SH`), which is how the SH-3

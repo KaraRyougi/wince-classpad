@@ -419,9 +419,11 @@ def reconstruct_relocs_pdata(pe, m, rf, addresses=(), constants=()):
     an address:
 
       - .text: only literal-pool words, the targets of the mov.l @(disp,PC)
-        instructions in the .pdata functions and in the import thunks (the
-        decoding skips halfwords that are themselves pool data, iterated to
-        a fixed point); .pdata: the function-start word of every entry, not
+        instructions in the .pdata functions, the import thunks and the
+        leaf functions (no .pdata entry: traced along their control flow
+        from every code entry outside the .pdata functions, bsr targets
+        included); the decoding skips halfwords that are themselves pool
+        data, iterated to a fixed point; .pdata: the function-start word of every entry, not
         the prologue/length word; .rdata, .data: every aligned word that is
         not an import/export/resource/debug RVA field. .rsrc: nothing.
       - a word pointing into .rdata or .data is an address;
@@ -474,35 +476,48 @@ def reconstruct_relocs_pdata(pe, m, rf, addresses=(), constants=()):
 
     thunks = [a for a in range(tlo & ~3, thi - 11, 4)
               if m[a:a + 8] == THUNK and not in_func(a)]
-    code = funcs + [(a, 8) for a in thunks]
+    thunk_set = set(thunks)
+    thunk_hw = {a + i for a in thunks for i in range(0, 12, 2)}
 
-    data_hw = set()
-    for _ in range(16):
-        pool, hw = {}, set()
-        for s, n in code:
-            for a in range(s, s + n, 2):
-                if a in data_hw:
-                    continue
+    def leaf_body(entry, data_hw):
+        """Halfwords of the leaf function at entry (no .pdata entry), by
+        following its control flow: conditional branches both ways, bra/rts/
+        jmp/braf end a path after the delay slot; never into a .pdata
+        function, a thunk or pool data."""
+        seen, todo = set(), [entry]
+        while todo:
+            a = todo.pop()
+            while tlo <= a < thi and a not in seen and a not in data_hw and not in_func(a) \
+                    and a not in thunk_hw:
+                seen.add(a)
                 op = u16(a)
-                if op >> 12 == 0xD:                    # mov.l @(disp,PC),Rn
-                    t = (a & ~3) + 4 + (op & 0xFF) * 4
-                    pool.setdefault(t, []).append(a)
-                    hw |= {t, t + 2}
-                elif op >> 12 == 0x9:                  # mov.w @(disp,PC),Rn
-                    hw.add(a + 4 + (op & 0xFF) * 2)
-        if hw == data_hw:
-            break
-        data_hw = hw
-    else:
-        raise PEError("reconstruct_relocs: pool decoding does not settle")
+                hi = op >> 12
+                if hi == 0x8 and (op >> 8) & 15 in (0x9, 0xB, 0xD, 0xF):   # bt, bf, bt/s, bf/s
+                    d = op & 0xFF
+                    todo.append(a + 4 + (d - 256 if d & 0x80 else d) * 2)
+                    if (op >> 8) & 15 in (0xD, 0xF):
+                        seen.add(a + 2)
+                        a += 4
+                        continue
+                elif hi == 0xA or op in (0x000B, 0x002B) or (op & 0xF0FF) in (0x402B, 0x0023):
+                    if hi == 0xA:                      # bra
+                        d = op & 0xFFF
+                        todo.append(a + 4 + (d - 4096 if d & 0x800 else d) * 2)
+                    seen.add(a + 2)                    # delay slot, then the path ends
+                    break
+                a += 2
+        return seen
 
-    entries = fstarts | set(thunks)
-    for t, ins in pool.items():
-        v = u32(t) - lo_img
-        if tlo <= v < thi and v not in entries and any(_called(m, i) for i in ins):
-            entries.add(v)
+    def bsr_targets(addrs):
+        out = set()
+        for a in addrs:
+            op = u16(a)
+            if op >> 12 == 0xB:                        # bsr
+                d = op & 0xFFF
+                out.add(a + 4 + (d - 4096 if d & 0x800 else d) * 2)
+        return out
 
-    def boundary(r):
+    def boundary(r, pool):
         if r & 1 or in_func(r):
             return False
         p = r
@@ -515,6 +530,55 @@ def reconstruct_relocs_pdata(pe, m, rf, addresses=(), constants=()):
                 return False
             p -= 2
         return False
+
+    # Pool decoding over the .pdata functions, the thunks and the leaf
+    # functions (no .pdata entry, so their literal pools are found only by
+    # tracing them from a call: SpreadCE's one-line "is this character the
+    # list separator" helpers load the separator's address from a pool),
+    # iterated to a fixed point: halfwords that are pool data are skipped,
+    # and new pools and calls reveal new leaf functions.
+    data_words = [a for s in pe.secs if s["name"] in (".rdata", ".data")
+                  for a in range(s["va"], s["va"] + max(s["vs"], s["rs"]) - 3, 4) if a not in rf]
+    data_hw, leaves, leaf_hw = set(), set(), set()
+    for _ in range(32):
+        code_hw = set()
+        for s, n in funcs:
+            code_hw.update(range(s, s + n, 2))
+        for a in thunks:
+            code_hw.update(range(a, a + 8, 2))
+        code_hw |= leaf_hw
+        pool, hw = {}, set()
+        for a in code_hw:
+            if a in data_hw:
+                continue
+            op = u16(a)
+            if op >> 12 == 0xD:                        # mov.l @(disp,PC),Rn
+                t = (a & ~3) + 4 + (op & 0xFF) * 4
+                pool.setdefault(t, []).append(a)
+                hw |= {t, t + 2}
+            elif op >> 12 == 0x9:                      # mov.w @(disp,PC),Rn
+                hw.add(a + 4 + (op & 0xFF) * 2)
+        entries = fstarts | thunk_set
+        for t, ins in pool.items():
+            v = u32(t) - lo_img
+            if tlo <= v < thi and v not in entries and any(_called(m, i) for i in ins):
+                entries.add(v)
+        targets = entries | bsr_targets(a for a in code_hw if a not in hw)
+        for a in data_words:                           # function pointers in .rdata/.data
+            r = u32(a) - lo_img
+            if tlo <= r < thi and boundary(r, pool):
+                targets.add(r)
+        new = {r for r in targets
+               if not r & 1 and tlo <= r < thi and not in_func(r) and r not in thunk_hw}
+        if hw == data_hw and new <= leaves:
+            break
+        data_hw = hw
+        leaves |= new
+        leaf_hw = set()
+        for r in leaves:
+            leaf_hw |= leaf_body(r, data_hw)
+    else:
+        raise PEError("reconstruct_relocs: pool decoding does not settle")
 
     def seg(r):
         for s in pe.secs:
@@ -541,7 +605,7 @@ def reconstruct_relocs_pdata(pe, m, rf, addresses=(), constants=()):
         elif tgt == ".text":
             if r in entries:
                 why = "address"
-            elif boundary(r):
+            elif boundary(r, pool):
                 why = "address"
             else:
                 why = "number"

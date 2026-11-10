@@ -39,10 +39,12 @@ RELOC_PINS = {
     # sprep3en.zip): the .pdata scan (pe4k.reconstruct_relocs_pdata). 14977
     # literal-pool addresses into .text (7170 .pdata function starts, 7032 of
     # the 264 import thunks, the rest leaf functions and far-jump targets),
-    # 3452 pool and 3496 .rdata/.data pointers to data, 1247 function
-    # pointers in .rdata/.data tables, 2377 .pdata starts. The two numbers:
-    # 0x00150013 and 0x00150075, odd, in tables of 16-bit pairs in .rdata.
-    "spreadce.exe": ("273d94296644ee611fa6cd78eecbe99d753bfb15b4a476f7fe01f87d67f3feac", 25549,
+    # 3459 pool and 3496 .rdata/.data pointers to data (7 of the pool words
+    # in leaf functions' pools: the list separator and decimal point
+    # helpers, a getter of four globals), 1247 function pointers in
+    # .rdata/.data tables, 2377 .pdata starts. The two numbers: 0x00150013
+    # and 0x00150075, odd, in tables of 16-bit pairs in .rdata.
+    "spreadce.exe": ("273d94296644ee611fa6cd78eecbe99d753bfb15b4a476f7fe01f87d67f3feac", 25556,
                      (0x13F53C, 0x145A84)),
 }
 
