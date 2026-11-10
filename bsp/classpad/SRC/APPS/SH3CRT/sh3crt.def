@@ -59,6 +59,7 @@ EXPORTS
     pow=sh3_pow
     fmod=sh3_fmod
     _hypot=sh3__hypot
+    _nextafter=sh3__nextafter
     atof=sh3_atof
     wcstod=sh3_wcstod
     _isnan=sh3__isnan

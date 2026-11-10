@@ -132,6 +132,17 @@ FILES
    workbook_keybswitch.2BP  $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\workbook_keybswitch.2BP   EXT  S
    mathxpander.lnk          $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\mathxpander.lnk           EXT  S
 
+; SpreadCE 2.05 (Bye Design, Pocket PC SH3, English; shareware) in the EXT
+; region: one /FIXED EXE, prepared on the Mac by tools/sh3prep.py (relocations
+; rebuilt from its .pdata and literal pools, 4 KiB sections, SH-3 floating
+; point through SH3CRT.dll; FILES\spreadce\README.md) and copied into
+; FILES\spreadce of the VM tree; the binary is not in the repository.
+; platform.dat puts the link in the Start menu.
+MODULES
+   SpreadCE.exe             $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\spreadce\SpreadCE.exe            EXT  P
+FILES
+   spreadce.lnk             $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\spreadce\spreadce.lnk            EXT  S
+
 ; Windows CE's own help pages (Start > Help runs \Windows\peghelp.exe file:wince.htm).
 ; Microsoft's bib lists them only with its IE-based help viewer
 ; (WCESHELLFE_MODULES_PEGHELP || IE_MODULES_HTMLHELP), which this image

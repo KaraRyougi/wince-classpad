@@ -5,6 +5,9 @@
 ; that region, so with no EXT region flashed there is nothing to copy.
 Directory("\Windows\Programs"):-File("Math Xpander.lnk", "\Windows\mathxpander.lnk")
 
+; SpreadCE from the EXT region (FILES\spreadce), like Math Xpander
+Directory("\Windows\Programs"):-File("SpreadCE.lnk", "\Windows\spreadce.lnk")
+
 ; Plotter-Z (SRC\APPS\PLOTTERZ, in NK)
 Directory("\Windows\Programs"):-File("Plotter-Z.lnk", "\Windows\plotterz.lnk")
 
