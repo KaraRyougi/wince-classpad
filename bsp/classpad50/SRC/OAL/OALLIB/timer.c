@@ -125,12 +125,14 @@ BOOL OALTimerInit(UINT32 msecPerSysTick, UINT32 countsPerMSec, UINT32 countsMarg
 //  counter, OALStall) is counted in TMU0 counts. The RTC has its own 32.768
 //  kHz crystal, so its 128 Hz counter R64CNT is the reference: TMU0 runs
 //  free over CALIBRATE_RTC_TICKS of it (125 ms), started and stopped on a
-//  count edge. Returns counts per millisecond, or `nominal` when the RTC is
-//  stopped or does not count, or the result is outside nominal / 8 .. * 8.
+//  count edge. Returns counts per millisecond, or `nominal` when R64CNT does
+//  not count or the result is outside nominal / 8 .. * 8. (RCR2.START is not
+//  consulted: the 128 Hz divider is what matters, and casio-emu runs it with
+//  START clear.)
 //  Interrupts are off (OEMInit); TMU0 is left stopped.
 //
 #define CALIBRATE_RTC_TICKS     16
-#define CALIBRATE_MAX_READS     4000000         // gives up when R64CNT does not move
+#define CALIBRATE_MAX_READS     1000000         // gives up when R64CNT does not move (a count lasts 7.8 ms)
 
 static UINT32 g_countsPerMSec;                  // 0 until measured
 static UINT32 g_calibratedHz;                   // the measured count rate, 0 = nominal in use
@@ -152,7 +154,6 @@ static UINT32 CalibrateCountsPerMSec(UINT32 nominal)
     UINT8 last, prev;
 
     g_calibratedHz = 0;
-    if (!(MMIO_R8(RTC_RCR2) & 0x01)) return nominal;                // RTC stopped
     MMIO_W8(TMU_TSTR, MMIO_R8(TMU_TSTR) & ~TMU_TSTR_STR0);
     MMIO_W16(TMU_TCR0, TIMER_INPUT_DIVISOR_CODE);                   // no interrupt
     MMIO_W32(TMU_TCOR0, 0xFFFFFFFF);
@@ -193,7 +194,7 @@ void InitClock(void)
             RETAILMSG(1, (L"CLASSPAD OAL: TMU0 counts %u Hz by the RTC (nominal %u): %u counts per ms\r\n",
                           g_calibratedHz, COUNT_FREQUENCY, g_countsPerMSec));
         else
-            RETAILMSG(1, (L"CLASSPAD OAL: TMU0 rate not measured (RTC stopped or implausible), nominal %u Hz\r\n", COUNT_FREQUENCY));
+            RETAILMSG(1, (L"CLASSPAD OAL: TMU0 rate not measured (the RTC does not count, or implausible), nominal %u Hz\r\n", COUNT_FREQUENCY));
     }
     OALTimerInit(TICK_MAX_MSEC, g_countsPerMSec, TICK_MARGIN_COUNTS);
 }

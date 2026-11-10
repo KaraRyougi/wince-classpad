@@ -5,29 +5,29 @@
  * whole kernel module stays device-aware. Do not edit. */
 #define KDEV_FUNCS50 25
 static const struct { sf_u16 w[4]; sf_u32 len, crc, hint; } kdev_funcs50[KDEV_FUNCS50] = {
-    { { 0xc301, 0x000b, 0x0009, 0x0009 }, 0x8, 0x36a12633u, 0x80ee31d0u },   /* ExceptionBase: exception vector area */
-    { { 0x9104, 0x0002, 0x2019, 0x400e }, 0x10, 0xff10aa2du, 0x80ee31d8u },   /* _INTERRUPTS_ON: exception vector area */
-    { { 0x0002, 0xcbf0, 0x400e, 0x000b }, 0xc, 0x4d6f42e8u, 0x80ee31e8u },   /* _INTERRUPTS_OFF: exception vector area */
-    { { 0xd015, 0x6002, 0xd115, 0x2019 }, 0x70, 0xb55d08a8u, 0x80ee31f8u },   /* _SetCPUASID: exception vector area, literal ff000000 */
-    { { 0xd002, 0x6002, 0x40ce, 0x000b }, 0x10, 0xe8698ebeu, 0x80ee3268u },   /* _SetCPUGlobals: banked register, exception vector area */
-    { { 0xd00a, 0x400e, 0xd20a, 0xd10b }, 0x4c, 0xe482d9b0u, 0x80ee3278u },   /* KernelStart: exception vector area, literal ff000000 */
-    { { 0x0000, 0x0000, 0x0000, 0x0000 }, 0x48, 0x3fe8926eu, 0x80ee32c4u },   /* APICall: banked register, exception vector area */
-    { { 0x1ee6, 0x1ef7, 0x0132, 0x1e19 }, 0x2c4, 0x327aa87bu, 0x80ee330cu },   /* GeneralException: banked register, exception vector area, literal ff000000 */
-    { { 0x5173, 0x5072, 0x0000, 0x0000 }, 0xd2, 0x22935bf3u, 0x80ee35d0u },   /* TLBMissHandler: exception vector area, literal fff00000 */
-    { { 0xd10e, 0xd30e, 0x5030, 0x9415 }, 0x1e, 0xba322c85u, 0x80ee36a2u },   /* _LoadKPage: exception vector area, literal ff000000 */
-    { { 0x910a, 0xe000, 0x2402, 0x1401 }, 0x24, 0xcbf2aef7u, 0x80ee36c0u },   /* _ZeroPage: exception vector area */
-    { { 0x000b, 0xe000, 0x0000, 0x0000 }, 0xec, 0xbb12997au, 0x80ee36e4u },   /* _UnusedHandler: exception vector area */
-    { { 0x567a, 0xd04a, 0x6263, 0x4209 }, 0x158, 0x5ba45eeau, 0x80ee37d0u },   /* InterruptExceptionHandler: banked register, exception vector area, literal ff000000 */
-    { { 0x4f22, 0x7ff0, 0x51fb, 0x50f9 }, 0x58, 0x75902617u, 0x80ee3bf0u },   /* _RtlpExecuteHandlerForException: banked register */
-    { { 0x4f22, 0x7ff0, 0xe058, 0x016e }, 0x5c, 0x4fe114dfu, 0x80ee3c64u },   /* _RtlpExecuteHandlerForUnwind: banked register */
-    { { 0x0000, 0x0000, 0xe401, 0xd019 }, 0x184, 0x52e2725eu, 0x80ee451cu },   /* _DoSetRAMMode: literal ff000000 */
-    { { 0xe1ff, 0x3310, 0x0000, 0x0000 }, 0xb6, 0x0c5ad45cu, 0x80ee46e0u },   /* SyscallHandler: banked register */
-    { { 0x0009, 0x7fdc, 0x1f08, 0x64f3 }, 0xca, 0x1b3570b3u, 0x80ee4796u },   /* _APICallReturn: banked register */
-    { { 0x03c2, 0x5236, 0x5125, 0x2118 }, 0x58, 0xab248a0du, 0x80ee4860u },   /* _MD_CBRtn: banked register */
-    { { 0x2f86, 0x2f96, 0x2fa6, 0x2fb6 }, 0x16c, 0xf9fe6cc1u, 0x80ee4958u },   /* _SH3Init: literal ff000000, literal ff000008, literal ff00000c, literal ff000010, literal ff00001c */
-    { { 0x2f86, 0x2f96, 0x2fa6, 0x2fb6 }, 0xf8, 0xda2d844cu, 0x80ee4cb4u },   /* _DumpFrame: literal ff000008, literal ff000010, literal ff00001c */
-    { { 0x2f86, 0x2f96, 0x2fa6, 0x2fb6 }, 0x134, 0xe64ba245u, 0x80eec124u },   /* _SC_CreateThread: literal fffefffb */
-    { { 0x2f86, 0x2f96, 0x2fa6, 0x2fb6 }, 0x12c, 0xf0252b3fu, 0x80f10604u },   /* _OEMCacheRangeFlush: literal ff000010 */
-    { { 0x4f22, 0x7fcc, 0x016a, 0xe204 }, 0x108, 0x22dd3a7eu, 0x80f142c0u },   /* __stod: literal ff000000 */
-    { { 0x2f86, 0x2f96, 0x2fa6, 0x2fb6 }, 0x3d8, 0xf96d9807u, 0x80f14b04u },   /* ___SH3Raise: literal fffe003f, literal fffe005f, literal fffe007f, literal fffe009f, literal fffe00ff, literal fffe011f, literal fffe013f */
+    { { 0xc301, 0x000b, 0x0009, 0x0009 }, 0x8, 0x36a12633u, 0x80ee3320u },   /* ExceptionBase: exception vector area */
+    { { 0x9104, 0x0002, 0x2019, 0x400e }, 0x10, 0xff10aa2du, 0x80ee3328u },   /* _INTERRUPTS_ON: exception vector area */
+    { { 0x0002, 0xcbf0, 0x400e, 0x000b }, 0xc, 0x4d6f42e8u, 0x80ee3338u },   /* _INTERRUPTS_OFF: exception vector area */
+    { { 0xd015, 0x6002, 0xd115, 0x2019 }, 0x70, 0xb55d08a8u, 0x80ee3348u },   /* _SetCPUASID: exception vector area, literal ff000000 */
+    { { 0xd002, 0x6002, 0x40ce, 0x000b }, 0x10, 0xe8698ebeu, 0x80ee33b8u },   /* _SetCPUGlobals: banked register, exception vector area */
+    { { 0xd00a, 0x400e, 0xd20a, 0xd10b }, 0x4c, 0xe482d9b0u, 0x80ee33c8u },   /* KernelStart: exception vector area, literal ff000000 */
+    { { 0x0000, 0x0000, 0x0000, 0x0000 }, 0x48, 0x3fe8926eu, 0x80ee3414u },   /* APICall: banked register, exception vector area */
+    { { 0x1ee6, 0x1ef7, 0x0132, 0x1e19 }, 0x2c4, 0x327aa87bu, 0x80ee345cu },   /* GeneralException: banked register, exception vector area, literal ff000000 */
+    { { 0x5173, 0x5072, 0x0000, 0x0000 }, 0xd2, 0x22935bf3u, 0x80ee3720u },   /* TLBMissHandler: exception vector area, literal fff00000 */
+    { { 0xd10e, 0xd30e, 0x5030, 0x9415 }, 0x1e, 0xba322c85u, 0x80ee37f2u },   /* _LoadKPage: exception vector area, literal ff000000 */
+    { { 0x910a, 0xe000, 0x2402, 0x1401 }, 0x24, 0xcbf2aef7u, 0x80ee3810u },   /* _ZeroPage: exception vector area */
+    { { 0x000b, 0xe000, 0x0000, 0x0000 }, 0xec, 0xbb12997au, 0x80ee3834u },   /* _UnusedHandler: exception vector area */
+    { { 0x567a, 0xd04a, 0x6263, 0x4209 }, 0x158, 0x5ba45eeau, 0x80ee3920u },   /* InterruptExceptionHandler: banked register, exception vector area, literal ff000000 */
+    { { 0x4f22, 0x7ff0, 0x51fb, 0x50f9 }, 0x58, 0x75902617u, 0x80ee3d40u },   /* _RtlpExecuteHandlerForException: banked register */
+    { { 0x4f22, 0x7ff0, 0xe058, 0x016e }, 0x5c, 0x4fe114dfu, 0x80ee3db4u },   /* _RtlpExecuteHandlerForUnwind: banked register */
+    { { 0x0000, 0x0000, 0xe401, 0xd019 }, 0x184, 0x52e2725eu, 0x80ee466cu },   /* _DoSetRAMMode: literal ff000000 */
+    { { 0xe1ff, 0x3310, 0x0000, 0x0000 }, 0xb6, 0x0c5ad45cu, 0x80ee4830u },   /* SyscallHandler: banked register */
+    { { 0x0009, 0x7fdc, 0x1f08, 0x64f3 }, 0xca, 0x1b3570b3u, 0x80ee48e6u },   /* _APICallReturn: banked register */
+    { { 0x03c2, 0x5236, 0x5125, 0x2118 }, 0x58, 0xab248a0du, 0x80ee49b0u },   /* _MD_CBRtn: banked register */
+    { { 0x2f86, 0x2f96, 0x2fa6, 0x2fb6 }, 0x16c, 0xf9fe6cc1u, 0x80ee4aa8u },   /* _SH3Init: literal ff000000, literal ff000008, literal ff00000c, literal ff000010, literal ff00001c */
+    { { 0x2f86, 0x2f96, 0x2fa6, 0x2fb6 }, 0xf8, 0xda2d844cu, 0x80ee4e04u },   /* _DumpFrame: literal ff000008, literal ff000010, literal ff00001c */
+    { { 0x2f86, 0x2f96, 0x2fa6, 0x2fb6 }, 0x134, 0xe64ba245u, 0x80eec274u },   /* _SC_CreateThread: literal fffefffb */
+    { { 0x2f86, 0x2f96, 0x2fa6, 0x2fb6 }, 0x12c, 0xf0252b3fu, 0x80f10960u },   /* _OEMCacheRangeFlush: literal ff000010 */
+    { { 0x4f22, 0x7fcc, 0x016a, 0xe204 }, 0x108, 0x22dd3a7eu, 0x80f1461cu },   /* __stod: literal ff000000 */
+    { { 0x2f86, 0x2f96, 0x2fa6, 0x2fb6 }, 0x3d8, 0xf96d9807u, 0x80f14e60u },   /* ___SH3Raise: literal fffe003f, literal fffe005f, literal fffe007f, literal fffe009f, literal fffe00ff, literal fffe011f, literal fffe013f */
 };

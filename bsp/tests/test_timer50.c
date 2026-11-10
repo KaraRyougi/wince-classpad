@@ -137,8 +137,7 @@ int main(void) {
         sim_hz = 7372800; sim_us = 0; tstr = 0;
         { UINT32 got = CalibrateCountsPerMSec(7372); if (got < 7300 || got > 7450) { fprintf(stderr, "FAIL calibrate with slow reads: %u\n", got); ++failures; } }
         sim_read_us = 3;
-        sim_rtc_start = 0; CHECK("RTC stopped: nominal", CalibrateCountsPerMSec(7372) == 7372 && g_calibratedHz == 0);
-        sim_rtc_start = 1; sim_rtc_dead = 1; CHECK("RTC not counting: nominal", CalibrateCountsPerMSec(7372) == 7372);
+        sim_rtc_dead = 1; CHECK("RTC not counting: nominal", CalibrateCountsPerMSec(7372) == 7372);
         sim_rtc_dead = 0; sim_hz = 100000000; sim_us = 0; CHECK("implausible rate: nominal", CalibrateCountsPerMSec(7372) == 7372);
         sim_hz = 0;
     }
