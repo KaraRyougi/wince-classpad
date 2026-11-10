@@ -597,6 +597,20 @@ R64CNT（独立的 32.768 kHz 晶振）量一次：TMU0 自由计数 16 个 RTC 
 失败情形。没有跟着校准的：触摸 I2C 的时钟分频、LCD 时序这些按 Pphi 算的硬件
 定时。待 VM 重建后在模拟器和真机验证。
 
+**USB 供电检测与系统帮助页（2026-11-10，待重建验证）。** 电池 PDD 的
+ACLineStatus 现在取 USB 功能控制器的 VBUS 输入电平（INTSTS0 0xA4D80040 bit 7
+VBSTS，连读三次一致才算）；Casio OS 自己也是这么读的（0x80016742 就是
+`return (INTSTS0 & 0x80) != 0`）。只读这一位，不碰 USB 的其他部分；控制器模块
+时钟沿用 Casio OS 留下的状态，没有在真机上验证过停钟时读到什么。casio-emu 的
+ClassPad 配置固定报未插线。Battery 程序在插线时显示 "USB power connected"，
+底部那行寄存器诊断已去掉。系统帮助：开始菜单的 Help 运行
+`\Windows\peghelp.exe file:wince.htm`，我们的 PegHelp 在，但帮助页本身在微软的
+bib 里挂在它的 IE 版查看器的条件下（`WCESHELLFE_MODULES_PEGHELP ||
+IE_MODULES_HTMLHELP`），所以镜像里一页都没有。platform.bib 现在直接从 PUBLIC 树
+列出 wince.htm、ctpnl.htm、copy.htm、rnetw.htm 和它们引用的 9 个 .2bp 图标
+（NK，约 155 KB），word.htm 跟 WordPad 进 EXT；`test_peghelp` 的解析器过了这
+几页的 478 个链接。
+
 ## 九、还没做的
 
 - 在 VM 里构建（第一次构建会暴露 SDK 的差异：头文件、`WARNISERROR`）。

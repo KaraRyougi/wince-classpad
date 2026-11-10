@@ -131,3 +131,24 @@ FILES
    workbook_keyboard.2BP    $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\workbook_keyboard.2BP     EXT  S
    workbook_keybswitch.2BP  $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\workbook_keybswitch.2BP   EXT  S
    mathxpander.lnk          $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\mathxpander.lnk           EXT  S
+
+; Windows CE's own help pages (Start > Help runs \Windows\peghelp.exe file:wince.htm).
+; Microsoft's bib lists them only with its IE-based help viewer
+; (WCESHELLFE_MODULES_PEGHELP || IE_MODULES_HTMLHELP), which this image
+; replaces with SRC\APPS\PEGHELP, so they are listed here from the public
+; tree. word.htm goes with WordPad to EXT.
+FILES
+    wince.htm          $(_WINCEROOT)\PUBLIC\WCESHELLFE\OAK\FILES\INTLFILE\0409\wince.htm  NK   SH
+    ctpnl.htm          $(_WINCEROOT)\PUBLIC\WCESHELLFE\OAK\FILES\INTLFILE\0409\ctpnl.htm  NK   SH
+    copy.htm           $(_WINCEROOT)\PUBLIC\WCESHELLFE\OAK\FILES\INTLFILE\0409\copy.htm  NK   SH
+    rnetw.htm          $(_WINCEROOT)\PUBLIC\WCESHELLFE\OAK\FILES\INTLFILE\0409\rnetw.htm  NK   SH
+    word.htm           $(_WINCEROOT)\PUBLIC\WCEAPPSFE\OAK\FILES\INTLFILE\0409\word.htm  EXT  SH
+    batchg.2bp         $(_WINCEROOT)\PUBLIC\WCESHELLFE\OAK\FILES\batchg.2bp  NK   SH
+    batlow.2bp         $(_WINCEROOT)\PUBLIC\WCESHELLFE\OAK\FILES\batlow.2bp  NK   SH
+    bvlow.2bp          $(_WINCEROOT)\PUBLIC\WCESHELLFE\OAK\FILES\bvlow.2bp  NK   SH
+    dialcnct.2bp       $(_WINCEROOT)\PUBLIC\WCESHELLFE\OAK\FILES\dialcnct.2bp  NK   SH
+    drtcnct.2bp        $(_WINCEROOT)\PUBLIC\WCESHELLFE\OAK\FILES\drtcnct.2bp  NK   SH
+    mainlow.2bp        $(_WINCEROOT)\PUBLIC\WCESHELLFE\OAK\FILES\mainlow.2bp  NK   SH
+    mvlow.2bp          $(_WINCEROOT)\PUBLIC\WCESHELLFE\OAK\FILES\mvlow.2bp  NK   SH
+    srcnt.2bp          $(_WINCEROOT)\PUBLIC\WCESHELLFE\OAK\FILES\srcnt.2bp  NK   SH
+    wgripper.2bp       $(_WINCEROOT)\PUBLIC\WCESHELLFE\OAK\FILES\wgripper.2bp  NK   SH

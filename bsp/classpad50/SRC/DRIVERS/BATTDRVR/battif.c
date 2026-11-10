@@ -11,6 +11,10 @@
 //    BatteryVoltage      mV, counts * "MilliVoltsPerCount" (10: inferred
 //                        from Casio's thresholds, not measured)
 //    BatteryChemistry    alkaline or Ni-MH, the registry choice
+//    ACLineStatus        online while a USB cable supplies power: the USB
+//                        function controller's VBUS input (INTSTS0.VBSTS),
+//                        which Casio's OS reads the same way (0x80016742).
+//                        Nothing else of USB is touched.
 //  Registry, HKLM\Software\ClassPad\Battery (read again every 10 s, so a
 //  settings program can change it):
 //    "Type"                 dword 0 alkaline (default), 1 Ni-MH
@@ -32,6 +36,8 @@
 #define ADCSR_ADST      0x2000
 #define ADCSR_SETUP     0x0042          // Casio's: clock select 1, single mode, channel 2
 #define MSTPCR2         0xA4150038
+#define USB_INTSTS0     0xA4D80040      // bit 7 VBSTS: the level of the VBUS input
+#define USB_VBSTS       0x0080
 #define MSTPCR2_ADC     0x08000000
 
 #define BATT_REG_KEY    TEXT("Software\\ClassPad\\Battery")
@@ -123,6 +129,21 @@ static BOOL Sample(void)
     return TRUE;
 }
 
+// A USB cable is supplying power. The level is read until three reads in a
+// row agree (the controller's manual asks for that: the bit is not latched).
+static BOOL UsbPowered(void)
+{
+    UINT16 a, b, c;
+    int i;
+    for (i = 0; i < 8; i++) {
+        a = MMIO_R16(USB_INTSTS0) & USB_VBSTS;
+        b = MMIO_R16(USB_INTSTS0) & USB_VBSTS;
+        c = MMIO_R16(USB_INTSTS0) & USB_VBSTS;
+        if (a == b && b == c) return a != 0;
+    }
+    return FALSE;
+}
+
 BOOL WINAPI BatteryPDDInitialize(LPCTSTR pszRegistryContext)
 {
     UNREFERENCED_PARAMETER(pszRegistryContext);
@@ -144,7 +165,7 @@ BOOL WINAPI BatteryPDDGetStatus(PSYSTEM_POWER_STATUS_EX2 pstatus, PBOOL pfBatter
     int level;
     if (!g_haveConfig || GetTickCount() - g_configTick >= CONFIG_MS) ReadConfig();
     memset(pstatus, 0, sizeof *pstatus);
-    pstatus->ACLineStatus = AC_LINE_OFFLINE;
+    pstatus->ACLineStatus = UsbPowered() ? AC_LINE_ONLINE : AC_LINE_OFFLINE;
     pstatus->BatteryLifeTime = BATTERY_LIFE_UNKNOWN;
     pstatus->BatteryFullLifeTime = BATTERY_LIFE_UNKNOWN;
     // There is no backup battery. UNKNOWN, not NO_BATTERY: the taskbar (explorer
