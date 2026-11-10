@@ -32,6 +32,7 @@ and compares what the loader and romimage see: imports, exports (and the code
 at each), resources, the entry point code, every section's bytes after
 relocating both images to the same base.
 """
+import bisect
 import struct
 import sys
 
@@ -305,8 +306,14 @@ def realign(data):
 
 
 # ------------------------------------------------- relocations for /FIXED EXEs
-def reconstruct_relocs(data):
-    """The HIGHLOW fixups of a small /FIXED SH EXE, found by scanning.
+def reconstruct_relocs(data, addresses=(), constants=()):
+    """The HIGHLOW fixups of a /FIXED SH EXE, found by scanning.
+
+    Below 64 KiB every own address is recognisable by itself (next
+    paragraph). A larger image goes to reconstruct_relocs_pdata, which tells
+    addresses from numbers by what refers to them and where they point;
+    addresses / constants are the RVAs of words whose call it overrides
+    (from a review by hand, pinned with the input in stage.py).
 
     CE 6 on SH-4 loads no EXE whose sections are not 4 KiB aligned, not even
     from a file (loader.c ReadO32Info: "Bad EXE/DLL format"), and a Pocket PC
@@ -323,12 +330,16 @@ def reconstruct_relocs(data):
     pe = PE(data)
     if struct.unpack_from("<H", pe.d, pe.pe + 4)[0] not in (0x1A2, 0x1A3, 0x1A6):
         raise PEError("reconstruct_relocs: not an SH image")
-    if pe.base != 0x10000 or pe.image_size > 0x10000:
-        raise PEError("reconstruct_relocs: only images at 0x10000 below 64 KiB")
+    if pe.base != 0x10000:
+        raise PEError("reconstruct_relocs: only images at 0x10000")
     m, fx = loaded(pe, pe.base)
     if fx:
         raise PEError("reconstruct_relocs: the image has relocations")
     rf = rva_fields(pe, m)
+    if pe.image_size > 0x10000:
+        return reconstruct_relocs_pdata(pe, m, rf, addresses, constants)[0]
+    if addresses or constants:
+        raise PEError("reconstruct_relocs: overrides are for the .pdata scan")
     lo, hi = pe.base, pe.base + pe.image_size
     out = []
     for s in pe.secs:
@@ -340,6 +351,218 @@ def reconstruct_relocs(data):
             if lo <= v <= hi and a not in rf:
                 out.append(a)
     return out
+
+
+# SH-3 import thunk (Pocket PC tools): mov.l @(4,pc),r0; mov.l @r0,r0;
+# jmp @r0; nop; .long <IAT slot>
+THUNK = bytes.fromhex("01d002602b400900")
+
+
+def _sh_writes(op):
+    """The register an SH instruction writes (Rn, or R0 for the #imm/GBR/
+    displacement forms), else None. Close enough for following a loaded
+    address over a few instructions; MAC/T/system registers are ignored."""
+    hi, n, lo, k = op >> 12, (op >> 8) & 15, op & 0xFF, op & 0xF
+    if hi in (0x5, 0x6, 0x7, 0x9, 0xD, 0xE):
+        return n
+    if hi == 0x0:
+        return n if k in (0xC, 0xD, 0xE) or lo in (0x29, 0x02, 0x12, 0x22, 0x0A, 0x1A, 0x2A) else None
+    if hi == 0x2:
+        return n if k in (0x4, 0x5, 0x6, 0x9, 0xA, 0xB, 0xD) else None
+    if hi == 0x3:
+        return None if k in (0x0, 0x2, 0x3, 0x5, 0x6, 0x7, 0xD) else n
+    if hi == 0x4:
+        if lo in (0x00, 0x01, 0x04, 0x05, 0x08, 0x09, 0x10, 0x18, 0x19, 0x20, 0x21, 0x24, 0x25, 0x28, 0x29):
+            return n                                   # shifts, rotates, dt
+        return n if k in (0x2, 0x3, 0x6, 0x7, 0xC, 0xD) else None   # @-Rn, @Rn+, shad/shld
+    if hi == 0x8:
+        return 0 if n in (0x4, 0x5) else None          # mov.b/w @(disp,Rm),R0
+    if hi == 0xC:
+        return 0 if n in (0x4, 0x5, 0x6, 0x7, 0x9, 0xA, 0xB) else None
+    return None
+
+
+def _called(m, insn, limit=40):
+    """Whether the register loaded by the mov.l at insn reaches a jsr/jmp
+    before it is overwritten (copies followed, calls clobber r0-r7)."""
+    regs = {(struct.unpack_from("<H", m, insn)[0] >> 8) & 15}
+    a = insn + 2
+    for _ in range(limit):
+        op = struct.unpack_from("<H", m, a)[0]
+        n = (op >> 8) & 15
+        if (op & 0xF0FF) in (0x400B, 0x402B):            # jsr / jmp @Rn
+            if n in regs:
+                return True
+            if (op & 0xF0FF) == 0x402B:
+                return False
+            regs -= set(range(8))
+        elif op & 0xF00F == 0x6003 and (op >> 4) & 15 in regs:
+            regs.add(n)                                # mov Rm,Rn
+        else:
+            w = _sh_writes(op)
+            if w is not None:
+                regs.discard(w)
+        if op == 0x000B or op >> 12 == 0xA:            # rts / bra: one delay slot left
+            limit = 0
+        if not regs:
+            return False
+        a += 2
+    return False
+
+
+def reconstruct_relocs_pdata(pe, m, rf, addresses=(), constants=()):
+    """The HIGHLOW fixups of a large /FIXED SH-3 EXE, told from numbers.
+
+    Above 64 KiB an address 0x0001xxxx..0x00HHxxxx is also a possible
+    instruction pair (0x0009 nop as the upper halfword) and a possible
+    integer, so a word counts only when the code's own structure says it is
+    an address:
+
+      - .text: only literal-pool words, the targets of the mov.l @(disp,PC)
+        instructions in the .pdata functions and in the import thunks (the
+        decoding skips halfwords that are themselves pool data, iterated to
+        a fixed point); .pdata: the function-start word of every entry, not
+        the prologue/length word; .rdata, .data: every aligned word that is
+        not an import/export/resource/debug RVA field. .rsrc: nothing.
+      - a word pointing into .rdata or .data is an address;
+      - a word pointing into .text is an address when its target is a code
+        entry: a .pdata function start, an import thunk, the target of a
+        loaded register that reaches jsr/jmp (far branches inside one
+        function use mov.l + jmp @Rn), or an even target outside every
+        .pdata function (leaf functions have no .pdata entry) that follows
+        the end of something (rts and its delay slot, a pool word, a
+        function's last instruction, nop/zero padding). Anything else that
+        lands inside a function is a number (MAKELONG pairs, table data);
+      - a word pointing at the headers is left alone (they do not move),
+        and words pointing into .pdata/.rsrc are numbers.
+
+    Returns (sorted RVAs, report dict)."""
+    lo_img, size = pe.base, pe.image_size
+    u16 = lambda a: struct.unpack_from("<H", m, a)[0]
+    u32 = lambda a: struct.unpack_from("<I", m, a)[0]
+    secs = {s["name"]: s for s in pe.secs}
+    if ".text" not in secs:
+        raise PEError("reconstruct_relocs: no .text")
+    text = secs[".text"]
+    tlo, thi = text["va"], text["va"] + max(text["vs"], text["rs"])
+    prva, psize = pe.dir(3)
+    if not prva:
+        raise PEError("reconstruct_relocs: no .pdata to find the functions with")
+
+    funcs, pstart = [], set()
+    exc_words = set()
+    for a in range(prva, prva + psize - 7, 8):
+        st, w = u32(a), u32(a + 4)
+        if not st:
+            continue
+        n = ((w >> 8) & 0x3FFFFF) * (4 if (w >> 30) & 1 else 2)
+        r = st - lo_img
+        if not (tlo <= r and r + n <= thi):
+            raise PEError("reconstruct_relocs: .pdata entry at 0x%x outside .text" % a)
+        funcs.append((r, n))
+        pstart.add(a)
+        if w >> 31:                                    # handler, handler data before the function
+            exc_words |= {r - 8, r - 4}
+    funcs.sort()
+    fstarts = {r for r, _ in funcs}
+    fends = {r + n for r, n in funcs}
+    starts = [r for r, _ in funcs]
+
+    def in_func(r):
+        i = bisect.bisect_right(starts, r) - 1
+        return i >= 0 and r < funcs[i][0] + funcs[i][1]
+
+    thunks = [a for a in range(tlo & ~3, thi - 11, 4)
+              if m[a:a + 8] == THUNK and not in_func(a)]
+    code = funcs + [(a, 8) for a in thunks]
+
+    data_hw = set()
+    for _ in range(16):
+        pool, hw = {}, set()
+        for s, n in code:
+            for a in range(s, s + n, 2):
+                if a in data_hw:
+                    continue
+                op = u16(a)
+                if op >> 12 == 0xD:                    # mov.l @(disp,PC),Rn
+                    t = (a & ~3) + 4 + (op & 0xFF) * 4
+                    pool.setdefault(t, []).append(a)
+                    hw |= {t, t + 2}
+                elif op >> 12 == 0x9:                  # mov.w @(disp,PC),Rn
+                    hw.add(a + 4 + (op & 0xFF) * 2)
+        if hw == data_hw:
+            break
+        data_hw = hw
+    else:
+        raise PEError("reconstruct_relocs: pool decoding does not settle")
+
+    entries = fstarts | set(thunks)
+    for t, ins in pool.items():
+        v = u32(t) - lo_img
+        if tlo <= v < thi and v not in entries and any(_called(m, i) for i in ins):
+            entries.add(v)
+
+    def boundary(r):
+        if r & 1 or in_func(r):
+            return False
+        p = r
+        for _ in range(8):                             # back over nop / zero padding
+            if p in fends or (p - 4) in pool:
+                return True
+            if u16(p - 4) == 0x000B or u16(p - 4) >> 12 == 0xA:    # rts / bra, delay slot
+                return True
+            if u16(p - 2) not in (0x0009, 0x0000):
+                return False
+            p -= 2
+        return False
+
+    def seg(r):
+        for s in pe.secs:
+            if s["va"] <= r < s["va"] + max(s["vs"], s["rs"]):
+                return s["name"]
+        return "headers" if 0 <= r < pe.secs[0]["va"] else None
+
+    words = set(pool) | pstart | exc_words
+    for s in pe.secs:
+        if s["name"] not in (".text", ".rdata", ".data", ".pdata", ".rsrc"):
+            raise PEError("reconstruct_relocs: unknown section %s" % s["name"])
+        if s["name"] in (".rdata", ".data"):
+            words |= set(range(s["va"], s["va"] + max(s["vs"], s["rs"]) - 3, 4))
+    words -= rf
+    out, report = [], {}
+    for a in sorted(words):
+        v = u32(a)
+        if not (lo_img <= v < lo_img + size):
+            continue
+        r = v - lo_img
+        tgt = seg(r)
+        if tgt in (".rdata", ".data"):
+            why = "address"
+        elif tgt == ".text":
+            if r in entries:
+                why = "address"
+            elif boundary(r):
+                why = "address"
+            else:
+                why = "number"
+        elif tgt == "headers":
+            why = "headers"
+        else:
+            why = "number"
+        if a in addresses:
+            why = "address" if why != "headers" else why
+        elif a in constants:
+            why = "number"
+        key = "%s %s->%s" % (why, seg(a), tgt)
+        report[key] = report.get(key, 0) + 1
+        if why == "address":
+            out.append(a)
+    for a in list(addresses) + list(constants):
+        if a not in words or not (lo_img <= u32(a) < lo_img + size):
+            raise PEError("reconstruct_relocs: override 0x%x is no candidate word" % a)
+    report["thunks"] = len(thunks)
+    report["code entries"] = len(entries)
+    return out, report
 
 
 def add_relocs(data, rvas):

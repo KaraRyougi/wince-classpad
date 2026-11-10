@@ -94,7 +94,7 @@ U64 *sh3_dtoui64(U64 *r, const double *a)     { *r = (U64)*a; return r; }
 ONE(sin) ONE(cos) ONE(tan) ONE(asin) ONE(acos) ONE(atan)
 ONE(sinh) ONE(cosh) ONE(tanh)
 ONE(exp) ONE(log) ONE(log10) ONE(sqrt) ONE(floor) ONE(ceil) ONE(fabs)
-TWO(atan2) TWO(pow) TWO(fmod) TWO(_hypot)
+TWO(atan2) TWO(pow) TWO(fmod) TWO(_hypot) TWO(_nextafter)
 
 double *sh3_atof(double *r, const char *s)                  { *r = atof(s); return r; }
 double *sh3_wcstod(double *r, const wchar_t *s, wchar_t **e) { *r = wcstod(s, e); return r; }

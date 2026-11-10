@@ -12,7 +12,7 @@
          platform.bib module under FILES is realigned to 4 KiB sections
          (tools/pe4k.py: romimage takes no 1 KiB-aligned XIP module, and
          CE 6 loads none from a file either); MathXpander.exe, linked
-         /FIXED, gets its relocations rebuilt first (RELOC_PINS); SH-3
+         /FIXED, gets its relocations rebuilt first (sh3prep.RELOC_PINS); SH-3
          modules' floating-point imports go to SH3CRT.dll (tools/sh3imports.py)
   orig\\  with --platform: the VM's current versions of every file src\\ changes
   hhk\\   wince-eact.hh3 and nkflash-eact.hh3 (make DEVICE=1 NK_WINDOW=eact hhk)
@@ -26,16 +26,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 sys.path.insert(0, os.path.join(REPO, "tools"))
 import pe4k
-import sh3imports
-import xpander_widen
+import sh3prep
 
-# /FIXED EXEs whose relocations pe4k.reconstruct_relocs rebuilds: the SHA-256
-# of the copy checked by hand and its fixup count (Math Xpander 1.0 PPC SH3:
-# 157 literal-pool addresses in .text, 43 vtable and message-map pointers in
-# .rdata, 2 in .data, 20 .pdata function starts; .rsrc has none).
-RELOC_PINS = {
-    "mathxpander.exe": ("09da9ddf8e965a6fe9cf3d2f35354bdc919a0839f7ccff65017fffdb2ea09417", 222),
-}
 BUILD = "build-pkg"
 
 def run(*cmd, **kw):
@@ -105,38 +97,17 @@ def main(argv):
         if sect == "MODULES" and len(w) >= 2 and "\\PLATFORM\\CLASSPAD\\FILES\\" in w[1]:
             p = os.path.join(src, *w[1].split("\\PLATFORM\\CLASSPAD\\", 1)[1].split("\\"))
             data = open(p, "rb").read()
+            # /FIXED EXEs (sh3prep.RELOC_PINS), 4 KiB sections, SH-3 floating
+            # point -> SH3CRT.dll, Math Xpander's planes widened (tools/sh3prep.py)
             try:
-                pin = RELOC_PINS.get(w[0].lower())
-                if pin:
-                    # /FIXED EXE: relocations rebuilt by scanning, only for the
-                    # copy checked by hand (tools/pe4k.py reconstruct_relocs)
-                    if hashlib.sha256(data).hexdigest() != pin[0]:
-                        sys.exit("stage: %s is not the copy whose relocations were checked" % w[0])
-                    rvas = pe4k.reconstruct_relocs(data)
-                    if len(rvas) != pin[1]:
-                        sys.exit("stage: %s: %d fixups found, %d expected" % (w[0], len(rvas), pin[1]))
-                    data = pe4k.add_relocs(data, rvas)
-                new, what = pe4k.realign(data)
-                errs = pe4k.check(data, new)
-                if not errs:
-                    # SH-3 floating point: COREDLL's SH-4 helpers -> SH3CRT.dll
-                    fixed, moved = sh3imports.rewrite(new)
-                    if moved:
-                        errs = sh3imports.check(new, fixed)
-                        idle = [name for name, c in moved if not c]
-                        if idle:
-                            print("stage: %s imports but never calls %s" % (w[0], ",".join(idle)))
-                        new = fixed
-                        nfp += 1
-                if not errs and w[0] in xpander_widen.MODULES:
-                    # the graph and geometry planes as wide as the 320-pixel screen (tools/xpander_widen.py)
-                    new, sites = xpander_widen.widen(new, w[0])
-                    if sites:
-                        print("stage: %s: plane width 231 -> 312 at %d sites" % (w[0], len(sites)))
+                new, msgs = sh3prep.prepare(w[0], data)
             except pe4k.PEError as e:
                 sys.exit("stage: %s: %s" % (w[0], e))
-            if errs:
-                sys.exit("stage: %s: %s" % (w[0], "; ".join(errs[:5])))
+            if any("SH3CRT" in x for x in msgs):
+                nfp += 1
+            for x in msgs:
+                if x.startswith(("imports but", "plane width")):
+                    print("stage: %s: %s" % (w[0], x))
             if new != data:
                 open(p, "wb").write(new); n += 1
     print("stage: %d modules realigned to 4 KiB sections, %d with SH3CRT imports" % (n, nfp))

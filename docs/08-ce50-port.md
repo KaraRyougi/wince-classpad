@@ -128,6 +128,12 @@ Frequency`、`curridlelow/high`、`idleconv`、`dwNKDrWatsonSize`。
 - PegHelp（`xpander-help-button-crash` 工作区，未提交）与 CE 版本无关，
   等它提交后复制到 `SRC\APPS\PEGHELP` 即可。
 - SH3 二进制的 4 KiB 对齐问题在 CE 5.0 同样存在（页 4096），pe4k 照旧。
+- SpreadCE 2.05（Pocket PC SH3 英文版，1.5 MB，/FIXED，无 .reloc）放在 EXT：
+  `tools/sh3prep.py` 用 `pe4k.reconstruct_relocs_pdata` 从 .pdata、literal pool
+  和 jsr/jmp 数据流重建 25549 个 fixup（人工复核，SHA-256 固定在
+  `sh3prep.RELOC_PINS`），再对齐、改 SH3CRT 导入（SH3CRT 新增 `_nextafter`）。
+  处理好的 exe 只在 VM 的 `FILES\spreadce`，见 `FILES/spreadce/README.md`。
+  还没在模拟器里跑过。
 
 ## 六、翻译器
 

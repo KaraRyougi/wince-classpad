@@ -9,7 +9,8 @@ with the SH-4 FPU calling convention, so a Pocket PC SH-3 module that imports
 them gets wrong results (bsp/classpad/SRC/APPS/SH3CRT/sh3crt.c). SH3CRT.dll
 exports the same names with the SH-3 convention. This tool gives the module
 a second import descriptor, for SH3CRT.dll by name, in a new last section
-(.sh3crt: descriptors, thunk arrays, names), and moves every reference to an
+(.sh3crt: descriptors, thunk arrays, names; an EXE's new IAT goes at the
+end of .data instead, see rewrite), and moves every reference to an
 affected COREDLL IAT slot to the matching new slot: the references are
 HIGHLOW fixups (the import thunks' literal-pool words), so the .reloc table
 finds them all. The old slots stay (still bound to coredll, now unused).
@@ -35,7 +36,7 @@ COREDLL_ORDINALS = {
     "sin": 1058, "cos": 1004, "tan": 1075, "asin": 990, "acos": 989, "atan": 991,
     "sinh": 1059, "cosh": 1005, "tanh": 1076, "exp": 1009, "log": 1033, "log10": 1034,
     "sqrt": 1060, "floor": 1013, "ceil": 999, "fabs": 1010, "atan2": 992, "pow": 1051,
-    "fmod": 1014, "_hypot": 1023, "atof": 995, "wcstod": 1081,
+    "fmod": 1014, "_hypot": 1023, "_nextafter": 1050, "atof": 995, "wcstod": 1081,
     "_isnan": 1024, "_finite": 1012, "_fpclass": 1015,
 }
 BY_ORDINAL = {v: k for k, v in COREDLL_ORDINALS.items()}
@@ -86,6 +87,21 @@ def rewrite(data):
         raise pe4k.PEError("sh3imports: no room for another section header")
     last = pe.secs[-1]
     va = pe4k.align(last["va"] + max(last["vs"], last["rs"]), pe.salign)
+    # An EXE gets its new IAT at the end of .data, past the zero-filled
+    # tail: CE 5.0 romimage gave the EXE's own .sh3crt section read-only
+    # flags in the ROM image (a DLL's stays writable), the loader's IAT write
+    # then paged in a "R/O page from XIP module" and CreateProcess failed
+    # with "not a valid Windows CE application" (SpreadCE, 2026-11-10). The
+    # loader fills the IAT from the lookup table alone, so zeros are fine.
+    data_iat = None
+    if not struct.unpack_from("<H", pe.d, pe.pe + 22)[0] & 0x2000:
+        for i, s in enumerate(pe.secs):
+            if s["name"] == ".data":
+                at = pe4k.align(s["va"] + s["vs"], 4)
+                nxt = pe.secs[i + 1]["va"] if i + 1 < len(pe.secs) else va
+                if at + 4 * (len(slots) + 1) > nxt:
+                    raise pe4k.PEError("sh3imports: no room for the IAT after .data")
+                data_iat = (s, at)
 
     # descriptor array: the old ones, SH3CRT, null
     irva, _ = pe.dir(1)
@@ -114,13 +130,15 @@ def rewrite(data):
     blob += bytes(-len(blob) % 4)
     for i, desc in enumerate(old):
         blob[d_off + 20 * i:d_off + 20 * i + 20] = desc
-    struct.pack_into("<IIIII", blob, d_off + 20 * len(old), va + oft_off, 0, 0, va + dll_off, va + ft_off)
+    ft = data_iat[1] if data_iat else va + ft_off
+    struct.pack_into("<IIIII", blob, d_off + 20 * len(old), va + oft_off, 0, 0, va + dll_off, ft)
     for i, (_, name) in enumerate(slots):
         struct.pack_into("<I", blob, oft_off + 4 * i, va + hint[name])
-        struct.pack_into("<I", blob, ft_off + 4 * i, va + hint[name])
+        if not data_iat:
+            struct.pack_into("<I", blob, ft_off + 4 * i, va + hint[name])
 
     # move the references: every fixup holding an old slot's address
-    newslot = {s: va + ft_off + 4 * i for i, (s, _) in enumerate(slots)}
+    newslot = {s: ft + 4 * i for i, (s, _) in enumerate(slots)}
     moved = {s: 0 for s in newslot}
     d = pe.d
     for r in fixups:
@@ -134,6 +152,23 @@ def rewrite(data):
     rs = pe4k.align(len(blob), pe.falign)
     d += blob + bytes(rs - len(blob))
     d[hdr:hdr + 40] = b".sh3crt\0" + struct.pack("<IIIIIIHHI", len(blob), va, rs, rp, 0, 0, 0, 0, 0xC0000040)
+    if data_iat:
+        # .data's virtual and raw sizes both cover the IAT: romimage binds an
+        # EXE's imports at build time and finds an rva only within a section's
+        # raw data ("Could not find rva ... rva2ptr() error"). The zero-filled
+        # tail becomes zeros in the file; later sections' file data moves.
+        s, at = data_iat
+        need = at + 4 * (len(slots) + 1) - s["va"]
+        grow = pe4k.align(need, pe.falign) - s["rs"] if need > s["rs"] else 0
+        cut = s["rp"] + s["rs"]
+        if grow:
+            d[cut:cut] = bytes(grow)
+            for i in range(pe.nsec + 1):
+                h = pe.sh + 40 * i
+                if struct.unpack_from("<I", d, h + 20)[0] >= cut:
+                    struct.pack_into("<I", d, h + 20, struct.unpack_from("<I", d, h + 20)[0] + grow)
+            struct.pack_into("<I", d, s["hdr"] + 16, s["rs"] + grow)
+        struct.pack_into("<I", d, s["hdr"] + 8, max(s["vs"], need))
     struct.pack_into("<H", d, pe.pe + 6, pe.nsec + 1)
     struct.pack_into("<II", d, pe.dir_off(1), va + d_off, 20 * (len(old) + 2))
     struct.pack_into("<I", d, pe.opt + 56, pe4k.align(va + len(blob), pe.salign))
