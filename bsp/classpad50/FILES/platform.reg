@@ -119,6 +119,19 @@
 ; alkaline, 1 = Ni-MH: Casio's two threshold sets (classpad_battery.h).
 ; MilliVoltsPerCount: pack millivolts per A/D count, 10 inferred from those
 ; thresholds; correct it here if a meter says otherwise.
+; What the public battdrvr.reg holds (a BSP includes it; here spelled out): the
+; API-ready event and the driver's device manager entry. Flags 8 =
+; DEVFLAGS_NAKEDENTRIES (Init, not BAT_Init); the IClass is battery.h's
+; BATTERY_DRIVER_CLASS.
+[HKEY_LOCAL_MACHINE\System\Events]
+    "SYSTEM/BatteryAPIsReady"="Battery Interface APIs"
+[HKEY_LOCAL_MACHINE\Drivers\BuiltIn\Battery]
+    "Prefix"="BAT"
+    "Dll"="battdrvr.dll"
+    "Flags"=dword:8
+    "Order"=dword:0
+    "IClass"="{DD176277-CD34-4980-91EE-67DBEF3D8913}"
+
 [HKEY_LOCAL_MACHINE\Software\ClassPad\Battery]
     "Type"=dword:0
     "MilliVoltsPerCount"=dword:A
