@@ -37,7 +37,15 @@ static int reload_on_read, reload_before_write;
 static int suspended, power_calls, irq_enabled;
 static BOOL INTERRUPTS_ENABLE(BOOL enabled) { BOOL old=irq_enabled; irq_enabled=enabled; return old; }
 static BOOL ClasspadPowerTimerIsr(void) { ++power_calls; return suspended; }
+/* calibration model: every read of R64CNT or TCNT0 takes sim_read_us; the RTC counts 128 Hz, TMU0 sim_hz */
+static UINT32 sim_hz, sim_read_us = 3, sim_rtc_start = 1, sim_rtc_dead;
+static uint64_t sim_us;
 static UINT32 readreg(UINT32 addr) {
+    if (sim_hz) {
+        if (addr == RTC_RCR2) return sim_rtc_start;
+        if (addr == RTC_R64CNT) { sim_us += sim_read_us; return sim_rtc_dead ? 5 : (UINT32)((sim_us * 128 / 1000000) & 0x7F); }
+        if (addr == TMU_TCNT0) { sim_us += sim_read_us; return (tstr & TMU_TSTR_STR0) ? tcnt - (UINT32)(sim_us * sim_hz / 1000000) : tcnt; }
+    }
     if (addr == TMU_TCNT0) {
         if (reload_on_read) { reload_on_read=0; tcr |= TMU_TCR_UNF; tcnt=tcor-50; }
         return tcnt;
@@ -114,6 +122,26 @@ int main(void) {
     SetPeriod(1000,7372);
     CHECK("pending IRQ retains old accounting", g_oalTimer.actualMSecPerSysTick==1 && (tcr & TMU_TCR_UNF));
     CHECK("other channels preserved", tstr==7);
+    /* the rate measured against the RTC (InitClock) */
+    {
+        static const UINT32 rates[] = { 7372800, 3686400, 14745600, 9216000, 7000000 };
+        unsigned i;
+        for (i = 0; i < sizeof rates / sizeof rates[0]; i++) {
+            UINT32 got, want = (rates[i] + 500) / 1000;
+            sim_hz = rates[i]; sim_us = 123457; sim_rtc_start = 1; sim_rtc_dead = 0; tstr = 0;
+            got = CalibrateCountsPerMSec(7372);
+            if (got + 1 < want || got > want + 1) { fprintf(stderr, "FAIL calibrate %u Hz: %u counts/ms, want %u\n", rates[i], got, want); ++failures; }
+            CHECK("calibration leaves TMU0 stopped", !(tstr & TMU_TSTR_STR0));
+        }
+        sim_read_us = 9000;                         /* reads slower than an RTC count: still right */
+        sim_hz = 7372800; sim_us = 0; tstr = 0;
+        { UINT32 got = CalibrateCountsPerMSec(7372); if (got < 7300 || got > 7450) { fprintf(stderr, "FAIL calibrate with slow reads: %u\n", got); ++failures; } }
+        sim_read_us = 3;
+        sim_rtc_start = 0; CHECK("RTC stopped: nominal", CalibrateCountsPerMSec(7372) == 7372 && g_calibratedHz == 0);
+        sim_rtc_start = 1; sim_rtc_dead = 1; CHECK("RTC not counting: nominal", CalibrateCountsPerMSec(7372) == 7372);
+        sim_rtc_dead = 0; sim_hz = 100000000; sim_us = 0; CHECK("implausible rate: nominal", CalibrateCountsPerMSec(7372) == 7372);
+        sim_hz = 0;
+    }
     printf("CE 5.0 timer regression: %d failures\n", failures);
     return failures ? 1 : 0;
 }

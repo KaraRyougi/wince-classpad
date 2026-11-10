@@ -583,6 +583,20 @@ BSP 自带；romimage 以区里第一个模块定 CPU 类型，EXT 以 SH3 的 m
 读数 470，碱性第 2 档 96%，Battery 程序切到镍氢后第 1 档 100%；WordPad 从 EXT
 启动正常；无弹窗。Low / Critical 两档只有主机测试覆盖。
 
+**真机电池读数与时钟校准（2026-11-10）。** 电池：第一版 PDD 照搬了 Casio 开机时的
+A/D 设置（ADCUST = 0x8000、ADCCSR = 0x1CF，那是多通道用途的），真机上转换永不
+结束（"No reading"）；改成 Casio 读电池前每次做的序列（0x8002A710：ADCCSR 清
+bit 13、ADCUST = 0、ADCSR = 0x42 再启动）后真机读数正常。casio-emu 只模拟 ADCSR，
+两种写法在模拟器里没有区别。采样间隔 2 s 改 30 s，Battery 程序 10 s 刷新一次。
+时钟：TMU0 的计数率原来是常数（Pphi 29.4912 MHz / 4），而 Pphi 取决于进 CE 之前
+时钟发生器的设置（超频工具会改）。`InitClock` 现在开机时用 RTC 的 128 Hz 计数器
+R64CNT（独立的 32.768 kHz 晶振）量一次：TMU0 自由计数 16 个 RTC 计数（125 ms），
+得到每毫秒计数，RTC 没开、不走或结果超出标称值的 1/8..8 倍时退回标称值；恢复
+（R-standby 后再次 InitClock）沿用开机时的结果。tick、GetTickCount、Sleep、
+性能计数器、OALStall 都跟着这个值。`bsp/tests/test_timer50` 模拟了五种频率和三种
+失败情形。没有跟着校准的：触摸 I2C 的时钟分频、LCD 时序这些按 Pphi 算的硬件
+定时。待 VM 重建后在模拟器和真机验证。
+
 ## 九、还没做的
 
 - 在 VM 里构建（第一次构建会暴露 SDK 的差异：头文件、`WARNISERROR`）。

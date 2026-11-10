@@ -35,7 +35,7 @@
 #define MSTPCR2_ADC     0x08000000
 
 #define BATT_REG_KEY    TEXT("Software\\ClassPad\\Battery")
-#define SAMPLE_MS       2000            // a reading is reused this long
+#define SAMPLE_MS       30000           // a reading is reused this long: the cells change over minutes, and every reading costs two conversions
 #define CONFIG_MS       10000
 
 static DWORD g_type = CLASSPAD_BATT_ALKALINE, g_mvPerCount = 10;

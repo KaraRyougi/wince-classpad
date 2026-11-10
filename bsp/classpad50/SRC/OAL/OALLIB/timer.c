@@ -1,7 +1,8 @@
 //------------------------------------------------------------------------------
 //  timer.c - system tick on TMU0 with a variable period ("tickless"), CE 5.0
 //
-//  TMU0 counts Pphi/4 (7372800 Hz) down and reloads TCOR0 on underflow;
+//  TMU0 counts Pphi/4 (7372800 Hz at the stock clock; InitClock measures the
+//  real rate against the RTC) down and reloads TCOR0 on underflow;
 //  the underflow interrupts through INTEVT 0x400. Register layout and the
 //  pre-swapped access convention were verified by the translator's tmu guest.
 //
@@ -117,12 +118,84 @@ BOOL OALTimerInit(UINT32 msecPerSysTick, UINT32 countsPerMSec, UINT32 countsMarg
 }
 
 //------------------------------------------------------------------------------
+//  The TMU's count rate, measured. Pphi is not a constant of the board: the
+//  clock generator's settings are whatever Casio's OS, or an overclocking
+//  tool run before CE, left (bsp_cfg.h's 29.4912 MHz is the stock value), and
+//  every time CE keeps (the tick, GetTickCount, Sleep, the performance
+//  counter, OALStall) is counted in TMU0 counts. The RTC has its own 32.768
+//  kHz crystal, so its 128 Hz counter R64CNT is the reference: TMU0 runs
+//  free over CALIBRATE_RTC_TICKS of it (125 ms), started and stopped on a
+//  count edge. Returns counts per millisecond, or `nominal` when the RTC is
+//  stopped or does not count, or the result is outside nominal / 8 .. * 8.
+//  Interrupts are off (OEMInit); TMU0 is left stopped.
+//
+#define CALIBRATE_RTC_TICKS     16
+#define CALIBRATE_MAX_READS     4000000         // gives up when R64CNT does not move
+
+static UINT32 g_countsPerMSec;                  // 0 until measured
+static UINT32 g_calibratedHz;                   // the measured count rate, 0 = nominal in use
+
+static BOOL WaitRtcEdge(UINT8 *last)
+{
+    UINT32 reads;
+    UINT8 now;
+    for (reads = 0; reads < CALIBRATE_MAX_READS; reads++) {
+        now = (UINT8)(MMIO_R8(RTC_R64CNT) & 0x7F);
+        if (now != *last) { *last = now; return TRUE; }
+    }
+    return FALSE;
+}
+
+static UINT32 CalibrateCountsPerMSec(UINT32 nominal)
+{
+    UINT32 start, end, counts, perMSec, ticks = 0;
+    UINT8 last, prev;
+
+    g_calibratedHz = 0;
+    if (!(MMIO_R8(RTC_RCR2) & 0x01)) return nominal;                // RTC stopped
+    MMIO_W8(TMU_TSTR, MMIO_R8(TMU_TSTR) & ~TMU_TSTR_STR0);
+    MMIO_W16(TMU_TCR0, TIMER_INPUT_DIVISOR_CODE);                   // no interrupt
+    MMIO_W32(TMU_TCOR0, 0xFFFFFFFF);
+    MMIO_W32(TMU_TCNT0, 0xFFFFFFFF);
+    MMIO_W8(TMU_TSTR, MMIO_R8(TMU_TSTR) | TMU_TSTR_STR0);
+    last = (UINT8)(MMIO_R8(RTC_R64CNT) & 0x7F);
+    if (!WaitRtcEdge(&last)) goto fail;
+    start = MMIO_R32(TMU_TCNT0);
+    while (ticks < CALIBRATE_RTC_TICKS) {
+        prev = last;
+        if (!WaitRtcEdge(&last)) goto fail;
+        ticks += (UINT8)((last - prev) & 0x7F);                     // a slow read may see two counts at once
+    }
+    end = MMIO_R32(TMU_TCNT0);
+    MMIO_W8(TMU_TSTR, MMIO_R8(TMU_TSTR) & ~TMU_TSTR_STR0);
+    counts = start - end;                                           // TMU0 counts down
+    // counts in ticks/128 s -> per ms, rounded
+    perMSec = (UINT32)(((UINT64)counts * 128 + (UINT64)ticks * 500) / ((UINT64)ticks * 1000));
+    if (perMSec < nominal / 8 || perMSec > nominal * 8) return nominal;
+    g_calibratedHz = (UINT32)(((UINT64)counts * 128) / ticks);
+    return perMSec;
+fail:
+    MMIO_W8(TMU_TSTR, MMIO_R8(TMU_TSTR) & ~TMU_TSTR_STR0);
+    return nominal;
+}
+
+//------------------------------------------------------------------------------
 //  InitClock: the kernel's name for it (called with interrupts off from
-//  OEMInit, and from CallOEMPowerOff after OEMPowerOff returns)
+//  OEMInit, and from CallOEMPowerOff after OEMPowerOff returns). The rate is
+//  measured once per boot: a resume keeps it (the translator restores the
+//  clock generator it saved, and the measurement costs 125 ms).
 //
 void InitClock(void)
 {
-    OALTimerInit(TICK_MAX_MSEC, COUNT_FREQUENCY / 1000, TICK_MARGIN_COUNTS);
+    if (g_countsPerMSec == 0) {
+        g_countsPerMSec = CalibrateCountsPerMSec(COUNT_FREQUENCY / 1000);
+        if (g_calibratedHz)
+            RETAILMSG(1, (L"CLASSPAD OAL: TMU0 counts %u Hz by the RTC (nominal %u): %u counts per ms\r\n",
+                          g_calibratedHz, COUNT_FREQUENCY, g_countsPerMSec));
+        else
+            RETAILMSG(1, (L"CLASSPAD OAL: TMU0 rate not measured (RTC stopped or implausible), nominal %u Hz\r\n", COUNT_FREQUENCY));
+    }
+    OALTimerInit(TICK_MAX_MSEC, g_countsPerMSec, TICK_MARGIN_COUNTS);
 }
 
 //------------------------------------------------------------------------------
