@@ -432,6 +432,8 @@ static void Paint(HWND hwnd)
             else
                 SetTextColor(g_bdc, RGB(0, 0, 192));
             ExtTextOut(g_bdc, it[i].x, top, 0, NULL, (LPCWSTR)s, (UINT)len, NULL);
+            if (it[i].kind == HP_TEXT && it[i].lead > 0)
+                ExtTextOut(g_bdc, it[i].x - it[i].lead, top, 0, NULL, L" ", 1, NULL);
             break;
         case HP_RULE: {
             RECT r;
