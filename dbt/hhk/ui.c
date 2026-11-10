@@ -36,11 +36,15 @@ static void title_bar(const char *label)
     gfx_image_draw(8, 7, &art_flag17, 0);
     gfx_text(&font_tr13b, 32, 20, label, RGB(0x001A63));   /* the mockup's 1 px drop shadow */
     gfx_text(&font_tr13b, 31, 19, label, RGB(C_WHITE));
-    if (ui_pressed == UI_HIT_CLOSE) {            /* pressed: the same box, darker */
-        int keep = gfx_level;
-        gfx_level = keep * 3 / 4;
-        gfx_image_draw(W - 27, 4, &art_close, 0);
-        gfx_level = keep;
+    if (ui_pressed == UI_HIT_CLOSE) {            /* pressed: darker red, the same white frame and cross */
+        static const gfx_stop dark[] = { { 0, 0xC87A69 }, { 128, 0xA8402C }, { 255, 0x912816 } };
+        int d;
+        gfx_rrect_rows(W - 27, 4, 21, 21, 3, dark, 3);
+        gfx_rrect_line(W - 27, 4, 21, 21, 3, RGB(C_WHITE));
+        for (d = 0; d < 2; d++) {
+            gfx_line(W - 21 + d, 10, W - 12 + d - 1, 19 - 1, RGB(C_WHITE));
+            gfx_line(W - 12 - d, 10, W - 21 - d + 1, 19 - 1, RGB(C_WHITE));
+        }
     } else {
         gfx_image_draw(W - 27, 4, &art_close, 0);
     }
