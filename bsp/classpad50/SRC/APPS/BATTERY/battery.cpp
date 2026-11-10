@@ -15,6 +15,7 @@
 
 static TCHAR g_line[3][96];
 static TCHAR g_susp[4][64];         // what the last suspend did (classpad_pwrstat.h)
+static TCHAR g_usb[64];             // the battery driver's "UsbDiag": cable pin and controller reading
 
 static DWORD GetType(void)
 {
@@ -59,6 +60,16 @@ static void GetSuspendStats(void)
         SnapLine(g_susp[3], TEXT("n:"), &st.last);
     }
 }
+static void GetUsbDiag(void)
+{
+    HKEY key; TCHAR text[60]; DWORD type, size = sizeof text;
+    g_usb[0] = 0; text[0] = 0;
+    if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, BATT_REG_KEY, 0, 0, &key) != ERROR_SUCCESS) return;
+    if (RegQueryValueEx(key, TEXT("UsbDiag"), NULL, &type, (LPBYTE)text, &size) != ERROR_SUCCESS || type != REG_SZ) text[0] = 0;
+    RegCloseKey(key);
+    text[59] = 0;
+    if (text[0]) { lstrcpy(g_usb, TEXT("USB ")); lstrcpy(g_usb + 4, text); }
+}
 static void Refresh(HWND w)
 {
     SYSTEM_POWER_STATUS_EX2 s;
@@ -74,6 +85,7 @@ static void Refresh(HWND w)
         g_line[2][0] = 0;
     }
     GetSuspendStats();
+    GetUsbDiag();
     InvalidateRect(w, NULL, TRUE);
 }
 static LRESULT CALLBACK WindowProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
@@ -99,6 +111,7 @@ static LRESULT CALLBACK WindowProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         SetBkMode(dc, TRANSPARENT);
         for (i = 0; i < 3; i++) ExtTextOut(dc, 12, 16 + i * 24, 0, NULL, g_line[i], lstrlen(g_line[i]), NULL);
         for (i = 0; i < 4; i++) ExtTextOut(dc, 8, 246 + i * 17, 0, NULL, g_susp[i], lstrlen(g_susp[i]), NULL);
+        ExtTextOut(dc, 8, 246 + 4 * 17, 0, NULL, g_usb, lstrlen(g_usb), NULL);
         EndPaint(w, &ps);
         return 0;
     }
@@ -112,7 +125,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPTSTR, int)
     wc.lpfnWndProc = WindowProc; wc.hInstance = inst; wc.lpszClassName = TEXT("ClasspadBattery");
     RegisterClass(&wc);
     HWND w = CreateWindow(wc.lpszClassName, TEXT("Battery"), WS_VISIBLE | WS_CAPTION | WS_SYSMENU, 0, 0,
-                          GetSystemMetrics(SM_CXSCREEN), 346, NULL, NULL, inst, NULL);
+                          GetSystemMetrics(SM_CXSCREEN), 364, NULL, NULL, inst, NULL);
     if (!w) return 1;
     SetForegroundWindow(w);
     MSG m; while (GetMessage(&m, NULL, 0, 0)) { TranslateMessage(&m); DispatchMessage(&m); }

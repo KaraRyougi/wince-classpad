@@ -80,7 +80,9 @@ static void WakeSnapshot(CLASSPAD_WAKE_SNAPSHOT *s)
 //  wake-up by the serial link. CE inherits IRQ1 unmasked at priority 12 and
 //  has no handler for either: an edge latched in INTREQ00 that nothing
 //  clears is a pending, unmasked interrupt, and R-standby ends at once
-//  every time it is entered. All eight IRQ pins are masked for the standby.
+//  every time it is entered. All eight IRQ pins are masked for the standby
+//  (RStandbyOnce, whatever the panel; StandbySave / StandbyRestore keep
+//  their masks).
 //  Only when the display driver has named the panel (IOCTL_HAL_CLASSPAD_PANEL):
 //  the tables are the fx-CP400's.
 //
@@ -94,13 +96,11 @@ static void WakeSnapshot(CLASSPAD_WAKE_SNAPSHOT *s)
 #define ADC_ADCCSR      0xA461008A
 #define ADC_ADCUST      0xA461008C
 #define ADC_X8E         0xA461008E
-#define INTC_INTMSK00   0xA4140044
-#define INTC_INTMSKCLR00 0xA4140064
 
 static DWORD g_panelKind = CLASSPAD_PANEL_NONE;
 static UINT32 g_pinSaved[sizeof g_pinsOff / sizeof g_pinsOff[0]];
 static struct {
-    UINT8 pfdr, phdr, x162, lcdStart, lcdCr6, intmsk;
+    UINT8 pfdr, phdr, x162, lcdStart, lcdCr6;
     UINT16 lcdCr4, adcX8e;
 } g_hw;
 
@@ -154,10 +154,6 @@ static BOOL HardwareOff(void)
     UINT32 i;
     if (g_panelKind != CLASSPAD_PANEL_NEW && g_panelKind != CLASSPAD_PANEL_OLD) return FALSE;
 
-    // the IRQ pins: none of them wakes CE
-    g_hw.intmsk = MMIO_R8(INTC_INTMSK00);
-    MMIO_W8(INTC_INTMSK00, 0xFF);
-
     // the ports
     for (i = 0; i < sizeof g_pinsOff / sizeof g_pinsOff[0]; i++) {
         const CLASSPAD_PIN_OP *op = &g_pinsOff[i];
@@ -206,9 +202,6 @@ static void HardwareOn(void)
     else                                   LcdPlay(g_lcdOnOld, sizeof g_lcdOnOld / sizeof g_lcdOnOld[0]);
     MMIO_W8(LCDIF_START, g_hw.lcdStart);
     if (!(g_hw.phdr & 0x20)) MMIO_W8(PORT_PHDR, MMIO_R8(PORT_PHDR) & ~0x20);   // was off before: leave it as it was
-
-    MMIO_W8(INTC_INTMSK00, 0xFF);
-    MMIO_W8(INTC_INTMSKCLR00, (UINT8)~g_hw.intmsk);
 }
 
 BOOL OALIoCtlHalClasspadSuspendStats(UINT32 code, VOID *in, UINT32 insize,
@@ -230,6 +223,7 @@ typedef struct {
     UINT8  imr[13];
     UINT16 kcnt, kmode, kint, kwset, kinterval, kautofix, krows, kcols;
     UINT32 mstpcr0, mstpcr2;
+    UINT8  intmsk00;            // the IRQ pins' masks
 } CLASSPAD_STANDBY_STATE;
 static CLASSPAD_STANDBY_STATE g_sb;
 
@@ -253,6 +247,7 @@ static void StandbySave(void)
     g_sb.kcols     = MMIO_R16(KEYSC_KINPINSET);
     g_sb.mstpcr0   = MMIO_R32(CP_POWER_MSTPCR0);
     g_sb.mstpcr2   = MMIO_R32(CP_POWER_MSTPCR2);
+    g_sb.intmsk00  = MMIO_R8(0xA4140044);       // INTMSK00
 }
 
 static void StandbyRestore(void)
@@ -274,6 +269,8 @@ static void StandbyRestore(void)
     MMIO_W16(KEYSC_KIUMODEREG, g_sb.kmode);
     MMIO_W16(KEYSC_KIUINTREG, g_sb.kint | KEYSC_INT_CLEAR);
     MMIO_W16(KEYSC_KIUCNTREG, g_sb.kcnt);
+    MMIO_W8(0xA4140044, 0xFF);                              // the IRQ pins as they were
+    MMIO_W8(0xA4140064, (UINT8)~g_sb.intmsk00);             // INTMSKCLR00
 }
 
 //------------------------------------------------------------------------------
@@ -286,7 +283,12 @@ static UINT32 RStandbyOnce(UINT32 keySysIntr)
     UINT32 i;
 
     // Only an armed RTC alarm may reach the INTC; everything else is masked.
+    // That includes the eight IRQ pins, which have their own mask register:
+    // CE inherits IRQ1 (Casio's "USB cable plugged in" wake-up, falling edge)
+    // unmasked at priority 12 and never clears its request, so one plug of
+    // the cable made every later standby end at once (docs/08, 2026-11-10).
     for (i = 0; i < 13; i++) MMIO_W8(INTC_IMR(i), 0xFF);
+    MMIO_W8(0xA4140044, 0xFF);
     if (ClasspadRtcAlarmArmed()) MMIO_W8(INTC_IMCR(10), INTC_IMR10_RTC_ALARM);
 
     // KEYSC: autonomous scan of Clear's row and column (the OS's standby

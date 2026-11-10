@@ -60,6 +60,14 @@
 #define USB_MSELCRB     0xA4050182      // Casio clears bits 15:14 to use USB, sets them when done
 #define USB_MSELCRB_M   0xC000
 #define RTC_R64CNT      0xA413FEC0      // bit 0 = 64 Hz: Casio's delay counts its edges
+// The cable's own signal. Casio's OS reads Port U bit 1 for "a USB cable is
+// in" (0x8006F942: (PUDR & 2) != 0; used by its USB state machine
+// 0x8007267A, the wait loop of its USB open 0x80076E72 and its battery
+// measurement 0x8002A5CA), and gets the plug-in event from IRQ1. Not used
+// for the answer yet: it goes to "UsbDiag" next to the controller's reading
+// so that one test on the calculator shows whether the two agree.
+#define PORT_PUDR       0xA4050162
+#define PUDR_USB_CABLE  0x02
 #define USB_CLOCK_EDGES 14              // about 110 ms
 
 static DWORD g_type = CLASSPAD_BATT_ALKALINE, g_mvPerCount = 10;
@@ -246,8 +254,8 @@ static BOOL UsbSample(void)
         MMIO_W16(USB_MSELCRB, msb0);
         MMIO_W16(USB_MSELCRA, msa0);
     }
-    wsprintf(diag, TEXT("ms %04X %04X clk %X mstp %u upon %X sys %X ints %04X %04X"),
-             msa0, msb0, clk0, (mstp0 & MSTPCR2_USB) != 0, upon0, sys0, raw1, raw2);
+    wsprintf(diag, TEXT("pin %u controller %u (ints %04X %04X)"),
+             (MMIO_R8(PORT_PUDR) & PUDR_USB_CABLE) != 0, on, raw1, raw2);
     if (lstrcmp(diag, g_usbDiag)) {     // the registry only when something changes
         lstrcpy(g_usbDiag, diag);
         WriteDiagValue(TEXT("UsbDiag"), diag);

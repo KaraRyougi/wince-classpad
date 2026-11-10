@@ -818,6 +818,22 @@ casio-emu：`dbt/emu-patch/add_classpad_lcdpower.py`（深度待机后帧为空�
   `g_suspended` 保持置位。OAL 的 `HardwareOff` 加上 A/D 那三次写，恢复时写回
   0xA461008E。未编译、未验证；触摸控制器对 0x02 的要求只来自反汇编。
 
+**更正：IRQ 引脚早就被屏蔽了；USB 插线的电平在 PUDR bit 1（2026-11-10）。**
+- 上一段说"CE 继承了未屏蔽的 IRQ1，是耗电的最可能主因"，查证后不成立：启动器的
+  接管代码（`dbt/hhk/takeover.S`，默认 `IRQPINS=mask`）在离开 Casio OS 时已经把
+  INTMSK00 写成全屏蔽，交付的镜像都是这样构建的。所以 IRQ1 在 CE 运行和待机期间一直
+  是屏蔽的（除非被屏蔽的引脚请求也能结束 R-standby，这一点没有依据）。主因仍然未知，
+  要看休眠统计。`RStandbyOnce` 现在每次进待机前都再屏蔽一次（原先只在面板断电那段
+  里做），`StandbySave` / `StandbyRestore` 保存恢复这个屏蔽字，属于保险。
+- USB 插线的电平：Casio 用 0x8006F942 读 `(PUDR & 2) != 0`（PUDR = 0xA4050162，
+  Port U bit 1，高 = 插着），调用者是 USB 状态机 0x8007267A（已连接状态下线拔掉的
+  判断）、USB 打开的等待循环 0x80076E72、电池测量 0x8002A5CA，以及 0x80146FC4。
+  0x8006F8F4 是它的去抖版本（6 次、间隔 15）。引脚表里 PUCR = 0x01DD，PU1 是输入。
+  IRQ1 是同一事件的边沿中断，引脚不同。
+- 电池驱动暂时没有改用它：`UsbDiag` 现在写"pin x controller y"，Battery 程序底部
+  显示，一次真机测试就能看出两种读法是否一致；一致的话可以去掉每 5 秒唤醒控制器的
+  采样，直接读这一位。
+
 SpreadCE（casio-emu，心跳采样每 2M 指令一个，`-DDBT_TRACE_BLOCKS` 把宿主 PC 映射回
 客户机块）：启动约 2.8 G 指令，敲三个数加回车（6 个键）约 1 G 指令且全程不空闲，
 点四个单元格的 41 秒里大半空闲。敲数阶段：间接调用/返回查表（`_dbt_lki_ts`）
