@@ -644,8 +644,11 @@ EXT）：正弦曲线到第 317 列。帮助：Start > Help 打开了 PegHelp，
 快捷方式（wincehlp、ctpnlhlp、rnetwhlp、copyrt、wordhlp.lnk）同样挂在那个条件下，
 platform.bib 现在列出它们，另加 `FILES\xpander\mathxpanderhlp.lnk`；platform.dat
 建 `\Windows\Help` 并按微软的名字放入六个快捷方式，WordPad 和 Math Xpander 的在
-EXT，没有 EXT 时目录里就没有这两行。这一改动尚未暂存到 VM（VM 里还留着静态页和
-旧的 bib 行），需要暂存后 Build BSP 再重建镜像验证。
+EXT，没有 EXT 时目录里就没有这两行。VM 重建后在 casio-emu 验证（2026-11-09 夜，
+镜像含合并进来的 SpreadCE）：Start > Help 出 "Help Contents"，六行（Copyright
+Information、Math Xpander、Remote Connections、Settings、Windows CE Basics、
+WordPad），点 Math Xpander、Windows CE Basics、WordPad（EXT）都进到各自的页，Back
+回到目录。没有逐条点的：Settings、Remote Connections、Copyright Information。
 KDEV 表按新 nk.exe 重新生成
 （与加了 SpreadCE 的镜像算出的表相同）。注意：两个会话都往同一个
 `PLATFORM\CLASSPAD` 暂存，`stage_bsp50.py` 会把另一边改过的文本文件盖掉
