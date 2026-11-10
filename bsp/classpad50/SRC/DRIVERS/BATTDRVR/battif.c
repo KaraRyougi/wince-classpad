@@ -15,10 +15,10 @@
 //                        function controller's VBUS input (INTSTS0.VBSTS),
 //                        which Casio's OS reads the same way (0x80016742).
 //                        Casio's OS stops the controller when it is not
-//                        using it, so every few seconds the driver gives
-//                        it its clock for a moment, reads the level and
-//                        puts everything back (UsbSample): the PHY is
-//                        not left powered and USBE stays off.
+//                        using it, so every few seconds a thread powers
+//                        it the way Casio's USB open does, reads the
+//                        level and puts everything back (UsbSample): the
+//                        PHY is not left powered and USBE stays off.
 //  Registry, HKLM\Software\ClassPad\Battery (read again every 10 s, so a
 //  settings program can change it):
 //    "Type"                 dword 0 alkaline (default), 1 Ni-MH
@@ -55,7 +55,12 @@
 #define SAMPLE_MS       30000           // a reading is reused this long: the cells change over minutes, and every reading costs two conversions
 #define CONFIG_MS       10000
 #define USB_SAMPLE_MS   5000            // the USB controller is woken this often to look at VBUS
-#define USB_SETTLE_MS   2
+#define USB_MSELCRA     0xA4050180      // pin function select: Casio clears bits 7:6 to use USB, sets them to 01 when done
+#define USB_MSELCRA_M   0x00C0
+#define USB_MSELCRB     0xA4050182      // Casio clears bits 15:14 to use USB, sets them when done
+#define USB_MSELCRB_M   0xC000
+#define RTC_R64CNT      0xA413FEC0      // bit 0 = 64 Hz: Casio's delay counts its edges
+#define USB_CLOCK_EDGES 14              // about 110 ms
 
 static DWORD g_type = CLASSPAD_BATT_ALKALINE, g_mvPerCount = 10;
 static DWORD g_configTick, g_sampleTick;
@@ -146,61 +151,102 @@ static BOOL Sample(void)
 // A USB cable is supplying power: the controller's VBUS input level.
 //
 // The first version only read INTSTS0 and never saw a cable on the
-// calculator (2026-11-10). Casio's OS stops the controller when it has no
-// use for it (its power-down, 0x80008A82, 0x8000C8FE, 0x8000CB90: SYSCFG = 0,
-// UPONCR = 0, MSTPCR2 bit 20 set, USBCLKCR bit 8 set), and a stopped module
-// reads 0; that is how it should stay while nothing is plugged in. So the
-// level is sampled: every USB_SAMPLE_MS the driver undoes those four steps
-// in gint's power-on order (usb.c hpoweron: USBCLKCR.CLKSTP = 0,
-// MSTPCR2.USB0 = 0, UPONCR = 0x0600, then SYSCFG.SCKE), waits USB_SETTLE_MS,
-// reads the level until three reads in a row agree (the bit is not latched)
-// and writes back exactly what the four registers held before. A controller
-// that was already running is read as it is and left alone. USBE is never
-// set, so nothing shows up on the bus. What the registers held and what was
-// read goes to the registry value "UsbDiag" when it changes (the Battery
+// calculator (2026-11-10). Casio's OS keeps the controller stopped while
+// nothing uses it, and a stopped module reads 0. Its USB open (OS
+// 02.01.7003, 0x8000CFD4) powers the controller (0x800089E8), reads VBSTS
+// once (0x80016742) and gives up with error 3 when it is 0; the power-down
+// is 0x80008A82. UsbSample does the same every USB_SAMPLE_MS, in Casio's
+// order:
+//     MSELCRA &= ~0x00C0, MSELCRB &= ~0xC000     (pin functions)
+//     USBCLKCR &= ~0x100                         (the USB clock runs)
+//     14 edges of RTC R64CNT bit 0               (about 110 ms)
+//     MSTPCR2 &= ~bit 20                         (the module runs)
+//     UPONCR = 0x0600                            (the PHY)
+//     read INTSTS0
+// and back, in the power-down's order: SYSCFG, UPONCR, MSTPCR2, USBCLKCR,
+// MSELCRB, MSELCRA, each to exactly what it held before. A controller that
+// was already running is read as it is and left alone. USBE is never set,
+// so nothing shows up on the bus.
+// Left out of Casio's sequence: the interrupt controller (masks and
+// priorities: no USB interrupt is used here) and its reads and zero writes
+// of 0xFE00807C / 0xFE00808C (unidentified registers; gint's USB driver
+// works on this calculator without them).
+// One step more than Casio: when VBSTS reads 0, SYSCFG.SCKE is set and the
+// register read again (the controller's manual wants SCKE for every
+// register but SYSCFG; Casio reads without it). Both readings go to the
+// registry value "UsbDiag" with what the registers held (the Battery
 // program shows it): there is no debug output to read on the device.
-// Not verified on hardware: that VBSTS is valid this soon after the clock
-// comes back.
+// Not verified on hardware.
 //
-// Everything is guarded: where the controller is not there to read
-// (casio-emu's ClassPad profile has none, and every read raised an exception
-// in device.exe, twice a second with the taskbar polling) the driver stops
-// asking and reports battery power.
-static int g_usbThere;                  // 0 not tried, 1 readable, -1 faulted
-static BOOL g_usbOn, g_usbHave;
-static DWORD g_usbTick;
+// The 110 ms make this a thread of its own, so nobody asking for the
+// battery status waits. Everything is guarded: where the controller is not
+// there to read (casio-emu's ClassPad profile has none: every read raised an
+// exception in device.exe) the thread ends and the driver reports battery
+// power.
+static volatile BOOL g_usbOn;
 static TCHAR g_usbDiag[96];
+
+static void UsbClockDelay(void)
+{
+    UINT8 last = (UINT8)(MMIO_R8(RTC_R64CNT) & 1), now;
+    DWORD start = GetTickCount();
+    int edges = 0;
+    while (edges < USB_CLOCK_EDGES && GetTickCount() - start < 300) {  // the RTC not counting: 300 ms at most
+        Sleep(1);
+        now = (UINT8)(MMIO_R8(RTC_R64CNT) & 1);
+        if (now != last) { last = now; edges++; }
+    }
+}
+
+static BOOL UsbVbus(UINT16 *raw)
+{
+    UINT16 a, b, c;
+    int i;
+    *raw = MMIO_R16(USB_INTSTS0);
+    for (i = 0; i < 8; i++) {           // three reads in a row that agree: the bit is not latched
+        a = MMIO_R16(USB_INTSTS0) & USB_VBSTS;
+        b = MMIO_R16(USB_INTSTS0) & USB_VBSTS;
+        c = MMIO_R16(USB_INTSTS0) & USB_VBSTS;
+        if (a == b && b == c) return a != 0;
+    }
+    return FALSE;
+}
 
 static BOOL UsbSample(void)
 {
     UINT32 clk0, mstp0;
-    UINT16 upon0, sys0, a = 0, b, c, raw;
-    BOOL woke, on = FALSE;
+    UINT16 upon0, sys0, msa0, msb0, raw1, raw2 = 0;
+    BOOL woke, on;
     TCHAR diag[96];
-    int i;
+    msa0 = MMIO_R16(USB_MSELCRA); msb0 = MMIO_R16(USB_MSELCRB);
     clk0 = MMIO_R32(CPG_USBCLKCR); mstp0 = MMIO_R32(MSTPCR2);
     upon0 = MMIO_R16(USB_UPONCR);
     woke = (clk0 & USBCLKCR_STOP) || (mstp0 & MSTPCR2_USB) || upon0 != USB_UPON;
-    if (clk0 & USBCLKCR_STOP) MMIO_W32(CPG_USBCLKCR, clk0 & ~USBCLKCR_STOP);
-    if (mstp0 & MSTPCR2_USB) MMIO_W32(MSTPCR2, MMIO_R32(MSTPCR2) & ~MSTPCR2_USB);
-    if (upon0 != USB_UPON) MMIO_W16(USB_UPONCR, USB_UPON);
-    sys0 = MMIO_R16(USB_SYSCFG);
-    if (!(sys0 & USB_SCKE)) { MMIO_W16(USB_SYSCFG, (UINT16)(sys0 | USB_SCKE)); woke = TRUE; }
-    if (woke) Sleep(USB_SETTLE_MS);
-    raw = MMIO_R16(USB_INTSTS0);
-    for (i = 0; i < 8; i++) {
-        a = MMIO_R16(USB_INTSTS0) & USB_VBSTS;
-        b = MMIO_R16(USB_INTSTS0) & USB_VBSTS;
-        c = MMIO_R16(USB_INTSTS0) & USB_VBSTS;
-        if (a == b && b == c) { on = a != 0; break; }
+    if (woke) {
+        MMIO_W16(USB_MSELCRA, msa0 & ~USB_MSELCRA_M);
+        MMIO_W16(USB_MSELCRB, msb0 & ~USB_MSELCRB_M);
+        MMIO_W32(CPG_USBCLKCR, clk0 & ~USBCLKCR_STOP);
+        UsbClockDelay();
+        MMIO_W32(MSTPCR2, MMIO_R32(MSTPCR2) & ~MSTPCR2_USB);
+        MMIO_W16(USB_UPONCR, USB_UPON);
     }
-    // back to what it was, in the power-down order
-    if (!(sys0 & USB_SCKE)) MMIO_W16(USB_SYSCFG, sys0);
-    if (upon0 != USB_UPON) MMIO_W16(USB_UPONCR, upon0);
-    if (mstp0 & MSTPCR2_USB) MMIO_W32(MSTPCR2, MMIO_R32(MSTPCR2) | MSTPCR2_USB);
-    if (clk0 & USBCLKCR_STOP) MMIO_W32(CPG_USBCLKCR, MMIO_R32(CPG_USBCLKCR) | USBCLKCR_STOP);
-    wsprintf(diag, TEXT("clk %X mstp %u upon %X sys %X woke %u ints %04X"),
-             clk0, (mstp0 & MSTPCR2_USB) != 0, upon0, sys0, woke, raw);
+    sys0 = MMIO_R16(USB_SYSCFG);
+    on = UsbVbus(&raw1);
+    if (!on && !(sys0 & USB_SCKE)) {
+        MMIO_W16(USB_SYSCFG, (UINT16)(sys0 | USB_SCKE));
+        Sleep(1);
+        on = UsbVbus(&raw2);
+        MMIO_W16(USB_SYSCFG, sys0);
+    }
+    if (woke) {
+        MMIO_W16(USB_UPONCR, upon0);
+        if (mstp0 & MSTPCR2_USB) MMIO_W32(MSTPCR2, MMIO_R32(MSTPCR2) | MSTPCR2_USB);
+        if (clk0 & USBCLKCR_STOP) MMIO_W32(CPG_USBCLKCR, MMIO_R32(CPG_USBCLKCR) | USBCLKCR_STOP);
+        MMIO_W16(USB_MSELCRB, msb0);
+        MMIO_W16(USB_MSELCRA, msa0);
+    }
+    wsprintf(diag, TEXT("ms %04X %04X clk %X mstp %u upon %X sys %X ints %04X %04X"),
+             msa0, msb0, clk0, (mstp0 & MSTPCR2_USB) != 0, upon0, sys0, raw1, raw2);
     if (lstrcmp(diag, g_usbDiag)) {     // the registry only when something changes
         lstrcpy(g_usbDiag, diag);
         WriteDiagValue(TEXT("UsbDiag"), diag);
@@ -209,26 +255,31 @@ static BOOL UsbSample(void)
     return on;
 }
 
-static BOOL UsbPowered(void)
+static DWORD WINAPI UsbThread(LPVOID unused)
 {
-    if (g_usbThere < 0) return FALSE;
-    if (g_usbHave && GetTickCount() - g_usbTick < USB_SAMPLE_MS) return g_usbOn;
-    __try {
-        g_usbOn = UsbSample();
-        g_usbThere = 1;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        g_usbThere = -1; g_usbOn = FALSE;
-        RETAILMSG(1, (TEXT("CLASSPAD BATTERY: no USB controller to read, AC line reported offline\r\n")));
-        WriteDiagValue(TEXT("UsbDiag"), TEXT("no USB controller to read"));
+    UNREFERENCED_PARAMETER(unused);
+    for (;;) {
+        __try {
+            g_usbOn = UsbSample();
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            g_usbOn = FALSE;
+            RETAILMSG(1, (TEXT("CLASSPAD BATTERY: no USB controller to read, AC line reported offline\r\n")));
+            WriteDiagValue(TEXT("UsbDiag"), TEXT("no USB controller to read"));
+            return 0;
+        }
+        Sleep(USB_SAMPLE_MS);
     }
-    g_usbTick = GetTickCount(); g_usbHave = TRUE;
-    return g_usbOn;
 }
+
+static BOOL UsbPowered(void) { return g_usbOn; }
 
 BOOL WINAPI BatteryPDDInitialize(LPCTSTR pszRegistryContext)
 {
+    HANDLE thread;
     UNREFERENCED_PARAMETER(pszRegistryContext);
     ReadConfig();
+    thread = CreateThread(NULL, 0, UsbThread, NULL, 0, NULL);
+    if (thread) CloseHandle(thread);
     RETAILMSG(1, (TEXT("CLASSPAD BATTERY: A/D channel 2, %s curve, %u mV per count\r\n"),
                   g_type == CLASSPAD_BATT_NIMH ? TEXT("Ni-MH") : TEXT("alkaline"), g_mvPerCount));
     return TRUE;
@@ -237,7 +288,7 @@ BOOL WINAPI BatteryPDDInitialize(LPCTSTR pszRegistryContext)
 void WINAPI BatteryPDDDeinitialize(void) {}
 
 // After a suspend take a fresh reading (every conversion sets the converter up again)
-void WINAPI BatteryPDDResume(void) { g_haveSample = FALSE; g_usbHave = FALSE; }
+void WINAPI BatteryPDDResume(void) { g_haveSample = FALSE; }
 
 void WINAPI BatteryPDDPowerHandler(BOOL bOff) { UNREFERENCED_PARAMETER(bOff); }
 

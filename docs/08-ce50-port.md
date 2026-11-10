@@ -669,6 +669,19 @@ INTSTS0 写到注册表 `UsbDiag`（有变化才写），Battery 程序底部两
 battery.cpp 写到了 VM：VM 上另有一个会话加的 FUGUEDSK 存储驱动（classpad.bat、
 platform.reg、platform.bib、DRIVERS\dirs），按用户意见不并入本分支。
 
+**USB 采样按 Casio 的打开流程对齐（2026-11-09 深夜）。** 读了 OS 02.01.7003 的
+USB 打开 0x8000CFD4：上电 0x800089E8，随后 0x80018F50 经 0x80016742 读一次 VBSTS，
+为 0 返回 3；断电 0x80008A82。上电顺序：MSELCRA（0xA4050180）清 bit 7:6、MSELCRB
+（0xA4050182）清 bit 15:14；USBCLKCR 清 bit 8；数 RTC R64CNT bit 0 的 14 次翻转
+（约 110 ms）；MSTPCR2 清 bit 20；UPONCR = 0x0600；读写 0xFE00807C / 0xFE00808C
+（清 0，不明）；屏蔽 USB 中断并设优先级。读 VBUS 前没有置 SYSCFG.SCKE，也没有
+另外的延时。断电反过来：SYSCFG = 0、UPONCR = 0、MSTPCR2 置位、USBCLKCR 置位、
+MSELCRB 置 0xC000、MSELCRA bit 7:6 = 01。`UsbSample` 现在照这个顺序做并按断电顺序
+逐个恢复原值；因为有 110 ms，采样放到 PDD 自己的线程里（每 5 秒），
+BatteryPDDGetStatus 只取结果。没照做的：中断控制器（不用中断）和 0xFE0080xx 两个
+不明寄存器（gint 的 USB 驱动在这台机器上不碰它们也能用）。多做的一步：VBSTS 读到
+0 时再置 SCKE 读一次；两次读数都进 `UsbDiag`。未在真机验证。
+
 SpreadCE（casio-emu，心跳采样每 2M 指令一个，`-DDBT_TRACE_BLOCKS` 把宿主 PC 映射回
 客户机块）：启动约 2.8 G 指令，敲三个数加回车（6 个键）约 1 G 指令且全程不空闲，
 点四个单元格的 41 秒里大半空闲。敲数阶段：间接调用/返回查表（`_dbt_lki_ts`）
