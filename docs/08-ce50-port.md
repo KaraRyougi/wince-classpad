@@ -1032,3 +1032,57 @@ silenced), with an RTC alarm 20 s (10 s) ahead as the safety wake-up. The
 verdict is written to CMCSR bits 2:0, which the Probe snapshot shows:
 0 none, 1 / 2 the step that held, 4 held with KEYSC silenced, 7 ended at
 once even then. Result on the calculator: pending.
+
+Result of the first search run on the calculator: verdict 7. With the IRQ
+pins masked and KEYSC silenced through its registers (no rows, no columns,
+no enables, mode 0) the standby still ended within 7 s; Clear kept waking
+the machine. The search now stops KEYSC's module clock as well in its probe
+step, the resume stub records the RTC time, NMIFCR, INTREQ00, RCR1,
+KIUINTREG and STBCR first thing after the wake-up (save block EV0..EV2), and
+the STANDBY_DIAG build prints them with the time the core was off (1/128 s)
+over stripe 2 for 3 s.
+
+### The OS's standby is a loop that never leaves ROM (OS 02.01.7003 0x80020ED2)
+
+Read while looking for what the OS does differently around SLEEP:
+
+    80020ed2  [fd800000] = 0, [fd800010] = 0
+    80020ede  SR = 0x70000000, STBCR = 0x21, jsr 0x80085E74   ; BAR = 0x80085EC2, registers to RS memory, SLEEP
+              (wake-up lands at 0x80085EC2 in ROM: SR.RB cleared, STBCR &= ~0x20,
+               BAR = 0xA0000000, RWTCSR = 0xA507, registers back, rts)
+    80020ee6  jsr 0x80070EB8   ; KEYSC: if KIUSTATEREG bit 0 is set -> 0 (only KIUINTREG |= 0x7F);
+                               ; else read KIUDATA0..5, r0 = Clear (word 0 bit 1), mode 0 -> 0x0200
+    80020ef2  jsr 0x8006F886   ; INTREQ00 bit 6 clear -> 1, bit 5 set -> 2
+    80020efc  if ((keysc ? 4 : 0) | pins) & 7 == 0 -> back to 80020ed2: SLEEP again
+
+So the OS itself expects wake-ups that are nobody's business and answers
+them from ROM with its stack in RS memory: the SDRAM stays in self-refresh,
+no cache, no pins, a few dozen instructions, SLEEP. The memory resume
+(0x800209C4) only runs once the loop has a reason. Our snapshot at the stray
+wake-ups reads KIUSTATEREG = 0001, which is exactly the OS's "nothing, sleep
+again" case. Our path per wake-up is the opposite: SDRAM out of self-refresh
+(with a wait of more than two R64CNT steps), caches, MMU, the translator, the
+OAL's loop, and all the way down again. Whatever the rate of these wake-ups
+turns out to be (the dt figure of the diagnostic build), the answer to them
+has to move into the resume stub, as the OS has it.
+
+Also read on the same pass (2026-11-10), all without effect on the hardware:
+0x80020414 switches the stack to RS memory (0xFD802000), 0x80072856 stores
+two state words, 0x80020BE0 only saves the INTC (IPRA..IPRL, IMR0..IMR12)
+and the BSC registers to 0xFD80001C. So the OS goes to sleep with its
+ordinary interrupt masks: KEYSC stays unmasked at the INTC, the RTC is
+taken out by its priority (IPRK &= 0x0FFF). The OAL does the opposite: every
+IMR is 0xFF (the alarm's bit open if an alarm is armed), KEYSC masked. If a
+masked KEYSC cannot end R-standby, the Clear wake-up seen so far is only the
+OAL's loop reading the key between stray wake-ups; to be checked once a
+standby holds.
+
+From the stripe timing of the earlier runs (13 entries in 27 s with 8
+stripes of 0.25 s each) the core is off for well under 0.1 s per entry: the
+wake condition is already there when SLEEP executes.
+
+Search steps from this build on: 1 IRQ pins masked, 2 module clocks as the
+OS had them at the launch (CE's drivers start I2C, A/D and at times USB),
+3 and 4 KEYSC silenced with its clock stopped, 5 KEYSC as the OS programs
+it. Emulator: the stub's evidence capture and the on-screen text work
+(suspend 51 s, dt 0x1984, KIUINTREG 0x080F at the wake-up, resumed by Clear).

@@ -3056,6 +3056,37 @@ static sf_u32 g_standbys, g_standby_wakes;
 /* make STANDBY_DIAG=1 (docs/06 section 8): stripes 5-8 of the resume
  * path; standby.S paints 1-4. Rows 66*(stage-1).. full width, ~0.5 s each. */
 static sf_u32 g_diag_woke;
+#include "lcdfont.h"
+/* a line of text, 40 columns of 8x16, over stripe 2 (rows 66..129) */
+static void diag_text(sf_u32 line, const char *t)
+{
+    volatile sf_u8 *prdr = (volatile sf_u8 *)0xA405013Cu;
+    volatile sf_u16 *port = (volatile sf_u16 *)0xB4000000u;
+    sf_u32 c0 = dbt_lcd_col0(prdr, port), c1 = c0 + 319, y0 = 66 + 16 * line, y1 = y0 + 15, y, x, col, end = 0;
+    dbt_lcd_select(prdr, port, 0x2A);
+    dbt_lcd_param(port, c0 >> 8); dbt_lcd_param(port, c0 & 0xFF); dbt_lcd_param(port, c1 >> 8); dbt_lcd_param(port, c1 & 0xFF);
+    dbt_lcd_select(prdr, port, 0x2B);
+    dbt_lcd_param(port, y0 >> 8); dbt_lcd_param(port, y0 & 0xFF); dbt_lcd_param(port, y1 >> 8); dbt_lcd_param(port, y1 & 0xFF);
+    dbt_lcd_select(prdr, port, 0x2C);
+    for (y = 0; y < 16; y++) {
+        end = 0;
+        for (col = 0; col < 40; col++) {
+            char ch = end ? ' ' : t[col];
+            const unsigned char *g;
+            if (!ch) { end = 1; ch = ' '; }
+            g = lcdfont[(ch >= 32 && ch < 127) ? ch - 32 : 0];
+            for (x = 0; x < 8; x++) *port = (g[y >> 1] & (0x80u >> (x >> 1))) ? 0xFFFFu : 0x0000u;
+        }
+    }
+    dbt_lcd_sync();
+}
+static char *diag_hex(char *p, sf_u32 v, sf_u32 digits)
+{
+    while (digits--) *p++ = "0123456789ABCDEF"[(v >> (4 * digits)) & 15];
+    *p++ = ' ';
+    return p;
+}
+static char *diag_str(char *p, const char *t) { while (*t) *p++ = *t++; return p; }
 static void diag_stripe(sf_u32 stage, sf_u32 colour)
 {
     volatile sf_u8 *prdr = (volatile sf_u8 *)0xA405013Cu, *r64 = (volatile sf_u8 *)0xA413FEC0u;
@@ -3078,8 +3109,15 @@ static void diag_stripe(sf_u32 stage, sf_u32 colour)
  * the remaining suspects by itself within one suspend: every standby that
  * ends at once (under 7 s) adds the next measure to the following entry.
  *   step 1: IRQ0..7 pins masked (INTMSK00 = 0xFF; the OAL's snapshot read 00)
- *   step 2: KEYSC as the OS programs it (all rows and columns, its timings)
- *   step 3, 4: KEYSC silenced (no rows, no columns, no enables, mode 0)
+ *   step 2: every module clock the OS had stopped when the launcher started
+ *           stopped again (MSTPCR0, MSTPCR2; CE's drivers start I2C, A/D, USB)
+ *   step 3, 4: KEYSC silenced (no rows, no columns, no enables, mode 0) and
+ *              its module clock stopped (MSTPCR0 bit 6)
+ *   step 5: KEYSC as the OS programs it (all rows and columns, its timings)
+ * First run on the calculator (KEYSC silenced by its registers only, clock
+ * left on): verdict 7. The resume stub now also records the RTC time, NMIFCR,
+ * INTREQ00, RCR1, KIUINTREG and STBCR first thing after the wake-up; the
+ * STANDBY_DIAG build prints them over stripe 2.
  * From step 1 on an RTC alarm 20 s ahead (10 s for steps 3 and 4) is the
  * safety wake-up, so a standby that holds still comes back. The verdict goes
  * where the OAL's wake snapshot (Battery program, Probe ticked) shows it:
@@ -3088,6 +3126,8 @@ static void diag_stripe(sf_u32 stage, sf_u32 colour)
  *   4 = it held with KEYSC silenced (KEYSC is the source),
  *   7 = it ended at once even then (not an INTC-visible source at all). */
 static sf_u32 g_sb_step, g_sb_code, g_sb_last = 0xFFFFu;
+sf_u32 dbt_standby_mstp_or;     /* standby.S: MSTPCR0 bits set for the standby */
+sf_u32 dbt_boot_mstp0, dbt_boot_mstp2;  /* main.c: MSTPCR0 and MSTPCR2 as Casio's OS left them at the launch */
 static sf_u32 sb_bcd(sf_u32 v) { return (v >> 4) * 10 + (v & 15); }
 static sf_u32 sb_now(void)      /* seconds within the hour */
 {
@@ -3103,7 +3143,7 @@ static sf_u32 dbt_standby(void)
     volatile sf_u8 *rtc = (volatile sf_u8 *)0xA413FEC0u;
     volatile sf_u16 *ksc = (volatile sf_u16 *)0xA44B0000u;
     volatile sf_u16 *iprk = (volatile sf_u16 *)0xA4080028u;
-    sf_u32 sb_t0, sb_probe, sb_alarm, sb_sv_al[6], sb_sv_rcr1 = 0, sb_sv_rcr3 = 0, sb_sv_imr10 = 0, sb_sv_iprk = 0, sb_sv_k[6];
+    sf_u32 sb_t0, sb_tk0, sb_dt = 0, sb_step0, sb_sv_mstp2 = 0, sb_probe, sb_alarm, sb_sv_al[6], sb_sv_rcr1 = 0, sb_sv_rcr3 = 0, sb_sv_imr10 = 0, sb_sv_iprk = 0, sb_sv_k[6];
     for (i = 0; i < n; i++) stub[i] = dbt_standby_stub[i];
     stub[n - 1] = RS_BLOCK;                     /* the stub's last longword: where the block is */
     g_standbys++;
@@ -3169,11 +3209,18 @@ static sf_u32 dbt_standby(void)
     sb_t0 = sb_now();
     if (((sb_t0 + 3600 - g_sb_last) % 3600) > 6) { g_sb_step = 0; g_sb_code = 0; }     /* a new suspend: the OAL's loop comes back within 3 s */
     sb_probe = g_sb_step == 3 || g_sb_step == 4;
+    sb_step0 = g_sb_step;
+    dbt_standby_mstp_or = sb_probe ? 0x40u : 0;                                         /* the probe: KEYSC's clock stopped too */
+    if (g_sb_step >= 2) {                                                               /* every module the OS had stopped at the launch */
+        dbt_standby_mstp_or |= dbt_boot_mstp0 & ~0x60u;
+        sb_sv_mstp2 = *(volatile sf_u32 *)0xA4150038u;
+        *(volatile sf_u32 *)0xA4150038u = sb_sv_mstp2 | dbt_boot_mstp2;
+    }
     sb_alarm = g_sb_step >= 1;
     sb_sv_k[0] = ksc[0x0E >> 1]; sb_sv_k[1] = ksc[0x16 >> 1]; sb_sv_k[2] = ksc[0x18 >> 1];
     sb_sv_k[3] = ksc[0x1A >> 1]; sb_sv_k[4] = ksc[0x1C >> 1]; sb_sv_k[5] = ksc[0x14 >> 1];
     if (g_sb_step >= 1) *(volatile sf_u8 *)0xA4140044u = 0xFF;                          /* INTMSK00: IRQ0..7 */
-    if (g_sb_step >= 2 && !sb_probe) {
+    if (g_sb_step >= 5) {
         ksc[0x1A >> 1] = 0x0FFF; ksc[0x1C >> 1] = 0x00FF;                               /* KOUT, KIN: all */
         ksc[0x0E >> 1] = 0x8042; ksc[0x18 >> 1] = 0x00C8; ksc[0x16 >> 1] = 0;           /* AUTOFIX, INTERVAL, WSET */
         ksc[0x14 >> 1] = 0x00FF; ksc[0x14 >> 1] = 0x0800;
@@ -3197,6 +3244,8 @@ static sf_u32 dbt_standby(void)
         if (!(sb_sv_iprk & 0xF000u)) *iprk = (sf_u16)(sb_sv_iprk | 0x2000u);
         *(volatile sf_u8 *)(0xA40800C0u + 4 * 10) = 0x01;                               /* IMCR10: RTC alarm unmasked */
     }
+    do { sb_tk0 = rtc[2]; i = rtc[0] & 0x7Fu; } while (sb_tk0 != rtc[2]);
+    sb_tk0 = sb_bcd(sb_tk0 & 0x7F) * 128 + i;                                           /* 1/128 s within the minute */
     onchip_save();                              /* last: nothing below writes XYRAM before the sleep */
     r = dbt_standby_sleep(block);
 #ifdef DBT_STANDBY_DIAG
@@ -3222,6 +3271,7 @@ static sf_u32 dbt_standby(void)
     *(volatile sf_u32 *)0xA4150030u = (block[(0x40 + 0x10) / 4] & ~0x4000u) | cmt_gate;     /* MSTPCR0, the CMT's gate as it was before the standby */
     *(volatile sf_u32 *)0xA4150020u = block[(0x40 + 0x14) / 4];     /* STBCR */
     /* the wake-source search: everything it changed back, then the verdict */
+    if (sb_step0 >= 2) *(volatile sf_u32 *)0xA4150038u = sb_sv_mstp2;
     if (sb_alarm) {
         rtc[0x1C] = (sf_u8)(sb_sv_rcr1 & 0x90);
         for (i = 0; i < 6; i++) rtc[0x10 + 2 * i] = (sf_u8)sb_sv_al[i];
@@ -3230,20 +3280,21 @@ static sf_u32 dbt_standby(void)
         *iprk = (sf_u16)sb_sv_iprk;
         if (sb_sv_imr10 & 0x01) *(volatile sf_u8 *)(0xA4080080u + 4 * 10) = 0x01;
     }
-    if (g_sb_step >= 2) {
+    if (sb_step0 >= 3) {
         ksc[0x0E >> 1] = (sf_u16)sb_sv_k[0]; ksc[0x16 >> 1] = (sf_u16)sb_sv_k[1]; ksc[0x18 >> 1] = (sf_u16)sb_sv_k[2];
         ksc[0x1A >> 1] = (sf_u16)sb_sv_k[3]; ksc[0x1C >> 1] = (sf_u16)sb_sv_k[4];
         if (sb_probe) { ksc[0x10 >> 1] = 0x0200; ksc[0x14 >> 1] = (sf_u16)(sb_sv_k[5] & 0xFF00u); }
     }
     if (r) {
-        sf_u32 held;
-        g_sb_last = sb_now();
-        held = ((g_sb_last + 3600 - sb_t0) % 3600) >= 7;
+        sf_u32 held, ev0 = block[(0x40 + 0x34) / 4];
+        /* how long the core was off: the stub read the RTC first thing */
+        sb_dt = (sb_bcd((ev0 >> 24) & 0x7F) * 128 + ((ev0 >> 16) & 0x7F) + 60 * 128 - sb_tk0) % (60 * 128);
+        held = sb_dt >= 5 * 128;
         if (sb_probe) {
             if (held) { g_sb_code = 4; g_sb_step = 5; }
             else if (++g_sb_step == 5) g_sb_code = 7;
         } else if (held) {
-            if (!g_sb_code && g_sb_step >= 1 && g_sb_step <= 2) g_sb_code = g_sb_step;
+            if (!g_sb_code && (g_sb_step == 1 || g_sb_step == 2)) g_sb_code = g_sb_step;
         } else if (g_sb_step < 3) g_sb_step++;
         {
             volatile sf_u32 *mstp0 = (volatile sf_u32 *)0xA4150030u;
@@ -3261,7 +3312,36 @@ static sf_u32 dbt_standby(void)
     dbt_puts(r ? "[dbt] R-standby wake\n" : "[dbt] R-standby not entered\n");
 #ifdef DBT_STANDBY_DIAG
     if (r) { diag_stripe(7, 0x5D1C); g_diag_woke = 1; }    /* 7, steel blue: returning into the IL-memory stubs */
+    /* the wake evidence as text over stripe 2, held for 3 s (photograph it):
+     *   n <entries> s <step of this entry> c <verdict> dt <core off, 1/128 s>
+     *   EV <RSECCNT R64CNT NMIFCR> <INTREQ00 RCR1 KIUINTREG> STBCR <at the wake>
+     *   now: ICR0 ICR1 INTREQ00 INTMSK00 NMIFCR RWTCSR
+     *   now: IMR5 IMR10 IPRF IPRK MSTPCR0
+     *   MSTPCR2 now, MSTPCR0 and MSTPCR2 at the launch (over stripe 3) */
+    if (r) {
+        char t[48], *q;
+        volatile sf_u8 *r64 = (volatile sf_u8 *)0xA413FEC0u;
+        sf_u32 w, k;
+        q = diag_str(t, "n "); q = diag_hex(q, g_standbys, 4); q = diag_str(q, "s "); q = diag_hex(q, sb_step0, 1);
+        q = diag_str(q, "c "); q = diag_hex(q, g_sb_code, 1); q = diag_str(q, "dt "); q = diag_hex(q, sb_dt, 4); *q = 0;
+        diag_text(0, t);
+        q = diag_hex(t, block[(0x40 + 0x34) / 4], 8); q = diag_hex(q, block[(0x40 + 0x38) / 4], 8);
+        q = diag_hex(q, block[(0x40 + 0x3C) / 4], 8); *q = 0;
+        diag_text(1, t);
+        q = diag_hex(t, *(volatile sf_u16 *)0xA4140000u, 4); q = diag_hex(q, *(volatile sf_u16 *)0xA414001Cu, 4);
+        q = diag_hex(q, *(volatile sf_u8 *)0xA4140024u, 2); q = diag_hex(q, *(volatile sf_u8 *)0xA4140044u, 2);
+        q = diag_hex(q, *(volatile sf_u16 *)0xA41400C0u, 4); q = diag_hex(q, *(volatile sf_u16 *)0xA4520004u, 4); *q = 0;
+        diag_text(2, t);
+        q = diag_hex(t, *(volatile sf_u8 *)(0xA4080080u + 4 * 5), 2); q = diag_hex(q, *(volatile sf_u8 *)(0xA4080080u + 4 * 10), 2);
+        q = diag_hex(q, *(volatile sf_u16 *)0xA4080014u, 4); q = diag_hex(q, *(volatile sf_u16 *)0xA4080028u, 4);
+        q = diag_hex(q, *(volatile sf_u32 *)0xA4150030u, 8); *q = 0;
+        diag_text(3, t);
+        q = diag_hex(t, *(volatile sf_u32 *)0xA4150038u, 8); q = diag_hex(q, dbt_boot_mstp0, 8); q = diag_hex(q, dbt_boot_mstp2, 8); *q = 0;
+        diag_text(4, t);
+        for (k = 0; k < 6; k++) { w = *r64; while (((*r64 - w) & 63) < 32) ; }
+    }
 #endif
+    if (r) g_sb_last = sb_now();
     return r;
 }
 

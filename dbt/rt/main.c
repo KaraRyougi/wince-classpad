@@ -74,6 +74,7 @@ static sf_u32 load_nk(const sf_u8 *src, sf_u32 maxlen, const char *where, nkbin_
     return info.entry;
 }
 
+extern sf_u32 dbt_boot_mstp0, dbt_boot_mstp2;
 void dbt_main(void)
 {
     dbt_rt_config cfg;
@@ -83,6 +84,9 @@ void dbt_main(void)
     /* HollyHock inherits the Casio OS's module gates and standby selection.
      * CE's OEMIdle emits a native SLEEP and assumes the system timer runs.
      * The emulator's all-zero reset state used to hide this dependency. */
+    /* the module gates as Casio's OS left them: rt.c's wake-source search */
+    dbt_boot_mstp0 = *(volatile unsigned *)0xA4150030u;
+    dbt_boot_mstp2 = *(volatile unsigned *)0xA4150038u;
 #ifdef DBT_BOOT_POWER_INIT
     dbt_boot_power((volatile unsigned *)0xA4150020u,
                    (volatile unsigned *)0xA4150030u);

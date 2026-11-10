@@ -64,6 +64,9 @@
 #define B_PHCR      0x28                /* PHCR, a word */
 #define B_SPC       0x2C                /* SPC and SSR: core registers, lost in R-standby */
 #define B_SSR       0x30
+#define B_EV0       0x34                /* wake evidence, read first thing in the resume stub: */
+#define B_EV1       0x38                /* EV0 = RSECCNT<<24 | R64CNT<<16 | NMIFCR, EV1 = INTREQ00<<24 | RCR1<<16 | KIUINTREG */
+#define B_EV2       0x3C                /* EV2 = STBCR */
 #define B_SIZE      0x80
 
         .text
@@ -113,6 +116,9 @@ _dbt_standby_sleep:
         mov.l   r0, @(B_MSTPCR0, r5)
         mov.l   .Lrtc_keysc_on, r2
         and     r2, r0
+        mov.l   .Lmstp_or, r2
+        mov.l   @r2, r2
+        or      r2, r0                  /* rt.c's wake-source search: module clocks to stop as well */
         mov.l   r0, @r1                 /* RTC and KEYSC keep their clock */
         mov.l   .Lstbcr, r1
         mov.l   @r1, r0
@@ -279,6 +285,7 @@ _dbt_standby_sleep:
 .Lphcr:         .long 0xA405010E
 .Lcfff:         .long 0xFFFFCFFF
 .Lintevt:       .long 0xFF000028
+.Lmstp_or:      .long _dbt_standby_mstp_or
 
 /* ------------------------------------------------------------------ */
 /* The resume stub: copied to RS memory (0xFD801200), entered at BAR with
@@ -291,6 +298,40 @@ _dbt_standby_sleep:
 _dbt_standby_stub:
         mov.l   .Ls_sr, r0
         ldc     r0, sr                  /* MD | BL | IMASK=15, bank 0 */
+        /* the wake evidence, before anything else touches the machine */
+        mov.l   .Ls_block, r4
+        mov     r4, r5
+        add     #B_HI, r5
+        mov.l   .Ls_r64cnt, r1
+        mov.b   @r1, r0
+        extu.b  r0, r2
+        mov.b   @(2, r1), r0            /* RSECCNT */
+        extu.b  r0, r0
+        shll8   r0
+        or      r0, r2
+        shll16  r2
+        mov.l   .Ls_nmifcr, r1
+        mov.w   @r1, r0
+        extu.w  r0, r0
+        or      r0, r2
+        mov.l   r2, @(B_EV0, r5)
+        mov.l   .Ls_intreq00, r1
+        mov.b   @r1, r0
+        extu.b  r0, r2
+        shll8   r2
+        mov.l   .Ls_rcr1, r1
+        mov.b   @r1, r0
+        extu.b  r0, r0
+        or      r0, r2
+        shll16  r2
+        mov.l   .Ls_kiuintreg, r1
+        mov.w   @r1, r0
+        extu.w  r0, r0
+        or      r0, r2
+        mov.l   r2, @(B_EV1, r5)
+        mov.l   .Ls_stbcr, r1
+        mov.l   @r1, r0
+        mov.l   r0, @(B_EV2, r5)
         mov.l   .Ls_stbcr, r1
         mov.l   @r1, r0
         mov.l   .Ls_no_rstby, r2
@@ -544,6 +585,10 @@ _dbt_standby_stub:
 .Ls_pulcrbsc:   .long 0xA40501C3
 .Ls_phcr:       .long 0xA405010E
 .Ls_a507:       .long 0x0000A507
+.Ls_nmifcr:     .long 0xA41400C0
+.Ls_intreq00:   .long 0xA4140024
+.Ls_rcr1:       .long 0xA413FEDC
+.Ls_kiuintreg:  .long 0xA44B0014
 .Ls_block:      .long 0                 /* patched: the save block address */
 _dbt_standby_stub_end:
 
