@@ -4,8 +4,11 @@
   hhkcheck.py <prog.hhk> [<dbt-image.bin> <dbt-image.g3a> <payload_base>]
 
 Always: a big-endian SH ET_EXEC ELF whose loadable sections lie inside the
-HollyHock program window 0x8CFF0000-0x8D000000 or, for the payload, at
-payload_base; a .note.hollyhock NAME note; an entry inside the window.
+regions a HollyHock 3 program may use (the program window 0x8CFF0000-
+0x8D000000; for a gint program also the VRAM backup area 0x8C052800 +
+320*528*2 and the on-chip IL/X/Y memories, gint's fxcp_hh3.ld) or, for the
+payload, at payload_base; a .note.hollyhock NAME note; an entry inside one
+of those regions.
 With the image and the .g3a: the .wince.payload section is byte-identical to
 the translator image, and so is the image that casio-emu's .g3a carries, so
 the device and the emulator run the same translator bytes.
@@ -13,7 +16,11 @@ Exit status 0 when every check passes.
 """
 import struct, sys
 
-HHK_LO, HHK_HI = 0x8CFF0000, 0x8D000000
+REGIONS = [(0x8CFF0000, 0x8D000000), (0x8C052800, 0x8C052800 + 320 * 528 * 2),
+           (0xE5200000, 0xE5201000), (0xE500E000, 0xE5012000)]
+
+def inside(addr, size=1):
+    return any(lo <= addr and addr + size <= hi for lo, hi in REGIONS)
 
 def sections(elf):
     (e_shoff, e_shentsize, e_shnum, e_shstrndx) = (struct.unpack_from(">I", elf, 0x20)[0],) + struct.unpack_from(">HHH", elf, 0x2E)
@@ -36,7 +43,7 @@ def main(argv):
     e_type, e_machine = struct.unpack_from(">HH", elf, 0x10)
     entry = struct.unpack_from(">I", elf, 0x18)[0]
     if e_type != 2 or e_machine != 42: bad.append("not an SH executable")
-    if not HHK_LO <= entry < HHK_HI: bad.append("entry 0x%08x outside the HollyHock window" % entry)
+    if not inside(entry): bad.append("entry 0x%08x outside the HollyHock regions" % entry)
     image_base = int(argv[4], 0) if len(argv) == 5 else None
     payload = None
     note = False
@@ -46,8 +53,8 @@ def main(argv):
             if image_base is not None and addr != image_base:
                 bad.append("payload at 0x%08x, expected 0x%08x" % (addr, image_base))
         elif flags & 2 and size:                                 # SHF_ALLOC
-            if not (HHK_LO <= addr and addr + size <= HHK_HI):
-                bad.append("section %s 0x%08x+0x%x outside the HollyHock window" % (name, addr, size))
+            if not inside(addr, size):
+                bad.append("section %s 0x%08x+0x%x outside the HollyHock regions" % (name, addr, size))
         if name == ".note.hollyhock" and b"NAME\0" in elf[off:off + size]:
             note = True
     if not note: bad.append("no .note.hollyhock NAME note")

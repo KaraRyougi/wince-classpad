@@ -182,7 +182,7 @@ define NK_PAD
 mkdir -p $(BUILD) && python3 ../tools/nkflash.py $(or $(NKBIN),-) $(NK_PADDED) $(NK_FLASH_OFF) $(if $(EXTBIN),--ext $(EXTBIN)) > $(NK_OFF_FILE) && echo "flash offset $$(cat $(NK_OFF_FILE))"
 endef
 
-.PHONY: all clean run nkrun nkshot screenshot disasm hhk hhk-check hhkrun flashtest
+.PHONY: all clean run nkrun nkshot screenshot disasm hhk hhk-check hhk-preview hhkrun flashtest
 
 IMG := $(BUILD)/dbt-$(GUEST)
 
@@ -298,18 +298,40 @@ NKFLASH_HHK := $(BUILD)/nkflash.hhk
 $(PAYLOAD_H): $(IMG).bin ../tools/hhkpayload.py
 	python3 ../tools/hhkpayload.py $< > $@
 
-# wince.hhk carries the flasher too: NK.bin on the calculator is written to
-# the window when it differs from what is there, then CE boots
-HHK_FLASH := hhk/nkflash.c hhk/norflash.c
-$(WINCE_HHK): $(HHK_COMMON) $(HHK_FLASH) hhk/launcher.c hhk/takeover.S hhk/payload.S hhk/hhk.ld hhk/util.h hhk/os.h hhk/nkflash.h hhk/norflash.h $(IMG).bin $(PAYLOAD_H) $(LAYOUT_STAMP)
-	$(CC) $(HHK_CFLAGS) -include $(PAYLOAD_H) -DIMAGE='"$(IMG).bin"' $(HHK_LD) -o $@ $(HHK_COMMON) $(HHK_FLASH) hhk/launcher.c hhk/takeover.S hhk/payload.S -lgcc
+# wince.hhk and nkflash.hhk are gint programs for the fx-CP400 (gint's
+# libgint-cp and its HollyHock 3 linker script fxcp_hh3.ld, from the fxSDK
+# sysroot: giteapc install Lephenixnoir/gint, or fxsdk build-cp install in
+# its checkout). gint owns the display, keyboard, clock and the storage
+# memory's files; no OS addresses in our code. The program sits in the VRAM
+# backup area at 0x8C052800 (gint's layout); the translator payload is pinned
+# at HHK_PAYLOAD as before, outside gint's regions.
+GINT_LIB   := $(shell fxsdk path lib 2>/dev/null)
+GINT_CFLAGS := $(HHK_CFLAGS) -DFXCP -fstrict-volatile-bitfields -Wa,--dsp
+GINT_LD    := -T $(GINT_LIB)/fxcp_hh3.ld -L$(GINT_LIB) -Wl,--section-start=.wince.payload=$(HHK_PAYLOAD) -Wl,--no-warn-rwx-segments \
+              -Wl,--start-group -lgint-cp -lc -lopenlibm -lgcc -Wl,--end-group
+# wince.hhk carries the flasher: NK.bin and EXT.bin on the calculator are
+# written to their windows when the chosen action asks for it, then CE boots
+HHK_FLASH := hhk/nkflash.c hhk/norflash.c hhk/util.c
+# the Luna loader's screens (hhk/ui.c, docs/design/loader-luna.html): drawing,
+# fonts and pictures; font_data.c and art_data.c are generated and committed
+# (tools/mkbitmapfont.py c, tools/mkloaderart.py; both need Pillow/freetype-py)
+HHK_UI := hhk/ui.c hhk/gfx.c hhk/font_data.c hhk/art_data.c
+$(WINCE_HHK): $(HHK_FLASH) $(HHK_UI) hhk/loader.c hhk/takeover.S hhk/payload.S hhk/util.h hhk/nkflash.h hhk/norflash.h hhk/ui.h hhk/gfx.h $(IMG).bin $(PAYLOAD_H) $(LAYOUT_STAMP)
+	$(CC) $(GINT_CFLAGS) -include $(PAYLOAD_H) -DIMAGE='"$(IMG).bin"' -o $@ hhk/loader.c $(HHK_FLASH) $(HHK_UI) hhk/takeover.S hhk/payload.S $(GINT_LD)
 	cp $@ $(@:.hhk=.hh3)
 
-$(NKFLASH_HHK): $(HHK_COMMON) $(HHK_FLASH) hhk/hhk.ld hhk/util.h hhk/os.h hhk/nkflash.h hhk/norflash.h $(LAYOUT_STAMP)
-	$(CC) $(HHK_CFLAGS) -DNKFLASH_STANDALONE -DHHK_APP_NAME='"CE image flasher"' -DHHK_APP_DESC='"writes fls0/NK.bin (and EXT.bin) into the NOR for Windows CE"' $(HHK_LD) -o $@ $(HHK_COMMON) $(HHK_FLASH) -lgcc
+$(NKFLASH_HHK): $(HHK_FLASH) hhk/util.h hhk/nkflash.h hhk/norflash.h $(LAYOUT_STAMP)
+	$(CC) $(GINT_CFLAGS) -DNKFLASH_STANDALONE -o $@ $(HHK_FLASH) $(GINT_LD)
 	cp $@ $(@:.hhk=.hh3)
 
 hhk: $(WINCE_HHK) $(NKFLASH_HHK) hhk-check
+
+# the loader's screens rendered on the host with sample data: <build>/ui-*.ppm
+HOSTCC ?= cc
+$(BUILD)/uipreview: $(HHK_UI) hhk/uipreview.c hhk/util.c hhk/ui.h hhk/gfx.h hhk/util.h | $(BUILD)
+	$(HOSTCC) -DHHK_HOST -O1 -Wall -Wextra -Wno-unused-parameter -I hhk -o $@ hhk/uipreview.c $(HHK_UI) hhk/util.c
+hhk-preview: $(BUILD)/uipreview
+	$< $(BUILD)
 
 # the .hhk carries the very bytes the emulator runs (and loads where the layout says)
 hhk-check: $(WINCE_HHK) $(NKFLASH_HHK) $(IMG).g3a ../tools/hhkcheck.py

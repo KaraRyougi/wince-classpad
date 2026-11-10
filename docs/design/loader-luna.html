@@ -103,10 +103,10 @@ code, .mono { font-family: var(--f-mono); font-size: 12.5px; }
     <div class="notes">
       <h2>Porting to dbt/hhk</h2>
       <ul>
-        <li>Draw into the OS VRAM (RGB565, 320×528) and push it with <code>LCD_Refresh</code>; during flashing only the two bar rectangles and the detail line are redrawn.</li>
+        <li>Built as a gint program (<code>dbt/hhk/loader.c</code>): drawing goes into gint's VRAM (RGB565, 320×528) and <code>dupdate</code> pushes it; keys, clock and files are gint's, with no OS addresses. During flashing only the step list and the progress box are redrawn.</li>
         <li>Gradients are per-row colour tables (title bar 28 rows, progress chunks 12 rows), so a fill is one store per pixel with no maths.</li>
-        <li>All text is 1-bit (no antialiasing), as it will be on the device. It needs an embedded bitmap font (Tahoma 8 pt regular and bold, about 6 KB for ASCII) in place of <code>Debug_Printf</code>; the flag ships as prescaled RGB565 bitmaps (17×15 title icon and the 36 px flag and the 171×32 lettering from <code>tools/mkbootlogo.py</code>).</li>
-        <li>Progress hooks go where <code>nkflash.c</code> already reports: per erased sector, and every 64 KiB chunk in <code>program_stream</code>.</li>
+        <li>All text is 1-bit (no antialiasing), as it will be on the device. It comes from embedded bitmap fonts (hinted Tahoma and Trebuchet MS, <code>tools/mkbitmapfont.py</code>); the flag ships as prescaled RGB565 bitmaps (17×15 title icon and the 36 px flag and the 171×32 lettering from <code>tools/mkbootlogo.py</code>).</li>
+        <li>Progress comes from <code>nkflash.c</code>'s <code>nk_progress</code> hook: per erased sector, per record, and every 64 KiB written or compared.</li>
       </ul>
     </div>
 

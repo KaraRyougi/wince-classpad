@@ -1,6 +1,7 @@
 /* util.c - see util.h */
 #include "util.h"
 
+#if !defined(HHK_HOST) && !defined(FXCP)
 void *memcpy(void *d, const void *s, unsigned n)
 {
     u8 *dd = d; const u8 *ss = s;
@@ -37,6 +38,8 @@ int strncmp(const char *a, const char *b, unsigned n)
     }
     return 0;
 }
+
+#endif
 
 u32 bytesum(const void *p, u32 n)
 {

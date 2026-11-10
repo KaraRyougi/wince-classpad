@@ -3,15 +3,20 @@
 #define HHK_UTIL_H
 #include <stdarg.h>
 
-typedef unsigned char  u8;
-typedef unsigned short u16;
-typedef unsigned int   u32;
+#include <stdint.h>
+typedef uint8_t  u8;                                    /* the same types as gint's */
+typedef uint16_t u16;
+typedef uint32_t u32;
 
+#if defined(HHK_HOST) || defined(FXCP)                  /* host preview, gint: a real libc */
+#include <string.h>
+#else
 void *memcpy(void *d, const void *s, unsigned n);
 void *memset(void *d, int c, unsigned n);
 int   memcmp(const void *a, const void *b, unsigned n);
 unsigned strlen(const char *s);
 int   strncmp(const char *a, const char *b, unsigned n);
+#endif
 /* %s %c %d %u %x %X %% with optional 0-padding and width (e.g. %08x) */
 int   hhk_vformat(char *out, unsigned cap, const char *fmt, va_list ap);
 int   hhk_format(char *out, unsigned cap, const char *fmt, ...);

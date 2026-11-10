@@ -15,7 +15,15 @@ typedef struct {
 extern const nkwindow nk_windows[];
 extern const int nk_nwindows;
 
-extern int nk_row;                               /* next UI row the flasher prints on */
+extern void (*nk_print)(const char *line);       /* where nk_say's lines go, or 0 */
+extern int nk_quiet;                             /* 1: nk_say only keeps the line in nk_last */
+extern char nk_last[48];                         /* the last line, e.g. why a step failed */
+/* progress of the step running: compare and write in bytes, erase in
+ * sectors, record = the record being written (1-based) */
+enum { NKP_COMPARE, NKP_ERASE, NKP_WRITE, NKP_RECORD };
+extern void (*nk_progress)(int what, u32 done, u32 total, u32 addr);
+typedef struct { u32 size, bytes, records, sectors; int xip; } nkinfo;
+void nkflash_info(nkinfo *i);                    /* after nkflash_open: what a write will do */
 void nk_say(const char *fmt, ...);               /* one UI line, refreshed */
 const char *nkflash_window_state(const nkwindow *w); /* "is blank" / "holds a CE image" / "is the eActivity volume" */
 int  window_has_our_image(const nkwindow *w);    /* "ECEC" at +0x40 or a B000FF header */
