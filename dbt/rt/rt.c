@@ -3075,12 +3075,32 @@ static void diag_stripe(sf_u32 stage, sf_u32 colour)
 static sf_u32 dbt_standby(void)
 {
     sf_u32 *stub = (sf_u32 *)RS_STUB, *block = (sf_u32 *)RS_BLOCK;
-    sf_u32 n = (sf_u32)(dbt_standby_stub_end - dbt_standby_stub), i, r;
+    sf_u32 n = (sf_u32)(dbt_standby_stub_end - dbt_standby_stub), i, r, cmt_gate;
     for (i = 0; i < n; i++) stub[i] = dbt_standby_stub[i];
     stub[n - 1] = RS_BLOCK;                     /* the stub's last longword: where the block is */
     g_standbys++;
     dbt_puts("[dbt] R-standby\n");
     dbt_dbgring_drain();
+    /* The CMT is one of R-standby's wake-up sources (NMI, IRQ, CMT, KEYSC,
+     * RTC). Casio's delay routine (OS 02.01.7003 0x800412F0, reached through
+     * 0x80070020) is a CMT one-shot: CMCSR = 5, CMCOR, start, poll CMF, stop,
+     * and it leaves CMF set. CE never touches the CMT, so the flag the OS's
+     * last delay left stays set for ever: on the calculator every R-standby
+     * ended at once (2026-11-10: 13 entries in 27 s, CMCSR read 0x8005 at the
+     * unexplained wake-ups, every other wake source clear), the OAL went
+     * straight back to sleep each time and a night of that emptied the cells.
+     * Before the sleep: counter stopped, CMF and OVF cleared (read, then
+     * write 0), the module's clock off (MSTPCR0 bit 14; on for the register
+     * accesses). The clock gate is put back after the wake-up. */
+    {
+        volatile sf_u32 *mstp0 = (volatile sf_u32 *)0xA4150030u;
+        volatile sf_u16 *cmstr = (volatile sf_u16 *)0xA44A0000u, *cmcsr = (volatile sf_u16 *)0xA44A0060u;
+        cmt_gate = *mstp0 & 0x4000u;
+        *mstp0 &= ~0x4000u;
+        *cmstr = 0;
+        *cmcsr = (sf_u16)(*cmcsr & 0x3FFFu);
+        *mstp0 |= 0x4000u;
+    }
     onchip_save();                              /* last: nothing below writes XYRAM before the sleep */
     r = dbt_standby_sleep(block);
 #ifdef DBT_STANDBY_DIAG
@@ -3103,7 +3123,7 @@ static sf_u32 dbt_standby(void)
 #endif
     /* back, with the core reset if r == 1: the stub restored caches, MMU
      * registers and VBR; the rest of the machine is the guest's business */
-    *(volatile sf_u32 *)0xA4150030u = block[(0x40 + 0x10) / 4];     /* MSTPCR0 */
+    *(volatile sf_u32 *)0xA4150030u = (block[(0x40 + 0x10) / 4] & ~0x4000u) | cmt_gate;     /* MSTPCR0, the CMT's gate as it was before the standby */
     *(volatile sf_u32 *)0xA4150020u = block[(0x40 + 0x14) / 4];     /* STBCR */
     if (r) {
         g_standby_wakes++;

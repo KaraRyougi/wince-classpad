@@ -939,6 +939,29 @@ USB pin 0 controller 0 (ints 0000 0000)
 - 亮度：Advanced 里显示第 13 档，用户说这远低于实际最大亮度（此前 CE 用过 0xFF）。
   档位表加了 14..20 七档到 0xFF（`classpad_bkl.h`），1..13 仍是 Casio 的值。
 
+**唤醒源：CMT 的比较匹配标志（2026-11-10，待真机确认）。** 勾 Probe 后的快照，
+第一次和最后一次相同：
+`08 01 00 00 4800 0000 0001 0000 8005 0000`，即 RCR1 08、RCR2 01、INTREQ00 00、
+INTMSK00 00、KIUINTREG 4800、KIUDATA0 0000、KIUSTATEREG 0001、CMSTR 0000、
+**CMCSR 8005**、RWTCSR 0000。R-standby 的唤醒源是 NMI、IRQ、CMT、KEYSC、RTC
+（docs/06 第 2 节）：IRQ 没有请求，KEYSC 没有事件且扫描空闲，RTC 的 AF / CF / PEF 都是
+0，看门狗没开；只有 CMT 的 CMF（bit 15）置位。来源：Casio 的延时函数 0x80070020 →
+0x800412F0 是 CMT 单次计时（开 MSTPCR0 bit 14 的时钟、CMCSR = 5、CMCOR、启动、轮询
+CMF、停止，原先时钟是关的就再关上），结束后 CMF 留着不清。CE 从不碰 CMT，所以 Casio
+最后一次延时留下的 CMF 永远置位。Casio 自己进待机前也刚调过延时，CMF 同样置位，它不
+被唤醒应当是因为那时 CMT 的模块时钟是关的；CE 下这个时钟门的状态没有读过。修正放在
+翻译器（`rt.c` `dbt_standby`，只换 hh3）：睡前开 CMT 时钟、CMSTR = 0、清 CMF 和 OVF、
+关 CMT 时钟（MSTPCR0 bit 14），唤醒后把时钟门恢复原状。casio-emu 里休眠唤醒照常
+（124 s、Standby x1、stray wakes 0）。CMF 在 CMR = 00（不请求中断）时是否真的能结束
+R-standby，没有手册依据，只有"它是唯一异常的唤醒源"这一条；要看真机上 stray wakes
+是否变成 0。
+INTMSK00 读出 00：启动器接管时写过 0xFF，要么这个寄存器读回不是屏蔽状态，要么
+R-standby 之后被复位；INTREQ00 是 0，所以这次不是 IRQ 引脚，先不处理。
+
+用户同时报告（诊断版 hh3）：勾 Touch 能睡能醒，但醒后触摸不能用；勾 Panel 醒后屏幕
+不亮。两项默认都是关的，原因未查：触摸控制器上电后只发 0x02 不够（Casio 的触摸任务
+启动 0x8008AB3E 还做了别的），面板冷启动的重放在真机上没有把面板带起来。
+
 SpreadCE（casio-emu，心跳采样每 2M 指令一个，`-DDBT_TRACE_BLOCKS` 把宿主 PC 映射回
 客户机块）：启动约 2.8 G 指令，敲三个数加回车（6 个键）约 1 G 指令且全程不空闲，
 点四个单元格的 41 秒里大半空闲。敲数阶段：间接调用/返回查表（`_dbt_lki_ts`）
