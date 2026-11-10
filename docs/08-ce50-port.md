@@ -834,6 +834,21 @@ casio-emu：`dbt/emu-patch/add_classpad_lcdpower.py`（深度待机后帧为空�
   显示，一次真机测试就能看出两种读法是否一致；一致的话可以去掉每 5 秒唤醒控制器的
   采样，直接读这一位。
 
+**VM 重建后的模拟器验证（2026-11-10）。** 镜像含：休眠统计、Casio 流程的硬件断电、
+触摸控制器断电/上电、A/D 步骤、老面板驱动、USB 引脚诊断。空闲后自动休眠，注入
+Clear（码 20）唤醒，再用触摸打开 Battery 程序：
+- 新面板（默认 ID 16）：`CLASSPAD POWER: panel kind 1`；休眠时模拟器报
+  `deep standby`，唤醒后 `out of deep standby`（即 SLPOUT 之前收到了冷启动的寄存器
+  初始化），`CLASSPAD TOUCH: sensor powered up, start command sent`；桌面恢复，触摸
+  可用；Battery 显示 `Suspend 1: 155 s, woke by Clear` / `Standby x1, stray wakes 0,
+  hw off 1`（日志里 152 s 进、307 s 醒）。
+- 老面板（`HLE_CP_LCD_ID=30`）：`panel kind 2`；休眠前 `B9 01 00 02 03`（亮度清零，
+  其余三个参数原样），唤醒后初始化写 `B9 00 7f ff 08`，驱动随后写回亮度
+  `B9 00 80 ff 08`；同样恢复，Battery 显示 `117 s` / `Standby x1, stray wakes 0,
+  hw off 1`。
+模拟器不模拟：引脚配置的电气效果、面板和触摸控制器的真实供电、无理由唤醒。KDEV 表
+按新 nk.exe 重新生成。真机未验证。
+
 SpreadCE（casio-emu，心跳采样每 2M 指令一个，`-DDBT_TRACE_BLOCKS` 把宿主 PC 映射回
 客户机块）：启动约 2.8 G 指令，敲三个数加回车（6 个键）约 1 G 指令且全程不空闲，
 点四个单元格的 41 秒里大半空闲。敲数阶段：间接调用/返回查表（`_dbt_lki_ts`）
