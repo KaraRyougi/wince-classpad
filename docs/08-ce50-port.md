@@ -699,6 +699,11 @@ BatteryPDDGetStatus 只取结果。没照做的：中断控制器（不用中断
 路径（0x800A61CC、0x800A61F2）是否就是断电。工具：scratchpad 的 xref.py（字面量
 和 bsr/bra 引用）、walk.py（向上走调用链）。
 
+**USB 供电检测在真机上生效（2026-11-10）。** 按 Casio 顺序采样的镜像在真机上插线
+后 Battery 程序显示 "USB power connected"。两次读数（不置 SCKE / 置 SCKE）哪一次
+读到的没有记录。Battery 程序底部的诊断行随后去掉，驱动仍把寄存器值写到注册表
+`UsbDiag`。
+
 SpreadCE（casio-emu，心跳采样每 2M 指令一个，`-DDBT_TRACE_BLOCKS` 把宿主 PC 映射回
 客户机块）：启动约 2.8 G 指令，敲三个数加回车（6 个键）约 1 G 指令且全程不空闲，
 点四个单元格的 41 秒里大半空闲。敲数阶段：间接调用/返回查表（`_dbt_lki_ts`）

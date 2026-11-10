@@ -11,7 +11,6 @@
 #define ID_CLOSE    110
 
 static TCHAR g_line[3][96];
-static TCHAR g_usb[2][64];          // the driver's "UsbDiag" (USB controller registers), in two lines
 
 static DWORD GetType(void)
 {
@@ -30,23 +29,6 @@ static void SetType(DWORD v)
         RegCloseKey(key);
     }
 }
-static void GetUsbDiag(void)
-{
-    HKEY key; TCHAR text[128]; DWORD type, size = sizeof text; int n, cut;
-    g_usb[0][0] = g_usb[1][0] = 0; text[0] = 0;
-    if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, BATT_REG_KEY, 0, 0, &key) != ERROR_SUCCESS) return;
-    if (RegQueryValueEx(key, TEXT("UsbDiag"), NULL, &type, (LPBYTE)text, &size) != ERROR_SUCCESS || type != REG_SZ) text[0] = 0;
-    RegCloseKey(key);
-    text[127] = 0;
-    n = lstrlen(text);
-    if (!n) return;
-    cut = n;
-    if (n > 34) for (cut = 34; cut > 0 && text[cut] != ' '; cut--) ;
-    if (cut <= 0) cut = n > 60 ? 60 : n;
-    if (cut < n) { text[cut] = 0; if (lstrlen(text + cut + 1) < 64) lstrcpy(g_usb[1], text + cut + 1); }
-    lstrcpy(g_usb[0], TEXT("USB "));
-    if (lstrlen(text) < 60) lstrcpy(g_usb[0] + 4, text);
-}
 static void Refresh(HWND w)
 {
     SYSTEM_POWER_STATUS_EX2 s;
@@ -61,7 +43,6 @@ static void Refresh(HWND w)
         lstrcpy(g_line[1], TEXT("No reading from the battery driver"));
         g_line[2][0] = 0;
     }
-    GetUsbDiag();
     InvalidateRect(w, NULL, TRUE);
 }
 static LRESULT CALLBACK WindowProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
@@ -86,7 +67,6 @@ static LRESULT CALLBACK WindowProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         FillRect(dc, &r, (HBRUSH)GetStockObject(WHITE_BRUSH));
         SetBkMode(dc, TRANSPARENT);
         for (i = 0; i < 3; i++) ExtTextOut(dc, 12, 16 + i * 24, 0, NULL, g_line[i], lstrlen(g_line[i]), NULL);
-        for (i = 0; i < 2; i++) ExtTextOut(dc, 12, 250 + i * 18, 0, NULL, g_usb[i], lstrlen(g_usb[i]), NULL);
         EndPaint(w, &ps);
         return 0;
     }
@@ -100,7 +80,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPTSTR, int)
     wc.lpfnWndProc = WindowProc; wc.hInstance = inst; wc.lpszClassName = TEXT("ClasspadBattery");
     RegisterClass(&wc);
     HWND w = CreateWindow(wc.lpszClassName, TEXT("Battery"), WS_VISIBLE | WS_CAPTION | WS_SYSMENU, 0, 0,
-                          GetSystemMetrics(SM_CXSCREEN), 322, NULL, NULL, inst, NULL);
+                          GetSystemMetrics(SM_CXSCREEN), 290, NULL, NULL, inst, NULL);
     if (!w) return 1;
     SetForegroundWindow(w);
     MSG m; while (GetMessage(&m, NULL, 0, 0)) { TranslateMessage(&m); DispatchMessage(&m); }

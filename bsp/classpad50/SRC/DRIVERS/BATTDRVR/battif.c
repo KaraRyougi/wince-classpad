@@ -174,9 +174,10 @@ static BOOL Sample(void)
 // One step more than Casio: when VBSTS reads 0, SYSCFG.SCKE is set and the
 // register read again (the controller's manual wants SCKE for every
 // register but SYSCFG; Casio reads without it). Both readings go to the
-// registry value "UsbDiag" with what the registers held (the Battery
-// program shows it): there is no debug output to read on the device.
-// Not verified on hardware.
+// registry value "UsbDiag" with what the registers held: there is no debug
+// output to read on the device. Works on the calculator (2026-11-10: the
+// Battery program shows "USB power connected" with a cable in); which of
+// the two readings saw it was not recorded.
 //
 // The 110 ms make this a thread of its own, so nobody asking for the
 // battery status waits. Everything is guarded: where the controller is not
