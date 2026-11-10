@@ -128,7 +128,10 @@ BOOL WINAPI BatteryPDDGetStatus(PSYSTEM_POWER_STATUS_EX2 pstatus, PBOOL pfBatter
     pstatus->ACLineStatus = AC_LINE_OFFLINE;
     pstatus->BatteryLifeTime = BATTERY_LIFE_UNKNOWN;
     pstatus->BatteryFullLifeTime = BATTERY_LIFE_UNKNOWN;
-    pstatus->BackupBatteryFlag = BATTERY_FLAG_NO_BATTERY;
+    // There is no backup battery. UNKNOWN, not NO_BATTERY: the taskbar (explorer
+    // taskbar\power.cpp) answers NO_BATTERY with a "Backup Battery Very Low"
+    // dialog at every boot and treats UNKNOWN as nothing to say.
+    pstatus->BackupBatteryFlag = BATTERY_FLAG_UNKNOWN;
     pstatus->BackupBatteryLifePercent = BATTERY_PERCENTAGE_UNKNOWN;
     pstatus->BackupBatteryLifeTime = BATTERY_LIFE_UNKNOWN;
     pstatus->BackupBatteryFullLifeTime = BATTERY_LIFE_UNKNOWN;
