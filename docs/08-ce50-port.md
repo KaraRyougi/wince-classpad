@@ -882,6 +882,30 @@ DrvEscape 自定义码（与推送线程用同一把锁串行化 LCD 口），�
 里加一组按钮调用 ExtEscape；档位表照搬上面 14 个值，档 0 的特例（PN4 和 B2/DF）
 可以先不做，最低只到档 1。
 
+**真机仍唤不醒：各步改成可选，默认全关（2026-11-10）。** 去掉 PULCRBSC / PH6 两项后
+真机休眠后按 Clear 仍无反应，原因的推断不成立或不完整，不再靠推断：
+- `IOCTL_HAL_CLASSPAD_SUSPEND_OPTIONS`（`classpad_pwrstat.h`）设一个掩码，默认 0：
+  PINS（引脚表、PFDR bit 7、PUDR bit 2、RCR1）、PANEL（深度待机、面板电源和显示时钟、
+  冷启动重放）、ADC、TOUCH（触摸控制器断电，触摸驱动从注册表
+  `HKLM\Software\ClassPad\Suspend` "Options" 读自己的位，采样线程每 64 次轮询读
+  一次）、PROBE（无理由唤醒时多读 INTREQ00、INTMSK00、CMT、RWDT；这些寄存器 CE 以前
+  从没读过，默认只读 RCR1、RCR2、KIUINTREG、KIUDATA0）。
+- 默认状态下休眠流程回到这几步加入之前的样子（另有计数和已证明安全的读数）。Battery
+  程序底部五个复选框逐项打开；掩码在 RAM 里，重启后全关。统计行显示实际执行的步骤掩码。
+- 没有在真机上验证过的假设：默认状态确实能唤醒。如果默认也不行，问题在这些步骤之外
+  （统计、RTC、显示或触摸驱动的其他改动）。
+
+**背光亮度进系统设置（2026-11-10）。** CE 5.0 的"显示属性"有 Backlight 页（cplmain 的
+CPL_Screen：Background、Appearance、Backlight；镜像里有 cplmain.cpl），只管超时；
+`screen.cpp` 在 `HKCU\ControlPanel\BackLight` "AdvancedCPL" 指了 DLL 且它导出
+`BacklightAdvApplet(HWND)` 时显示 Advanced 按钮。`SRC\APPS\BKLCPL` 的
+classpad_bkl.dll 就是这个 DLL：一个不用资源脚本的小窗口（Darker / Brighter / OK），
+经显示驱动的两个 DrvEscape 码（`classpad_bkl.h`：100500 读、100501 设）调 1..13 档，
+数值表照 Casio。驱动启动时把面板里读到的亮度归到最近的一档；设档时写面板并记为
+休眠恢复用的值；LCD 口加了一把锁（推送线程与设档互斥）。读不到亮度时的默认值从
+0xFF 改为 0x34（第 7 档），可用下限从 0x10 改为 0x05。档 0 不提供。未编译、未验证；
+写 VM 时 platform.bib 和 platform.reg 带着另一会话的改动，只追加了本分支的几行。
+
 SpreadCE（casio-emu，心跳采样每 2M 指令一个，`-DDBT_TRACE_BLOCKS` 把宿主 PC 映射回
 客户机块）：启动约 2.8 G 指令，敲三个数加回车（6 个键）约 1 G 指令且全程不空闲，
 点四个单元格的 41 秒里大半空闲。敲数阶段：间接调用/返回查表（`_dbt_lki_ts`）

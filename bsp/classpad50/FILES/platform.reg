@@ -135,3 +135,9 @@
 [HKEY_LOCAL_MACHINE\Software\ClassPad\Battery]
     "Type"=dword:0
     "MilliVoltsPerCount"=dword:A
+
+; Backlight level: the "Advanced..." button of Control Panel > Display >
+; Backlight opens classpad_bkl.dll (SRC\APPS\BKLCPL), which sets the level in
+; the display driver (SRC\INC\classpad_bkl.h).
+[HKEY_CURRENT_USER\ControlPanel\BackLight]
+    "AdvancedCPL"="classpad_bkl.dll"

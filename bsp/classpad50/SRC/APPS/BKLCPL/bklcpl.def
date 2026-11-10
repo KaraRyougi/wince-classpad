@@ -1,0 +1,4 @@
+LIBRARY classpad_bkl
+
+EXPORTS
+    BacklightAdvApplet

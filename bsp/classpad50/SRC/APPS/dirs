@@ -1,5 +1,6 @@
 DIRS=\
     BATTERY \
+    BKLCPL \
     ROTATE \
     ROTATEKEY \
     SH3CRT \

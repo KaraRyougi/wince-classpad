@@ -83,7 +83,8 @@
 #define LCD_DCS_RDID        0xDA            // reads 0x16 on the modelled panel
 #define LCD_DCS_WRDISBV     0x51            // display brightness, one byte: the backlight level (stock OS 0x80038550)
 #define LCD_DCS_RDDISBV     0x52            // read it back: a dummy read, then the byte
-#define LCD_BRIGHTNESS_DEFAULT 0xFF         // when RDDISBV gives nothing usable (the emulator returns 0)
+#define LCD_BRIGHTNESS_DEFAULT 0x34         // when the level read back is not usable (the emulator returns 0): the OS's level 7
+#define LCD_BRIGHTNESS_USABLE  0x05         // the lowest value the OS writes
 #define LCD_DCS_COLMOD_16BPP 0x55
 
 static __inline USHORT LcdSwap16(USHORT v) { return (USHORT)((v >> 8) | (v << 8)); }

@@ -27,6 +27,7 @@
 #include <winioctl.h>
 #include <pkfuncs.h>
 #include "classpad_pwrstat.h"
+#include "classpad_bkl.h"
 
 #define DISP_PUSH_MS        50
 #define DISP_CONSOLE_ROWS   96              // rows the translator's console keeps (rt/lcdcon.c LINES * CELL_H)
@@ -87,6 +88,8 @@ class ClasspadGPE : public GPE
     USHORT              m_panelId;          // DCS: what RDID answered
     BOOL                m_panelNew;         // DCS: ID 0x16 / 0x52; FALSE = the older panel (classpad_lcd.h)
     unsigned            m_col0;             // DCS: first visible GRAM column (0, or 40 on the older panel)
+    int                 m_level;            // DCS: backlight level 1..13 (classpad_bkl.h)
+    CRITICAL_SECTION    m_csLcd;            // the panel's port: the push thread and the brightness escape
     BYTE               *m_pFrame;           // the primary surface, physically contiguous (AllocPhysMem)
     ULONG               m_framePa;          // its physical address
     int                 m_blit;             // registry "Blit": 1 = HC_LCD_PUSH (default), 2 = HC_LCD_BLIT with our window commands, 0 = translated stores
@@ -162,6 +165,8 @@ ClasspadGPE::ClasspadGPE()
     m_suspended = m_resumePending = FALSE;
     m_brightness = LCD_BRIGHTNESS_DEFAULT;
     m_panelId = LCD_ID_NEW_A; m_panelNew = TRUE; m_col0 = 0;
+    m_level = CLASSPAD_BKL_DEFAULT;
+    InitializeCriticalSection(&m_csLcd);
 
     m_iRotate = DMDO_0;
     m_cvt16 = NULL;
@@ -201,6 +206,11 @@ ClasspadGPE::ClasspadGPE()
                       m_panelId, m_panelNew ? TEXT("newer panel") : TEXT("older panel"), m_col0));
         PanelInit();
         {
+            // the level the OS left, as one of its 14; what cannot be read counts as level 7 and is not written
+            UCHAR raw = LcdGetBacklight(m_panelNew);
+            if (raw >= LCD_BRIGHTNESS_USABLE) { m_level = ClasspadBklLevelOf(raw); m_brightness = raw; }
+        }
+        {
             // the OAL powers this panel down and back up around the standby (power.c)
             DWORD kind = m_panelNew ? CLASSPAD_PANEL_NEW : CLASSPAD_PANEL_OLD;
             KernelIoControl(IOCTL_HAL_CLASSPAD_PANEL, &kind, sizeof kind, NULL, 0, NULL);
@@ -229,6 +239,7 @@ ClasspadGPE::~ClasspadGPE()
     if (m_hThread) { WaitForSingleObject(m_hThread, 2000); CloseHandle(m_hThread); }
     if (m_hEvent) CloseHandle(m_hEvent);
     DeleteCriticalSection(&m_cs);
+    DeleteCriticalSection(&m_csLcd);
     delete m_pPrimarySurface;
     if (m_pFrame) FreePhysMem(m_pFrame);
 }
@@ -257,6 +268,7 @@ ULONG ClasspadGPE::DrvEscape(SURFOBJ *pso, ULONG code, ULONG inSize,
         if (!in || inSize < sizeof(DWORD)) return 0;
         DWORD query = *(DWORD *)in;
         if (query == DRVESC_GETSCREENROTATION || query == DRVESC_SETSCREENROTATION) return 1;
+        if ((query == DRVESC_CLASSPAD_GETBRIGHTNESS || query == DRVESC_CLASSPAD_SETBRIGHTNESS) && m_panel == LCD_PANEL_DCS) return 1;
         return GPE::DrvEscape(pso, code, inSize, in, outSize, out);
     }
     if (code == DRVESC_GETSCREENROTATION) {
@@ -273,6 +285,25 @@ ULONG ClasspadGPE::DrvEscape(SURFOBJ *pso, ULONG code, ULONG inSize,
         return DISP_CHANGE_SUCCESSFUL;
     }
     if (code == DRVESC_SETSCREENROTATION) return RotateDisplay((int)inSize);
+    // Backlight level (classpad_bkl.h). The value is also what a resume puts back.
+    if (code == DRVESC_CLASSPAD_GETBRIGHTNESS && m_panel == LCD_PANEL_DCS) {
+        if (!out || outSize < sizeof(int)) return 0;
+        *(int *)out = m_level;
+        return 1;
+    }
+    if (code == DRVESC_CLASSPAD_SETBRIGHTNESS && m_panel == LCD_PANEL_DCS) {
+        int level;
+        if (!in || inSize < sizeof(int)) return 0;
+        level = *(int *)in;
+        if (level < CLASSPAD_BKL_MIN) level = CLASSPAD_BKL_MIN;
+        if (level > CLASSPAD_BKL_MAX) level = CLASSPAD_BKL_MAX;
+        EnterCriticalSection(&m_csLcd);
+        m_level = level;
+        m_brightness = g_classpadBklValue[level];
+        if (!m_suspended && !m_resumePending) LcdSetBacklight(m_panelNew, m_brightness);
+        LeaveCriticalSection(&m_csLcd);
+        return 1;
+    }
     return GPE::DrvEscape(pso, code, inSize, in, outSize, out);
 }
 
@@ -602,9 +633,9 @@ VOID ClasspadGPE::PowerHandler(BOOL bOff)
         m_suspended = TRUE;
         m_resumePending = FALSE;
         level = LcdGetBacklight(m_panelNew);
-        // 0 is what the emulator reads (no RDDISBV there), and a level this
-        // low would not have been the user's: come back at full brightness
-        m_brightness = level >= 0x10 ? level : LCD_BRIGHTNESS_DEFAULT;
+        // 0 is what the emulator reads (no RDDISBV there); anything below the
+        // OS's lowest value was not a level: come back at the OS's level 7
+        m_brightness = level >= LCD_BRIGHTNESS_USABLE ? level : LCD_BRIGHTNESS_DEFAULT;
         // The OS's timing (ROM 0x80038acc): the backlight dims over a few
         // frames, so DISPOFF only once it is dark (60 ms; DISPOFF right after
         // 0x51 = 0 showed the white panel for a moment), then SLPIN 60 ms
@@ -638,11 +669,13 @@ DWORD WINAPI ClasspadGPE::PushThread(LPVOID pThis)
         if (!p->m_run) break;
         if (p->m_suspended) continue;
         if (p->m_resumePending) {
+            EnterCriticalSection(&p->m_csLcd);
             p->m_resumePending = FALSE;
             LcdCommand(LCD_DCS_SLPOUT);
             Sleep(120); // panel recovery must run in thread context
-            if (p->m_suspended) continue;
+            if (p->m_suspended) { LeaveCriticalSection(&p->m_csLcd); continue; }
             LcdSetBacklight(p->m_panelNew, p->m_brightness);   // the backlight back (PowerHandler set it to 0)
+            LeaveCriticalSection(&p->m_csLcd);
             p->Dirty(0, p->m_nScreenHeight);
         }
         EnterCriticalSection(&p->m_cs);
@@ -650,7 +683,9 @@ DWORD WINAPI ClasspadGPE::PushThread(LPVOID pThis)
         p->m_dirtyTop = p->m_nScreenHeight; p->m_dirtyBottom = 0;
         LeaveCriticalSection(&p->m_cs);
         if (top < bottom) {
+            EnterCriticalSection(&p->m_csLcd);
             p->PushRows(top, bottom);
+            LeaveCriticalSection(&p->m_csLcd);
             nextPush = GetTickCount() + DISP_PUSH_MS;
         }
     }

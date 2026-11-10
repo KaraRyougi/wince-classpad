@@ -1,0 +1,17 @@
+!if 0
+classpad_bkl.dll - the backlight level behind the "Advanced..." button of the
+Backlight page of Display Properties (HKCU\ControlPanel\BackLight
+"AdvancedCPL"; bklcpl.cpp, SRC\INC\classpad_bkl.h).
+!endif
+!INCLUDE $(_TARGETPLATROOT)\sources.cmn
+TARGETNAME=classpad_bkl
+TARGETTYPE=DYNLINK
+RELEASETYPE=PLATFORM
+WINCEOEM=1
+DLLENTRY=DllEntry
+DEFFILE=bklcpl.def
+INCLUDES=$(INCLUDES);$(_TARGETPLATROOT)\src\inc
+TARGETLIBS= \
+    $(_PROJECTROOT)\cesysgen\sdk\lib\$(_CPUINDPATH)\coredll.lib
+SOURCES= \
+    bklcpl.cpp
