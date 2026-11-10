@@ -32,3 +32,5 @@ bsp/classpad/FILES/xpander/*
 !bsp/classpad/FILES/xpander/mathxpander.lnk
 bsp/tests/test_peghelp
 dbt/tests/test_translate_icrefill
+bsp/tests/test_lcdrot
+bsp/tests/test_battery

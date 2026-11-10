@@ -538,6 +538,36 @@ stage.py 在 sh3imports 之后调用它，VM 里 FILES\xpander 的拷贝已就�
 makeimg）：Graph 的坐标轴从 x=1 到 308，两端的 −11.5 / 11.5 标签都在，y 轴居中
 156；Geometry 面板的残留灰线消失。下次 makeimg 生成的 EXT.bin 与这份一致。
 
+**电池电量驱动与 NK 腾空间（2026-11-09，待 VM 重建验证）。**
+
+- Casio OS 02.01.7003 的做法（静态反汇编）：电池在 A/D 通道 AN2（ADDRC
+  0xA4610084，10 位值 = 寄存器 >> 6），`0x8002A340` 连读两次取平均；
+  `0x800B0354` 按电池类型（"Battery Settings" 的选择，RAM 标志 0x8C1BE9F8）
+  分四档并单向锁存（只变差不回升）：标志 0 为 >475 / >429 / >383 / 其余，
+  标志 ≠0 为 >465 / >447 / >429 / 其余；`0x800813EA` 是更低的开机门限
+  347 / 402。按"1 个读数 ≈ 10 mV 电池组电压"换算，前者是每节 1.19 / 1.07 /
+  0.96 V、门限 0.87 V（碱性），后者 1.16 / 1.12 / 1.07 V、门限 1.00 V
+  （镍氢）。比例和"标志 0 = 碱性"都是从阈值推断的，没有量过分压。
+- CE 侧：`SRC\DRIVERS\BATTDRVR\battif.c` 是公共电池 MDD（battdrvr_lib）的 PDD，
+  轮询转换（不开 A/D 中断），逻辑在 `classpad_battery.h`（`bsp/tests/test_battery`
+  覆盖阈值边界、锁存、百分比单调）。上报：BatteryFlag HIGH（Casio 1–3 档）/
+  LOW（4 档）/ CRITICAL（门限以下），BatteryLifePercent 沿所选曲线分段线性
+  （门限 0%、三个阈值 25/50/75%、100% 点取每节 1.5 V / 1.3 V，这一点是我们
+  自己定的），BatteryVoltage，BatteryChemistry。CE 没有内建的碱性/镍氢切换，
+  类型放在 `HKLM\Software\ClassPad\Battery` 的 `Type`（0 碱性、1 镍氢），
+  `MilliVoltsPerCount` 可校正比例；档位变化时把原始读数打到调试输出，便于和
+  Casio OS 的显示对照。需要 catalog 的 Battery Driver（SYSGEN_BATTERY：coredll
+  里才有 GetSystemPowerStatusEx2，battdrvr_lib 才会 sysgen 出来）；Power
+  Manager 保持 Minimal 即可。
+- 腾空间：NK 在空洞里只剩 12 KiB。`FILES\extmove.txt`（每行一个 findstr
+  正则，和 romexclude.txt 同样的写法）列出要从 NK 改到 EXT 的微软条目：
+  WordPad（pword、pwwiff、office、pwd_res、riched20、模板和链接）和两个纸牌
+  游戏（pegcards、solitare、freecell 及链接、帮助页），共 16 条约 0.9 MB；
+  PostFmergeBib.bat 新增一步把这些行改写为 `名字 路径 EXT 标志` 再交给原来的
+  EXT 抽取。EXT 的 DLL 代码范围从 1 MiB 放宽到 3 MiB
+  （02100000..02400000，NK 改为 02400000..04000000）。EXT 不在时桌面的
+  WordPad 快捷方式和游戏菜单项随 .lnk 一起消失，和 Xpander 一样。
+
 ## 九、还没做的
 
 - 在 VM 里构建（第一次构建会暴露 SDK 的差异：头文件、`WARNISERROR`）。

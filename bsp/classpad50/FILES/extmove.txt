@@ -1,0 +1,16 @@
+^ *pword\.exe\>
+^ *pwwiff\.dll\>
+^ *office\.dll\>
+^ *pwd_res\.dll\>
+^ *riched20\.dll\>
+^ *wordpad\.lnk\>
+^ *templats\.lnk\>
+^ *letter\.pwt\>
+^ *meetnote\.pwt\>
+^ *pegcards\.dll\>
+^ *solitare\.exe\>
+^ *freecell\.exe\>
+^ *solitare\.lnk\>
+^ *freecell\.lnk\>
+^ *soltr\.htm\>
+^ *soltrhlp\.lnk\>

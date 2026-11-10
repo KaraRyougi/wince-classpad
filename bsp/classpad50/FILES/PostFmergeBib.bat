@@ -48,9 +48,27 @@ goto ext
 :noexclude
 echo PostFmergeBib: no romexclude.txt, nothing excluded
 
+rem --------------------------------------------- 1b. NK entries sent to EXT
+rem extmove.txt: one findstr regex per line, like romexclude.txt, naming
+rem ce.bib entries of Microsoft's bib files [region NK] that belong in the
+rem EXT region: WordPad and the card games since 2026-11-09, so that NK
+rem keeps room in the 5 MiB hole. Each matching entry is rewritten as
+rem "name path EXT flags" [four blank-separated columns: no path here has a
+rem space] and step 2 then takes it out with the platform.bib EXT entries.
+:ext
+if not exist "%REL%\extmove.txt" goto ext2
+findstr /i /r /g:"%REL%\extmove.txt" "%REL%\ce.bib" > "%REL%\ext.moved.bib"
+if errorlevel 2 goto ext2
+findstr /v /i /r /g:"%REL%\extmove.txt" "%REL%\ce.bib" > "%REL%\ce.bib.kept"
+if errorlevel 2 goto ext2
+for /f "usebackq tokens=1,2,3,*" %%a in ("%REL%\ext.moved.bib") do echo     %%a  %%b  EXT  %%d>> "%REL%\ce.bib.kept"
+for /f %%N in ('find /c /v "" ^< "%REL%\ext.moved.bib"') do set NMOVED=%%N
+move /y "%REL%\ce.bib.kept" "%REL%\ce.bib" >nul
+echo PostFmergeBib: %NMOVED% NK entries of extmove.txt sent to the EXT region
+
 rem ------------------------------------------------------- 2. the EXT region
 rem An entry is "name path REGION flags"; the region column EXT, then a space.
-:ext
+:ext2
 set "EXTLINE=^ *[^ ;][^ ]* *[^ ]* *EXT "
 del /q "%REL%\ext.modules.bib" "%REL%\ext.files.bib" 2>nul
 findstr /r /c:"%EXTLINE%" "%REL%\ce.bib" > "%REL%\ext.all.bib"

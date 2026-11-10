@@ -113,3 +113,12 @@
     @="\\Windows\\MathXpander.exe,0"
 [HKEY_CLASSES_ROOT\isce_mwbfile\Shell\Open\Command]
     @="\"\\Windows\\MathXpander.exe\" %1"
+
+; Battery (SRC\DRIVERS\BATTDRVR, the catalog's Battery Driver item loads it):
+; the cells in the calculator, as Casio's "Battery Settings" asks. Type 0 =
+; alkaline, 1 = Ni-MH: Casio's two threshold sets (classpad_battery.h).
+; MilliVoltsPerCount: pack millivolts per A/D count, 10 inferred from those
+; thresholds; correct it here if a meter says otherwise.
+[HKEY_LOCAL_MACHINE\Software\ClassPad\Battery]
+    "Type"=dword:0
+    "MilliVoltsPerCount"=dword:A

@@ -32,8 +32,11 @@
 ; slot 1 top-down from 0x04000000 (4.1 MiB); EXT's Pocket PC modules have no
 ; .rel files ("old fixup style") and go whole into the data range, 5.1 MiB
 ; for 25 modules, plus 128 KiB of code range. Hence:
-;   NK   data 01F00000..02000000   code 02200000..04000000  (here)
-;   EXT  data 01400000..01F00000   code 02100000..02200000  (ext.bib.hdr)
+;   NK   data 01F00000..02000000   code 02400000..04000000  (here)
+;   EXT  data 01400000..01F00000   code 02100000..02400000  (ext.bib.hdr)
+; (EXT's code range was 1 MiB until WordPad and the card games moved there,
+; 2026-11-09: their SH4 DLLs, riched20 first, need about 1 MiB of it in 64 KiB
+; steps; NK uses 4.1 MiB of its 28.)
 ; Processes keep slot 0 below 0x01400000 (20 MiB; the default boundary is
 ; 0x01800000). No AUTOSIZE: in this romimage DLLADDR_AUTOSIZE only works
 ; under AUTOSIZE=ON, which also moves RAM behind the image.
@@ -57,7 +60,7 @@ CONFIG
     AUTOSIZE=OFF
     DLLLOWADDR      NK   01F00000
     DLLHIGHADDR     NK   02000000
-    DLLLOWCODEADDR  NK   02200000
+    DLLLOWCODEADDR  NK   02400000
     DLLHIGHCODEADDR NK   04000000
     ROMSTART=80EE0000
     ROMSIZE=00500000
