@@ -119,6 +119,10 @@ CONSOLE ?= 0
 # stage on the panel (rt/standby.S, rt.c; docs/06 section 8). Diagnostic only.
 STANDBY_DIAG ?= 0
 HOST_CFLAGS  += $(if $(filter 1,$(STANDBY_DIAG)),-DDBT_STANDBY_DIAG,)
+# make STANDBY_SEARCH=1: no standby loop in the resume stub; every wake-up
+# comes back to rt.c, which steps through the wake-source suspects (rt.c).
+STANDBY_SEARCH ?= 0
+HOST_CFLAGS  += $(if $(filter 1,$(STANDBY_SEARCH)),-DDBT_STANDBY_SEARCH,)
 HOST_CFLAGS  += $(if $(filter 1,$(DEVICE)),-DDBT_NO_DEBUG_PORT -DDBT_IRQPIN_GUARD $(if $(filter 1,$(CONSOLE)),-DDBT_LCD_CONSOLE,),)
 # Code cache policy (docs/04 "Metadata on demand, second chance"):
 # LAZY_META=1 keeps no recovery metadata for ROM blocks until an exception

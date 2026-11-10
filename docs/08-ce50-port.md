@@ -1086,3 +1086,30 @@ OS had them at the launch (CE's drivers start I2C, A/D and at times USB),
 3 and 4 KEYSC silenced with its clock stopped, 5 KEYSC as the OS programs
 it. Emulator: the stub's evidence capture and the on-screen text work
 (suspend 51 s, dt 0x1984, KIUINTREG 0x080F at the wake-up, resumed by Clear).
+
+### The standby loop in the resume stub (2026-11-10)
+
+`dbt/rt/standby.S`: the resume stub, entered at BAR in RS memory, now does
+what the OS's loop does before it brings anything of the machine back. It
+records the wake evidence, then goes on with the resume only for the RTC
+alarm flag (RCR1.AF), Clear down (KIUDATA0 bit 1) or a KEYSC event flag
+(KIUINTREG low byte), the OAL's own three reasons. Otherwise it counts the
+wake-up (save block + 0x80; EV0 and EV1 of the first one at + 0x88),
+treats KEYSC as 0x80070EB8 does (mode 0 and 0x0200 again unless
+KIUSTATEREG bit 0 is set, KIUINTREG |= 0x7F), writes RWTCSR = 0xA507,
+BAR, STBCR = 0x21, SR = 0x70000000 and executes SLEEP. The SDRAM stays in
+self-refresh, no cache, no pins. `dbt_standby()` switches the loop on
+(save block + 0x84), opens KEYSC at the INTC for the standby (IMCR5 bit 7,
+a priority in IPRF if there was none) as the OS has it, and puts both back
+after the wake-up. `make STANDBY_SEARCH=1` builds without the loop and with
+the stepping wake-source search instead; it is off otherwise. The
+STANDBY_DIAG build prints `rs <count> sec <seconds>` and the first stray
+wake-up's evidence at the real wake-up.
+
+Emulator (ce5v image, diagnostic build): idle suspend, another key 25 s
+later does not wake, Clear 50 s later does ("resumed by Clear/ON"), rs 0,
+sec 0x33. The emulator never produces a stray wake-up, so the SLEEP-again
+branch itself has only been read in the disassembly, not run. Calculator:
+pending. The loop does not remove the source of the stray wake-ups; if they
+arrive back to back the core still cycles, only without the SDRAM, caches
+and CE in between. rs / sec from the calculator says how often.

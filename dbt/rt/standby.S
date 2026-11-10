@@ -68,6 +68,11 @@
 #define B_EV1       0x38                /* EV0 = RSECCNT<<24 | R64CNT<<16 | NMIFCR, EV1 = INTREQ00<<24 | RCR1<<16 | KIUINTREG */
 #define B_EV2       0x3C                /* EV2 = STBCR */
 #define B_SIZE      0x80
+/* third base, block + 0x80: the standby loop of the resume stub */
+#define B2_COUNT    0x00                /* wake-ups answered with another SLEEP */
+#define B2_LOOP     0x04                /* rt.c: non-zero = the loop is on */
+#define B2_EV0      0x08                /* EV0 and EV1 of the first such wake-up */
+#define B2_EV1      0x0C
 
         .text
         .align  2
@@ -332,6 +337,84 @@ _dbt_standby_stub:
         mov.l   .Ls_stbcr, r1
         mov.l   @r1, r0
         mov.l   r0, @(B_EV2, r5)
+        /* The OS's standby is a loop (02.01.7003 0x80020ED2): after every
+         * wake-up it asks, from ROM with its stack in RS memory, whether
+         * Clear is down (0x80070EB8) or a wake pin is requesting
+         * (0x8006F886), and if not it executes SLEEP again; the SDRAM stays
+         * in self-refresh throughout. The same here, before anything of the
+         * machine is brought back: the reasons to go on are the RTC alarm
+         * flag, Clear down, or a KEYSC event flag (the OAL's own test, bsp
+         * power.c RStandbyOnce). Otherwise: KEYSC as the OS leaves it
+         * (mode left and entered again unless KIUSTATEREG bit 0 is set,
+         * KIUINTREG |= 0x7F), RWTCSR, BAR, STBCR = 0x21, SR, SLEEP. */
+        mov     r5, r6
+        add     #0x40, r6
+        mov.l   @(B2_LOOP, r6), r0
+        tst     r0, r0
+        bt      .Ls_resume
+        mov.l   .Lq_rcr1, r1
+        mov.b   @r1, r0
+        tst     #1, r0
+        bf      .Ls_resume              /* RTC alarm */
+        mov.l   .Lq_keysc, r1
+        mov.w   @r1, r0                 /* KIUDATA0 */
+        tst     #2, r0
+        bf      .Ls_resume              /* Clear is down */
+        mov.w   @(0x14, r1), r0         /* KIUINTREG */
+        tst     #0xFF, r0
+        bf      .Ls_resume              /* a key event since the flags were cleared */
+        mov.l   @(B2_COUNT, r6), r0
+        tst     r0, r0
+        bf      7f
+        mov.l   @(B_EV0, r5), r2        /* the first one: keep its evidence */
+        mov.l   r2, @(B2_EV0, r6)
+        mov.l   @(B_EV1, r5), r2
+        mov.l   r2, @(B2_EV1, r6)
+7:      add     #1, r0
+        mov.l   r0, @(B2_COUNT, r6)
+        mov.w   @(0x12, r1), r0         /* KIUSTATEREG */
+        tst     #1, r0
+        bf      8f
+        mov     #0, r0
+        mov.w   r0, @(0x10, r1)         /* KIUMODEREG = 0 */
+        mov     #100, r2
+9:      dt      r2
+        bf      9b
+        mov     #2, r0
+        shll8   r0
+        mov.w   r0, @(0x10, r1)         /* KIUMODEREG = 0x0200 */
+8:      mov.w   @(0x14, r1), r0
+        or      #0x7F, r0
+        mov.w   r0, @(0x14, r1)
+        mov.l   .Lq_rwtcsr, r1
+        mov.l   .Lq_a507, r0
+        mov.w   r0, @r1
+        mov.l   .Lq_bar, r1
+        mov.l   .Lq_self, r0
+        mov.l   r0, @r1
+        mov.l   .Lq_stbcr, r1
+        mov     #0x21, r0
+        mov.l   r0, @r1
+        mov.l   .Lq_sr_standby, r0
+        ldc     r0, sr                  /* MD | RB | BL, IMASK = 0: r0-r7 are bank 1 from here */
+        sleep
+        nop
+        /* fell through (no R-standby after all): the ordinary resume */
+        mov.l   .Lq_sr, r0
+        ldc     r0, sr
+        bra     .Ls_resume
+        nop
+        .align  2
+.Lq_rcr1:       .long 0xA413FEDC
+.Lq_keysc:      .long 0xA44B0000
+.Lq_rwtcsr:     .long 0xA4520004
+.Lq_a507:       .long 0x0000A507
+.Lq_bar:        .long 0xA4150040
+.Lq_self:       .long 0xFD801200        /* this stub (rt.c RS_STUB) */
+.Lq_stbcr:      .long 0xA4150020
+.Lq_sr_standby: .long 0x70000000
+.Lq_sr:         .long 0x500000F0
+.Ls_resume:
         mov.l   .Ls_stbcr, r1
         mov.l   @r1, r0
         mov.l   .Ls_no_rstby, r2

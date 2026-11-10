@@ -3127,6 +3127,7 @@ static void diag_stripe(sf_u32 stage, sf_u32 colour)
  *   7 = it ended at once even then (not an INTC-visible source at all). */
 static sf_u32 g_sb_step, g_sb_code, g_sb_last = 0xFFFFu;
 sf_u32 dbt_standby_mstp_or;     /* standby.S: MSTPCR0 bits set for the standby */
+static sf_u32 g_sb_resleeps, g_sb_first0, g_sb_first1;  /* the resume stub's loop: what it reported at the last wake-up */
 sf_u32 dbt_boot_mstp0, dbt_boot_mstp2;  /* main.c: MSTPCR0 and MSTPCR2 as Casio's OS left them at the launch */
 static sf_u32 sb_bcd(sf_u32 v) { return (v >> 4) * 10 + (v & 15); }
 static sf_u32 sb_now(void)      /* seconds within the hour */
@@ -3143,7 +3144,7 @@ static sf_u32 dbt_standby(void)
     volatile sf_u8 *rtc = (volatile sf_u8 *)0xA413FEC0u;
     volatile sf_u16 *ksc = (volatile sf_u16 *)0xA44B0000u;
     volatile sf_u16 *iprk = (volatile sf_u16 *)0xA4080028u;
-    sf_u32 sb_t0, sb_tk0, sb_dt = 0, sb_step0, sb_sv_mstp2 = 0, sb_probe, sb_alarm, sb_sv_al[6], sb_sv_rcr1 = 0, sb_sv_rcr3 = 0, sb_sv_imr10 = 0, sb_sv_iprk = 0, sb_sv_k[6];
+    sf_u32 sb_t0, sb_tk0, sb_dt = 0, sb_secs = 0, sb_step0, sb_sv_mstp2 = 0, sb_sv_imr5, sb_sv_iprf, sb_probe, sb_alarm, sb_sv_al[6], sb_sv_rcr1 = 0, sb_sv_rcr3 = 0, sb_sv_imr10 = 0, sb_sv_iprk = 0, sb_sv_k[6];
     for (i = 0; i < n; i++) stub[i] = dbt_standby_stub[i];
     stub[n - 1] = RS_BLOCK;                     /* the stub's last longword: where the block is */
     g_standbys++;
@@ -3244,6 +3245,22 @@ static sf_u32 dbt_standby(void)
         if (!(sb_sv_iprk & 0xF000u)) *iprk = (sf_u16)(sb_sv_iprk | 0x2000u);
         *(volatile sf_u8 *)(0xA40800C0u + 4 * 10) = 0x01;                               /* IMCR10: RTC alarm unmasked */
     }
+    /* The resume stub's standby loop (standby.S): on, unless this build
+     * searches for the wake source (make STANDBY_SEARCH=1), which needs to
+     * see every wake-up here. And KEYSC open at the INTC for the standby, as
+     * the OS has it (0x80020BE0 only saves the masks, nothing closes them);
+     * the OAL closes every IMR. Back as they were after the wake-up, before
+     * this returns to the guest. */
+    block[0x80 / 4] = 0;
+#ifdef DBT_STANDBY_SEARCH
+    block[0x84 / 4] = 0;
+#else
+    block[0x84 / 4] = 1;
+#endif
+    sb_sv_imr5 = *(volatile sf_u8 *)(0xA4080080u + 4 * 5);
+    sb_sv_iprf = *(volatile sf_u16 *)0xA4080014u;
+    if (!(sb_sv_iprf & 0xF000u)) *(volatile sf_u16 *)0xA4080014u = (sf_u16)(sb_sv_iprf | 0x3000u);
+    *(volatile sf_u8 *)(0xA40800C0u + 4 * 5) = 0x80;
     do { sb_tk0 = rtc[2]; i = rtc[0] & 0x7Fu; } while (sb_tk0 != rtc[2]);
     sb_tk0 = sb_bcd(sb_tk0 & 0x7F) * 128 + i;                                           /* 1/128 s within the minute */
     onchip_save();                              /* last: nothing below writes XYRAM before the sleep */
@@ -3270,6 +3287,10 @@ static sf_u32 dbt_standby(void)
      * registers and VBR; the rest of the machine is the guest's business */
     *(volatile sf_u32 *)0xA4150030u = (block[(0x40 + 0x10) / 4] & ~0x4000u) | cmt_gate;     /* MSTPCR0, the CMT's gate as it was before the standby */
     *(volatile sf_u32 *)0xA4150020u = block[(0x40 + 0x14) / 4];     /* STBCR */
+    if (sb_sv_imr5 & 0x80u) *(volatile sf_u8 *)(0xA4080080u + 4 * 5) = 0x80;
+    *(volatile sf_u16 *)0xA4080014u = (sf_u16)sb_sv_iprf;
+    g_sb_resleeps = block[0x80 / 4]; g_sb_first0 = block[0x88 / 4]; g_sb_first1 = block[0x8C / 4];
+    if (r) sb_secs = (sb_now() + 3600 - sb_t0) % 3600;
     /* the wake-source search: everything it changed back, then the verdict */
     if (sb_step0 >= 2) *(volatile sf_u32 *)0xA4150038u = sb_sv_mstp2;
     if (sb_alarm) {
@@ -3290,12 +3311,17 @@ static sf_u32 dbt_standby(void)
         /* how long the core was off: the stub read the RTC first thing */
         sb_dt = (sb_bcd((ev0 >> 24) & 0x7F) * 128 + ((ev0 >> 16) & 0x7F) + 60 * 128 - sb_tk0) % (60 * 128);
         held = sb_dt >= 5 * 128;
+#ifdef DBT_STANDBY_SEARCH
         if (sb_probe) {
             if (held) { g_sb_code = 4; g_sb_step = 5; }
             else if (++g_sb_step == 5) g_sb_code = 7;
         } else if (held) {
             if (!g_sb_code && (g_sb_step == 1 || g_sb_step == 2)) g_sb_code = g_sb_step;
         } else if (g_sb_step < 3) g_sb_step++;
+#else
+        (void)held;
+#endif
+#ifdef DBT_STANDBY_SEARCH
         {
             volatile sf_u32 *mstp0 = (volatile sf_u32 *)0xA4150030u;
             volatile sf_u16 *cmcsr = (volatile sf_u16 *)0xA44A0060u;
@@ -3304,6 +3330,7 @@ static sf_u32 dbt_standby(void)
             *cmcsr = (sf_u16)((*cmcsr & 0x3FF8u) | g_sb_code);
             *mstp0 |= gate;
         }
+#endif
     }
     if (r) {
         g_standby_wakes++;
@@ -3317,7 +3344,9 @@ static sf_u32 dbt_standby(void)
      *   EV <RSECCNT R64CNT NMIFCR> <INTREQ00 RCR1 KIUINTREG> STBCR <at the wake>
      *   now: ICR0 ICR1 INTREQ00 INTMSK00 NMIFCR RWTCSR
      *   now: IMR5 IMR10 IPRF IPRK MSTPCR0
-     *   MSTPCR2 now, MSTPCR0 and MSTPCR2 at the launch (over stripe 3) */
+     *   MSTPCR2 now, MSTPCR0 and MSTPCR2 at the launch (over stripe 3)
+     *   rs <wake-ups the stub answered with SLEEP> sec <seconds since the entry>
+     *   EV0 and EV1 of the first of those */
     if (r) {
         char t[48], *q;
         volatile sf_u8 *r64 = (volatile sf_u8 *)0xA413FEC0u;
@@ -3338,6 +3367,10 @@ static sf_u32 dbt_standby(void)
         diag_text(3, t);
         q = diag_hex(t, *(volatile sf_u32 *)0xA4150038u, 8); q = diag_hex(q, dbt_boot_mstp0, 8); q = diag_hex(q, dbt_boot_mstp2, 8); *q = 0;
         diag_text(4, t);
+        q = diag_str(t, "rs "); q = diag_hex(q, g_sb_resleeps, 8); q = diag_str(q, "sec "); q = diag_hex(q, sb_secs, 4); *q = 0;
+        diag_text(5, t);
+        q = diag_hex(t, g_sb_first0, 8); q = diag_hex(q, g_sb_first1, 8); *q = 0;
+        diag_text(6, t);
         for (k = 0; k < 6; k++) { w = *r64; while (((*r64 - w) & 63) < 32) ; }
     }
 #endif
