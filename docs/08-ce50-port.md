@@ -658,13 +658,16 @@ KDEV 表按新 nk.exe 重新生成
 **USB 检测在真机上不生效；SpreadCE 慢在哪（2026-11-09 夜）。** 真机插 USB 不显示
 外接电源。Casio OS 的 USB 断电例程（0x8000C8FE、0x8000CB90）写 SYSCFG = 0、
 UPONCR（0xA40501D4）= 0、MSTPCR2 bit 20 置位、USBCLKCR（0xA4150014）bit 8 置位：
-不用 USB 时模块是停的，停着的模块 INTSTS0 读出 0。电池 PDD 现在第一次读之前按
-gint 的上电顺序恢复（USBCLKCR.CLKSTP = 0、MSTPCR2 bit 20 = 0、UPONCR = 0x0600），
-再置 SYSCFG.SCKE，USBE 不动（不上总线）；休眠恢复后重做一次。前后的寄存器值写到
-注册表 `UsbDiag`，Battery 程序底部两行显示（真机没有调试输出）。未在真机验证；
-代价是 USB PHY 一直上电。只把 battif.c 和 battery.cpp 写到了 VM：VM 上另有一个
-会话加的 FUGUEDSK 存储驱动（classpad.bat、platform.reg、platform.bib、
-DRIVERS\dirs），不在本分支里。
+不用 USB 时模块是停的，停着的模块 INTSTS0 读出 0，而且没插线时本来就该停着。
+没有找到单独的检测引脚（Casio 的上电路径 0x80008A60 附近同时设 USB 中断优先级，
+靠模块自己的 VBUS 中断）。电池 PDD 改为采样（`UsbSample`）：每 5 秒按 gint 的上电
+顺序恢复（USBCLKCR.CLKSTP = 0、MSTPCR2 bit 20 = 0、UPONCR = 0x0600、SYSCFG.SCKE），
+等 2 ms，读 VBSTS（三次一致），再把四个寄存器原样写回；本来就开着的控制器只读
+不动；USBE 始终不置。第一版（常开 PHY）按用户意见撤掉。寄存器原值和读到的
+INTSTS0 写到注册表 `UsbDiag`（有变化才写），Battery 程序底部两行显示（真机没有
+调试输出）。未在真机验证：时钟恢复 2 ms 后 VBSTS 是否已有效。只把 battif.c 和
+battery.cpp 写到了 VM：VM 上另有一个会话加的 FUGUEDSK 存储驱动（classpad.bat、
+platform.reg、platform.bib、DRIVERS\dirs），按用户意见不并入本分支。
 
 SpreadCE（casio-emu，心跳采样每 2M 指令一个，`-DDBT_TRACE_BLOCKS` 把宿主 PC 映射回
 客户机块）：启动约 2.8 G 指令，敲三个数加回车（6 个键）约 1 G 指令且全程不空闲，

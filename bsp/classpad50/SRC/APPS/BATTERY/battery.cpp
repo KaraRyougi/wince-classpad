@@ -71,7 +71,7 @@ static LRESULT CALLBACK WindowProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         CreateWindow(TEXT("BUTTON"), TEXT("Alkaline batteries"), WS_CHILD | WS_VISIBLE, 48, 110, 220, 36, w, (HMENU)ID_ALKALINE, NULL, NULL);
         CreateWindow(TEXT("BUTTON"), TEXT("Ni-MH batteries"), WS_CHILD | WS_VISIBLE, 48, 152, 220, 36, w, (HMENU)ID_NIMH, NULL, NULL);
         CreateWindow(TEXT("BUTTON"), TEXT("Close"), WS_CHILD | WS_VISIBLE, 48, 204, 220, 32, w, (HMENU)ID_CLOSE, NULL, NULL);
-        SetTimer(w, 1, 10000, NULL);
+        SetTimer(w, 1, 5000, NULL);
         Refresh(w);
         return 0;
     case WM_TIMER: Refresh(w); return 0;
