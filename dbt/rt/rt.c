@@ -3101,6 +3101,19 @@ static sf_u32 dbt_standby(void)
         *cmcsr = (sf_u16)(*cmcsr & 0x3FFFu);
         *mstp0 |= 0x4000u;
     }
+    /* KEYSC interrupt enables for the standby. The OAL (bsp power.c
+     * RStandbyOnce) wrote 0x4800, the value the fx-CG100's OS uses; the
+     * fx-CP400's own KEYSC set-up (OS 02.01.7003 0x80070F52) writes
+     * KIUINTREG = 0x00FF, then 0x0800. With 0x4000 as well the controller's
+     * autonomous scan ended every R-standby at once on the calculator
+     * (2026-11-10: still 12 unexplained wake-ups in a suspend with the CMT
+     * flag clear, KIUINTREG 0x4800 with no event flag). The OAL writes
+     * 0x0800 itself from the next image on; this keeps an older image right. */
+    {
+        volatile sf_u16 *kiuint = (volatile sf_u16 *)0xA44B0014u;
+        *kiuint = 0x00FFu;
+        *kiuint = 0x0800u;
+    }
     onchip_save();                              /* last: nothing below writes XYRAM before the sleep */
     r = dbt_standby_sleep(block);
 #ifdef DBT_STANDBY_DIAG

@@ -962,6 +962,22 @@ R-standby 之后被复位；INTREQ00 是 0，所以这次不是 IRQ 引脚，先
 不亮。两项默认都是关的，原因未查：触摸控制器上电后只发 0x02 不够（Casio 的触摸任务
 启动 0x8008AB3E 还做了别的），面板冷启动的重放在真机上没有把面板带起来。
 
+**不是 CMT；改查 KEYSC 的中断使能（2026-11-10，待真机确认）。** 带 CMT 清标志的
+hh3 在真机上：stray wakes 仍不为 0，灰色条纹照旧；Probe 快照
+`08 01 00 00 4800 0000 0001 0000 0005 0000`：CMCSR 已是 0005（CMF 清了），所以 CMT 的
+标志不是唤醒源（清标志和停时钟的代码留着，无害）。
+剩下与 Casio 有据可查的差别在 KEYSC：fx-CP400 自己的 KEYSC 初始化 0x80070F52 是
+KIUCNTREG &= 0x7FFF、KOUT = 0x0FFF、KIN = 0x00FF、等 10、KIUCNTREG |= 0x8000、
+KIUINTREG = 0x00FF 再 **0x0800**、KIAUTOFIX = 0x8042、KIUINTERVAL = 0x00C8、
+KIUWSET = 0、KIUMODE = 0x0200、0xA40501C6 = 0xFF。我们的 `KEYSC_INT_ENABLE` 是
+0x4800，来自 fx-CG100 的 OS；多出的 0x4000 按 `classpad_keysc.h` 自己的说明是"扫描完成
+也发中断"。待机时控制器自主扫描（间隔 0xC8），每扫完一遍就结束一次 R-standby，且不留
+按键事件标志，与现象一致。唤醒后 Casio 的检查 0x80070EB8 是 KIUMODE 0 → 0x0200、
+KIUINTREG |= 0x7F（写 1 清标志）。
+修正：翻译器 `dbt_standby` 睡前写 KIUINTREG = 0x00FF、0x0800（只换 hh3 就能验证）；
+OAL 的 `RStandbyOnce` 也改用 `KEYSC_INT_STANDBY`（0x0800），下次重建生效，已写到 VM。
+运行时键盘驱动仍用 0x4800。按用户要求没有等模拟器预检就发出了 hh3。
+
 SpreadCE（casio-emu，心跳采样每 2M 指令一个，`-DDBT_TRACE_BLOCKS` 把宿主 PC 映射回
 客户机块）：启动约 2.8 G 指令，敲三个数加回车（6 个键）约 1 G 指令且全程不空闲，
 点四个单元格的 41 秒里大半空闲。敲数阶段：间接调用/返回查表（`_dbt_lki_ts`）

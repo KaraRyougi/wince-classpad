@@ -333,7 +333,7 @@ static UINT32 RStandbyOnce(UINT32 keySysIntr)
     MMIO_W16(KEYSC_KINPINSET, CP_CLEAR_COL);
     MMIO_W16(KEYSC_KIUMODEREG, KEYSC_MODE_VALUE);
     MMIO_W16(KEYSC_KIUINTREG, KEYSC_INT_CLEAR);     // the OS's order: flags, then enables
-    MMIO_W16(KEYSC_KIUINTREG, KEYSC_INT_ENABLE);
+    MMIO_W16(KEYSC_KIUINTREG, KEYSC_INT_STANDBY);
     MMIO_W16(KEYSC_KIUCNTREG, KEYSC_CNT_SCAN_START);
 
     // The wake-up is a level: a Clear still held from before the suspend
@@ -353,7 +353,7 @@ static UINT32 RStandbyOnce(UINT32 keySysIntr)
         }
     }
     MMIO_W16(KEYSC_KIUINTREG, KEYSC_INT_CLEAR);     // two writes: the flag byte must read 0 afterwards
-    MMIO_W16(KEYSC_KIUINTREG, KEYSC_INT_ENABLE);    // whether the flags are write-1-to-clear or plain bits (casio-emu)
+    MMIO_W16(KEYSC_KIUINTREG, KEYSC_INT_STANDBY);    // whether the flags are write-1-to-clear or plain bits (casio-emu)
 
     if (!ClasspadHcStandby(0)) return STANDBY_NOT_ENTERED;
 

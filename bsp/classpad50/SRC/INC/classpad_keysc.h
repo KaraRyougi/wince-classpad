@@ -48,6 +48,10 @@
 // scan-start bit.
 #define KEYSC_INT_CLEAR         0x00FF
 #define KEYSC_INT_ENABLE        0x4800
+// The fx-CP400's own set-up (OS 02.01.7003 0x80070F52) enables 0x0800 only.
+// For the standby that is what must be written: with 0x4000 as well the
+// autonomous scan ended every R-standby at once (2026-11-10).
+#define KEYSC_INT_STANDBY       0x0800
 #define KEYSC_AUTOFIX_VALUE     0x8042
 #define KEYSC_INTERVAL_VALUE    0x00C8
 #define KEYSC_WSET_VALUE        0x0000
