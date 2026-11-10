@@ -655,6 +655,27 @@ KDEV 表按新 nk.exe 重新生成
 （这次盖了 SpreadCE 那边的 platform.bib、platform.dat、sh3crt.c/.def，已按那边
 的工作树恢复，platform.bib 另带 mainhelp 一行）。
 
+**USB 检测在真机上不生效；SpreadCE 慢在哪（2026-11-09 夜）。** 真机插 USB 不显示
+外接电源。Casio OS 的 USB 断电例程（0x8000C8FE、0x8000CB90）写 SYSCFG = 0、
+UPONCR（0xA40501D4）= 0、MSTPCR2 bit 20 置位、USBCLKCR（0xA4150014）bit 8 置位：
+不用 USB 时模块是停的，停着的模块 INTSTS0 读出 0。电池 PDD 现在第一次读之前按
+gint 的上电顺序恢复（USBCLKCR.CLKSTP = 0、MSTPCR2 bit 20 = 0、UPONCR = 0x0600），
+再置 SYSCFG.SCKE，USBE 不动（不上总线）；休眠恢复后重做一次。前后的寄存器值写到
+注册表 `UsbDiag`，Battery 程序底部两行显示（真机没有调试输出）。未在真机验证；
+代价是 USB PHY 一直上电。只把 battif.c 和 battery.cpp 写到了 VM：VM 上另有一个
+会话加的 FUGUEDSK 存储驱动（classpad.bat、platform.reg、platform.bib、
+DRIVERS\dirs），不在本分支里。
+
+SpreadCE（casio-emu，心跳采样每 2M 指令一个，`-DDBT_TRACE_BLOCKS` 把宿主 PC 映射回
+客户机块）：启动约 2.8 G 指令，敲三个数加回车（6 个键）约 1 G 指令且全程不空闲，
+点四个单元格的 41 秒里大半空闲。敲数阶段：间接调用/返回查表（`_dbt_lki_ts`）
+约 20%，翻译新块约 17%（不带跟踪的那次 16-23%），LCD 推送（`lcd_pixels`）3-9%
+（带跟踪 17%），SpreadCE 自己的代码约 10%。启动阶段翻译新块 20-25%，LCD 推送
+1-5%。到启动结束代码缓存已清空 29 次。结论：绘制不是主要瓶颈；主要是翻译器开销
+（1.5 MB 的 SH3 代码反复被淘汰重译，以及大量经寄存器的调用）。脏区只按行记一个
+区间，上下两处同时变（公式栏和状态栏）就整屏推送，是次要项。模拟器的系统时钟
+现在快四倍，推送线程的频率相对指令数也高了四倍，所以 LCD 一项在模拟器里偏高。
+
 ## 九、还没做的
 
 - 在 VM 里构建（第一次构建会暴露 SDK 的差异：头文件、`WARNISERROR`）。
