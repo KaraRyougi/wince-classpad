@@ -11,6 +11,10 @@
 //  a path is looked up next to the current page, then in \Windows. A second
 //  start hands its command line to the running viewer (WM_COPYDATA) and exits.
 //
+//  mainhelp.htm (what explorer's Start > Help asks for) and help:contents are
+//  no files: as in CE's own viewer, the page is built from the shortcuts in
+//  \Windows\Help (hp_contents_page, hpcore.h).
+//
 //  Window: Back and Contents buttons (Contents = the page's Htm-Help meta, or
 //  the first page), the page below. Tap a link to follow it, drag to scroll;
 //  Up/Down, Left/Right (page), Home/End scroll; Esc/Backspace go back, or
@@ -644,11 +648,100 @@ static void UpdateButtons(void)
     EnableWindow(g_back, g_nhist > 0);
 }
 
+// The Help Contents page: one link per shortcut in \Windows\Help, by name.
+#define CONTENTS_PATH   TEXT("\\Windows\\mainhelp.htm")
+#define CONTENTS_DIR    TEXT("\\Windows\\Help\\")
+#define MAX_CONTENTS    64
+
+typedef struct {
+    TCHAR name[MAX_PATH];
+    TCHAR target[MAX_PATH];
+} CONTENTS_ENTRY;
+
+static BOOL IsContentsName(LPCTSTR url, int n)
+{
+    static const TCHAR file[] = TEXT("mainhelp.htm"), special[] = TEXT("contents");
+    int i, s = 0;
+    for (i = 0; i < n; i++)
+        if (url[i] == '\\' || url[i] == '/')
+            s = i + 1;
+    if (n - s == 12 && Prefix(url + s, 12, file))
+        return TRUE;
+    return n == 8 && Prefix(url, 8, special);
+}
+
+static int LowCompare(LPCTSTR a, LPCTSTR b)
+{
+    while (*a && Low(*a) == Low(*b)) {
+        a++;
+        b++;
+    }
+    return (int)Low(*a) - (int)Low(*b);
+}
+
+static hp_doc *BuildContents(void)
+{
+    CONTENTS_ENTRY *e = (CONTENTS_ENTRY *)malloc(sizeof(CONTENTS_ENTRY) * MAX_CONTENTS);
+    const hp_char *names[MAX_CONTENTS], *targets[MAX_CONTENTS];
+    TCHAR path[MAX_PATH];
+    WIN32_FIND_DATA fd;
+    HANDLE h;
+    hp_doc *d = NULL;
+    unsigned char *b;
+    int count = 0, i, k, n;
+
+    if (!e)
+        return NULL;
+    CopyN(path, MAX_PATH, CONTENTS_DIR, Len(CONTENTS_DIR));
+    Append(path, MAX_PATH, TEXT("*.lnk"));
+    h = FindFirstFile(path, &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (count == MAX_CONTENTS || (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+                continue;
+            CopyN(path, MAX_PATH, CONTENTS_DIR, Len(CONTENTS_DIR));
+            Append(path, MAX_PATH, fd.cFileName);
+            b = ReadAll(path, &n);
+            if (!b)
+                continue;
+            if (hp_lnk_target(b, n, (hp_char *)e[count].target, MAX_PATH)) {
+                n = Len(fd.cFileName);
+                if (n > 4 && fd.cFileName[n - 4] == '.')
+                    n -= 4;
+                CopyN(e[count].name, MAX_PATH, fd.cFileName, n);
+                count++;
+            }
+            free(b);
+        } while (FindNextFile(h, &fd));
+        FindClose(h);
+    }
+    for (i = 1; i < count; i++) {           // by name
+        CONTENTS_ENTRY t = e[i];
+        for (k = i; k > 0 && LowCompare(e[k - 1].name, t.name) > 0; k--)
+            e[k] = e[k - 1];
+        e[k] = t;
+    }
+    for (i = 0; i < count; i++) {
+        names[i] = (const hp_char *)e[i].name;
+        targets[i] = (const hp_char *)e[i].target;
+    }
+    b = hp_contents_page(names, targets, count, &n);
+    if (b) {
+        d = hp_parse(b, n);
+        free(b);
+    }
+    free(e);
+    return d;
+}
+
 static hp_doc *LoadDoc(LPCTSTR path)
 {
     int n;
-    unsigned char *b = ReadAll(path, &n);
+    unsigned char *b;
     hp_doc *d;
+    if (SameText(path, CONTENTS_PATH))
+        return BuildContents();
+    b = ReadAll(path, &n);
     if (!b)
         return NULL;
     d = hp_parse(b, n);
@@ -702,7 +795,14 @@ static BOOL Navigate(LPCTSTR url, int n, BOOL push)
             PushHistory();
     } else {
         hp_doc *d = NULL;
-        if (fn == 0 || !Resolve(url, fn, path) || (d = LoadDoc(path)) == NULL) {
+        BOOL found = FALSE;
+        if (fn > 0 && IsContentsName(url, fn)) {
+            CopyN(path, MAX_PATH, CONTENTS_PATH, Len(CONTENTS_PATH));
+            found = TRUE;
+        } else if (fn > 0) {
+            found = Resolve(url, fn, path);
+        }
+        if (!found || (d = LoadDoc(path)) == NULL) {
             if (push)
                 PushHistory();
             Message(TEXT("Cannot open the help file "), url, fn ? fn : n);

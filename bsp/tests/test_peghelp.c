@@ -405,6 +405,78 @@ static void Files(const char *dir)
     printf("%d help files, %d links checked\n", files, links);
 }
 
+// The Help Contents page: shortcut targets as Microsoft's files and the
+// shell write them, and the page built from them.
+static void ContentsPage(void)
+{
+    static const struct { const char *bytes; const char *target; } lnk[] = {
+        { "18#\\windows\\wince.htm", "\\windows\\wince.htm" },               // PUBLIC\WCESHELLFE\OAK\FILES\wincehlp.lnk
+        { "17#\\windows\\word.htm\r\n", "\\windows\\word.htm" },
+        { "20#\"\\Windows\\ctpnl.htm\"", "\\Windows\\ctpnl.htm" },           // the shell quotes
+        { "23#help:\\windows\\rnetw.htm", "\\windows\\rnetw.htm" },
+        { "9#math1.htm#findroot and more", "math1.htm" },                  // the count ends it
+        { "0#\\windows\\copy.htm", "\\windows\\copy.htm" },
+        { "\\windows\\copy.htm", NULL },
+        { "12", NULL },
+        { "5#", NULL },
+    };
+    static const hp_char n0[] = { 'S', 'e', 't', 't', 'i', 'n', 'g', 's', 0 }, t0[] = { '\\', 'w', '\\', 'c', '.', 'h', 't', 'm', 0 };
+    static const hp_char n1[] = { 'A', ' ', '&', ' ', 'B', '<', 0 }, t1[] = { 'm', '.', 'h', 't', 'm', '#', 't', 'o', 'p', 0 };
+    const hp_char *names[2], *targets[2];
+    hp_char out[64];
+    char a[128];
+    unsigned char *b;
+    hp_doc *d;
+    const hp_item *it;
+    const hp_char *t;
+    unsigned i;
+    int n, count, links = 0, k;
+
+    for (i = 0; i < sizeof lnk / sizeof lnk[0]; i++) {
+        n = hp_lnk_target((const unsigned char *)lnk[i].bytes, (int)strlen(lnk[i].bytes), out, 64);
+        ToAscii(out, n, a, sizeof a);
+        if (lnk[i].target)
+            CHECK(n == (int)strlen(lnk[i].target) && !strcmp(a, lnk[i].target), "shortcut %u: target '%s'", i, a);
+        else
+            CHECK(n == 0, "shortcut %u: not a shortcut, got '%s'", i, a);
+    }
+    CHECK(hp_lnk_target((const unsigned char *)"18#\\windows\\wince.htm", 21, out, 8) == 0, "a target longer than the buffer");
+
+    names[0] = n0; targets[0] = t0;
+    names[1] = n1; targets[1] = t1;
+    b = hp_contents_page(names, targets, 2, &n);
+    CHECK(b != NULL && n > 0, "contents page");
+    d = hp_parse(b, n);
+    free(b);
+    hp_layout(d, &g_m, 300);
+    t = hp_title(d, &n);
+    ToAscii(t, t ? n : 0, a, sizeof a);
+    CHECK(!strcmp(a, "Help Contents"), "contents title '%s'", a);
+    t = hp_contents(d, &n);
+    ToAscii(t, t ? n : 0, a, sizeof a);
+    CHECK(!strcmp(a, "mainhelp.htm#Help_Contents"), "contents meta '%s'", a);
+    CHECK(Anchor(d, "help_contents") >= 0, "the Help_Contents anchor");
+    CHECK(CountText(d, "Settings") == 1 && CountText(d, "&") == 1 && CountText(d, "B") == 1, "one line per shortcut");
+    it = hp_items(d, &count);
+    for (k = 0; k < count; k++) {
+        if (it[k].link < 0 || (k > 0 && it[k - 1].link == it[k].link))
+            continue;
+        t = hp_href(d, it[k].link, &n);
+        ToAscii(t, n, a, sizeof a);
+        CHECK(!strcmp(a, links == 0 ? "\\w\\c.htm#Main_Contents" : "m.htm#top"), "link %d goes to '%s'", links, a);
+        links++;
+    }
+    CHECK(links == 2, "%d links in the contents page", links);
+    hp_free(d);
+
+    b = hp_contents_page(names, targets, 0, &n);       // an empty Help folder: the heading alone
+    d = hp_parse(b, n);
+    free(b);
+    hp_layout(d, &g_m, 300);
+    CHECK(CountText(d, "Help") == 1 && CountText(d, "Contents") == 1, "empty contents page");
+    hp_free(d);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 3 && !strcmp(argv[1], "-d")) {
@@ -423,6 +495,7 @@ int main(int argc, char **argv)
         return 0;
     }
     Builtin();
+    ContentsPage();
     if (argc > 1)
         Files(argv[1]);
     printf(g_fail ? "test_peghelp: %d FAILED\n" : "test_peghelp: all passed\n", g_fail);

@@ -6,7 +6,7 @@ second XIP region of `config.bib`, in the eActivity area of the chip since
 2026-11-09 (P1 `0x83860000`, 7.625 MiB; the hole inside Casio's OS image
 before that; docs/03 "The regions swapped"). `platform.bib` lists its
 23 SH3 DLLs and `MathXpander.exe` as `MODULES ... EXT P` (P: no CPU type
-check, they are SH3) and its help pages, keypad bitmaps and `mathxpander.lnk`
+check, they are SH3) and its help pages, keypad bitmaps , `mathxpander.lnk` and `mathxpanderhlp.lnk` (its entry in Help Contents)
 as `FILES ... EXT`. makeimg then writes `EXT.bin` next to `NK.bin`.
 
 The Pocket PC tools linked the binaries with 1 KiB sections, and romimage

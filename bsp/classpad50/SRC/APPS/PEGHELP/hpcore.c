@@ -1188,3 +1188,121 @@ const hp_char *hp_href(const hp_doc *d, int link, int *n)
     *n = vn;
     return d->src + vs;
 }
+
+//------------------------------------------------------------------------------
+// the Help Contents page (hpcore.h)
+
+int hp_lnk_target(const unsigned char *bytes, int n, hp_char *out, int cap)
+{
+    int i = 0, len = 0, e, k;
+    while (i < n && bytes[i] >= '0' && bytes[i] <= '9' && len < 100000)
+        len = len * 10 + (bytes[i++] - '0');
+    if (i == 0 || i >= n || bytes[i] != '#')
+        return 0;
+    i++;
+    e = n;                                  // the count is not trusted: take what is there
+    if (len > 0 && i + len < e)
+        e = i + len;
+    while (e > i && (bytes[e - 1] == '\r' || bytes[e - 1] == '\n' || bytes[e - 1] == ' ' || bytes[e - 1] == 0))
+        e--;
+    if (e - i >= 2 && bytes[i] == '"' && bytes[e - 1] == '"') {
+        i++;
+        e--;
+    }
+    if (e - i > 5 && (bytes[i] == 'h' || bytes[i] == 'H' || bytes[i] == 'f' || bytes[i] == 'F') && bytes[i + 4] == ':') {
+        static const char *const schemes[2] = { "help:", "file:" };
+        int s;
+        for (s = 0; s < 2; s++) {
+            for (k = 0; k < 5; k++)
+                if ((bytes[i + k] | 0x20) != schemes[s][k])
+                    break;
+            if (k == 5) {
+                i += 5;
+                break;
+            }
+        }
+    }
+    if (e <= i || e - i >= cap)
+        return 0;
+    for (k = 0; i + k < e; k++)
+        out[k] = bytes[i + k];
+    out[k] = 0;
+    return k;
+}
+
+static int contents_put(unsigned char *b, int o, const hp_char *s, int text)
+{
+    for (; *s; s++) {
+        unsigned int c = *s;
+        if (c == '<' || c == '>' || c == '"') {
+            c = ' ';
+        } else if (c == '&' && text) {
+            if (b)
+                memcpy(b + o, "&amp;", 5);
+            o += 5;
+            continue;
+        }
+        if (c < 0x80) {
+            if (b)
+                b[o] = (unsigned char)c;
+            o++;
+        } else if (c < 0x800) {
+            if (b) {
+                b[o] = (unsigned char)(0xC0 | (c >> 6));
+                b[o + 1] = (unsigned char)(0x80 | (c & 0x3F));
+            }
+            o += 2;
+        } else {
+            if (b) {
+                b[o] = (unsigned char)(0xE0 | (c >> 12));
+                b[o + 1] = (unsigned char)(0x80 | ((c >> 6) & 0x3F));
+                b[o + 2] = (unsigned char)(0x80 | (c & 0x3F));
+            }
+            o += 3;
+        }
+    }
+    return o;
+}
+
+static int contents_lit(unsigned char *b, int o, const char *s)
+{
+    int n = (int)strlen(s);
+    if (b)
+        memcpy(b + o, s, n);
+    return o + n;
+}
+
+static int contents_build(unsigned char *b, const hp_char *const *names, const hp_char *const *targets, int count)
+{
+    int o = 0, i, k, anchor;
+    o = contents_lit(b, o, "\xEF\xBB\xBF<html><head><meta http-equiv=\"Htm-Help\" content=\"mainhelp.htm#Help_Contents\">"
+                           "<title>Help Contents</title></head><body>"
+                           "<p><a name=\"Help_Contents\"></a><b>Help Contents</b></p>\r\n");
+    for (i = 0; i < count; i++) {
+        anchor = 0;
+        for (k = 0; targets[i][k]; k++)
+            if (targets[i][k] == '#')
+                anchor = 1;
+        o = contents_lit(b, o, "<a href=\"");
+        o = contents_put(b, o, targets[i], 0);
+        if (!anchor)
+            o = contents_lit(b, o, "#Main_Contents");
+        o = contents_lit(b, o, "\">");
+        o = contents_put(b, o, names[i], 1);
+        o = contents_lit(b, o, "</a><br>\r\n");
+    }
+    o = contents_lit(b, o, "</body></html>\r\n");
+    return o;
+}
+
+unsigned char *hp_contents_page(const hp_char *const *names, const hp_char *const *targets, int count, int *size)
+{
+    int n = contents_build(NULL, names, targets, count);
+    unsigned char *b = (unsigned char *)malloc(n + 1);
+    if (!b)
+        return NULL;
+    contents_build(b, names, targets, count);
+    b[n] = 0;
+    *size = n;
+    return b;
+}

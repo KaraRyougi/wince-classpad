@@ -65,4 +65,18 @@ int hp_anchor(const hp_doc *d, const hp_char *name, int n);
 int hp_hit(const hp_doc *d, int x, int y);
 const hp_char *hp_href(const hp_doc *d, int link, int *n);
 
+// The Help Contents page, as Windows CE's own viewer makes it (IE's
+// htmlhelp, helpstm.cpp GetContentsPage): explorer's Start > Help asks for
+// mainhelp.htm#Help_Contents, which is no file but a page built from the
+// shortcuts in \Windows\Help: one line per shortcut, its name the text, its
+// target (plus #Main_Contents when it names no anchor) the link.
+//
+// hp_lnk_target: the target of a CE shortcut file's bytes ("17#\windows\copy.htm",
+// the target possibly quoted or ending in CR/LF, a help:/file: scheme dropped);
+// returns its length, 0 = not a shortcut or too long for cap.
+int hp_lnk_target(const unsigned char *bytes, int n, hp_char *out, int cap);
+// hp_contents_page: the page (UTF-8 HTML with a BOM, malloc'd; NULL = no
+// memory) for count shortcuts, in the order given; names without ".lnk".
+unsigned char *hp_contents_page(const hp_char *const *names, const hp_char *const *targets, int count, int *size);
+
 #endif

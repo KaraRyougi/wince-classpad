@@ -130,17 +130,22 @@ FILES
    workbook1.htm            $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\workbook1.htm             EXT  S
    workbook_keyboard.2BP    $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\workbook_keyboard.2BP     EXT  S
    workbook_keybswitch.2BP  $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\workbook_keybswitch.2BP   EXT  S
+   mathxpanderhlp.lnk       $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\mathxpanderhlp.lnk        EXT  S
    mathxpander.lnk          $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\mathxpander.lnk           EXT  S
 
 ; Windows CE's own help pages. Start > Help opens mainhelp.htm#Help_Contents
-; (explorer's IDS_HELPFILE), a contents page CE 5.0 does not ship: FILES\mainhelp.htm
-; here links the pages below and Math Xpander's.
-; Microsoft's bib lists them only with its IE-based help viewer
-; (WCESHELLFE_MODULES_PEGHELP || IE_MODULES_HTMLHELP), which this image
-; replaces with SRC\APPS\PEGHELP, so they are listed here from the public
-; tree. word.htm goes with WordPad to EXT.
+; (explorer's IDS_HELPFILE), which is no file: the viewer builds that page
+; from the shortcuts in \Windows\Help (platform.dat), as CE's own does.
+; Microsoft's bib lists the pages and their shortcuts only with its IE-based
+; help viewer (WCESHELLFE_MODULES_PEGHELP || IE_MODULES_HTMLHELP), which this
+; image replaces with SRC\APPS\PEGHELP, so they are listed here. word.htm
+; and its shortcut go with WordPad to EXT.
 FILES
-    mainhelp.htm       $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\mainhelp.htm  NK   SH
+    wincehlp.lnk       $(_FLATRELEASEDIR)\wincehlp.lnk  NK   SH
+    ctpnlhlp.lnk       $(_FLATRELEASEDIR)\ctpnlhlp.lnk  NK   SH
+    rnetwhlp.lnk       $(_FLATRELEASEDIR)\rnetwhlp.lnk  NK   SH
+    copyrt.lnk         $(_FLATRELEASEDIR)\copyrt.lnk  NK   SH
+    wordhlp.lnk        $(_FLATRELEASEDIR)\wordhlp.lnk  EXT  SH
     wince.htm          $(_WINCEROOT)\PUBLIC\WCESHELLFE\OAK\FILES\INTLFILE\0409\wince.htm  NK   SH
     ctpnl.htm          $(_WINCEROOT)\PUBLIC\WCESHELLFE\OAK\FILES\INTLFILE\0409\ctpnl.htm  NK   SH
     copy.htm           $(_WINCEROOT)\PUBLIC\WCESHELLFE\OAK\FILES\INTLFILE\0409\copy.htm  NK   SH

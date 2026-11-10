@@ -10,3 +10,14 @@ Directory("\Windows\Programs"):-File("Plotter-Z.lnk", "\Windows\plotterz.lnk")
 
 ; Battery status and type (SRC\APPS\BATTERY, in NK)
 Directory("\Windows\Programs"):-File("Battery.lnk", "\Windows\battery.lnk")
+
+; Help Contents (Start > Help): the viewer lists the shortcuts in \Windows\Help,
+; named as Microsoft's wceshellfe.dat / wceappsfe.dat name them. WordPad's and
+; Math Xpander's are in the EXT region with their pages.
+Directory("\Windows"):-Directory("Help")
+Directory("\Windows\Help"):-File("Windows CE Basics.lnk", "\Windows\wincehlp.lnk")
+Directory("\Windows\Help"):-File("Remote Connections.lnk", "\Windows\rnetwhlp.lnk")
+Directory("\Windows\Help"):-File("Settings.lnk", "\Windows\ctpnlhlp.lnk")
+Directory("\Windows\Help"):-File("Copyright Information.lnk", "\Windows\copyrt.lnk")
+Directory("\Windows\Help"):-File("WordPad.lnk", "\Windows\wordhlp.lnk")
+Directory("\Windows\Help"):-File("Math Xpander.lnk", "\Windows\mathxpanderhlp.lnk")

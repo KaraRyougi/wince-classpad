@@ -629,10 +629,18 @@ casio-emu 里：OAL 报 `TMU0 counts 1772920 Hz by the RTC (nominal 7372800)`
 随后 `no USB controller to read, AC line reported offline`。Xpander（VM 构建的
 EXT）：正弦曲线到第 317 列。帮助：Start > Help 打开了 PegHelp，但报
 `Cannot open the help file mainhelp.htm`：explorer 的 IDS_HELPFILE 是
-`mainhelp.htm#Help_Contents`，而 CE 5.0 的 WCESHELLFE / WCEAPPSFE 文件目录里没有
-这个文件（那几页帮助各自有 Main_Contents，总目录要 OEM 给）。加了
-`FILES\mainhelp.htm`（链接 wince、ctpnl、rnetw、word、Math Xpander 的目录和
-copy），列在 platform.bib 的 NK 里；还要一次重建。KDEV 表按新 nk.exe 重新生成
+`mainhelp.htm#Help_Contents`。全树（PUBLIC、PRIVATE）没有这个文件：它是微软的
+查看器运行时生成的（`PUBLIC\IE\OAK\HTMLHELP\helpstm.cpp` GetContentsPage）：枚举
+`\Windows\Help\*.lnk`，快捷方式的名字作一行文字，目标加 `#Main_Contents` 作链接。
+我们的 PegHelp 现在照做（`hp_lnk_target`、`hp_contents_page` 在 hpcore.c，主机测试
+覆盖；peghelp.c 对 mainhelp.htm 和 help:contents 不读文件而是现生成，按名字排序，
+页面上只有标题和链接）。先前写的静态 `FILES\mainhelp.htm` 已从仓库删除。微软的
+快捷方式（wincehlp、ctpnlhlp、rnetwhlp、copyrt、wordhlp.lnk）同样挂在那个条件下，
+platform.bib 现在列出它们，另加 `FILES\xpander\mathxpanderhlp.lnk`；platform.dat
+建 `\Windows\Help` 并按微软的名字放入六个快捷方式，WordPad 和 Math Xpander 的在
+EXT，没有 EXT 时目录里就没有这两行。这一改动尚未暂存到 VM（VM 里还留着静态页和
+旧的 bib 行），需要暂存后 Build BSP 再重建镜像验证。
+KDEV 表按新 nk.exe 重新生成
 （与加了 SpreadCE 的镜像算出的表相同）。注意：两个会话都往同一个
 `PLATFORM\CLASSPAD` 暂存，`stage_bsp50.py` 会把另一边改过的文本文件盖掉
 （这次盖了 SpreadCE 那边的 platform.bib、platform.dat、sh3crt.c/.def，已按那边
