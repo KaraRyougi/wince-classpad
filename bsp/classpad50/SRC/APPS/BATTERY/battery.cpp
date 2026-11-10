@@ -12,6 +12,16 @@
 #define ID_ALKALINE 100
 #define ID_NIMH     101
 #define ID_CLOSE    110
+#define ID_OPT0     120             // five check boxes: the suspend options (classpad_pwrstat.h)
+#define OPT_COUNT   5
+static const struct { DWORD bit; LPCTSTR text; } g_opt[OPT_COUNT] = {
+    { CLASSPAD_SUSPEND_OPT_PINS,  TEXT("Pins") },
+    { CLASSPAD_SUSPEND_OPT_PANEL, TEXT("Panel") },
+    { CLASSPAD_SUSPEND_OPT_ADC,   TEXT("ADC") },
+    { CLASSPAD_SUSPEND_OPT_TOUCH, TEXT("Touch") },
+    { CLASSPAD_SUSPEND_OPT_PROBE, TEXT("Probe") },
+};
+static HWND g_optBox[OPT_COUNT];
 
 static TCHAR g_line[3][96];
 static TCHAR g_susp[4][64];         // what the last suspend did (classpad_pwrstat.h)
@@ -54,10 +64,27 @@ static void GetSuspendStats(void)
     if (st.seconds == 0xFFFFFFFF) wsprintf(g_susp[0], TEXT("Suspend %u: length unknown, woke by %s"), st.suspends, st.wokeByAlarm ? TEXT("alarm") : TEXT("Clear"));
     else wsprintf(g_susp[0], TEXT("Suspend %u: %u s, woke by %s"), st.suspends, st.seconds, st.wokeByAlarm ? TEXT("alarm") : TEXT("Clear"));
     if (st.path == CLASSPAD_SUSPEND_PATH_CPUSLEEP) wsprintf(g_susp[1], TEXT("CPU sleep only (standby entries %u)"), st.entries);
-    else wsprintf(g_susp[1], TEXT("Standby x%u, stray wakes %u, hw off %u"), st.entries, st.unexplained, st.hardwareOff);
+    else wsprintf(g_susp[1], TEXT("Standby x%u, stray wakes %u, steps %02X"), st.entries, st.unexplained, st.hardwareOff);
     if (st.unexplained) {
         SnapLine(g_susp[2], TEXT("1:"), &st.first);
         SnapLine(g_susp[3], TEXT("n:"), &st.last);
+    }
+}
+// The suspend options: the OAL holds the mask in force, the registry copy is
+// for the touch driver. Both are in RAM: everything is off again after a restart.
+static DWORD GetOptions(void)
+{
+    DWORD mask = 0, n = 0;
+    KernelIoControl(IOCTL_HAL_CLASSPAD_SUSPEND_OPTIONS, NULL, 0, &mask, sizeof mask, &n);
+    return mask;
+}
+static void SetOptions(DWORD mask)
+{
+    HKEY key; DWORD disp;
+    KernelIoControl(IOCTL_HAL_CLASSPAD_SUSPEND_OPTIONS, &mask, sizeof mask, NULL, 0, NULL);
+    if (RegCreateKeyEx(HKEY_LOCAL_MACHINE, CLASSPAD_SUSPEND_REG_KEY, 0, NULL, 0, 0, NULL, &key, &disp) == ERROR_SUCCESS) {
+        RegSetValueEx(key, CLASSPAD_SUSPEND_REG_VALUE, 0, REG_DWORD, (const BYTE *)&mask, sizeof mask);
+        RegCloseKey(key);
     }
 }
 static void GetUsbDiag(void)
@@ -95,6 +122,15 @@ static LRESULT CALLBACK WindowProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         CreateWindow(TEXT("BUTTON"), TEXT("Alkaline batteries"), WS_CHILD | WS_VISIBLE, 48, 110, 220, 36, w, (HMENU)ID_ALKALINE, NULL, NULL);
         CreateWindow(TEXT("BUTTON"), TEXT("Ni-MH batteries"), WS_CHILD | WS_VISIBLE, 48, 152, 220, 36, w, (HMENU)ID_NIMH, NULL, NULL);
         CreateWindow(TEXT("BUTTON"), TEXT("Close"), WS_CHILD | WS_VISIBLE, 48, 204, 220, 32, w, (HMENU)ID_CLOSE, NULL, NULL);
+        {
+            DWORD mask = GetOptions();
+            int i;
+            for (i = 0; i < OPT_COUNT; i++) {
+                g_optBox[i] = CreateWindow(TEXT("BUTTON"), g_opt[i].text, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                           4 + i * 63, 356, 62, 22, w, (HMENU)(ID_OPT0 + i), NULL, NULL);
+                if (g_optBox[i]) SendMessage(g_optBox[i], BM_SETCHECK, (mask & g_opt[i].bit) ? BST_CHECKED : BST_UNCHECKED, 0);
+            }
+        }
         SetTimer(w, 1, 5000, NULL);
         Refresh(w);
         return 0;
@@ -102,6 +138,13 @@ static LRESULT CALLBACK WindowProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     case WM_COMMAND:
         if (LOWORD(wp) == ID_ALKALINE) { SetType(0); Refresh(w); }
         if (LOWORD(wp) == ID_NIMH)     { SetType(1); Refresh(w); }
+        if (LOWORD(wp) >= ID_OPT0 && LOWORD(wp) < ID_OPT0 + OPT_COUNT) {
+            DWORD mask = 0;
+            int i;
+            for (i = 0; i < OPT_COUNT; i++)
+                if (g_optBox[i] && SendMessage(g_optBox[i], BM_GETCHECK, 0, 0) == BST_CHECKED) mask |= g_opt[i].bit;
+            SetOptions(mask);
+        }
         if (LOWORD(wp) == ID_CLOSE) DestroyWindow(w);
         return 0;
     case WM_PAINT: {
@@ -112,6 +155,7 @@ static LRESULT CALLBACK WindowProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         for (i = 0; i < 3; i++) ExtTextOut(dc, 12, 16 + i * 24, 0, NULL, g_line[i], lstrlen(g_line[i]), NULL);
         for (i = 0; i < 4; i++) ExtTextOut(dc, 8, 246 + i * 17, 0, NULL, g_susp[i], lstrlen(g_susp[i]), NULL);
         ExtTextOut(dc, 8, 246 + 4 * 17, 0, NULL, g_usb, lstrlen(g_usb), NULL);
+        ExtTextOut(dc, 8, 336, 0, NULL, TEXT("Next suspend also does:"), 23, NULL);
         EndPaint(w, &ps);
         return 0;
     }
@@ -125,7 +169,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPTSTR, int)
     wc.lpfnWndProc = WindowProc; wc.hInstance = inst; wc.lpszClassName = TEXT("ClasspadBattery");
     RegisterClass(&wc);
     HWND w = CreateWindow(wc.lpszClassName, TEXT("Battery"), WS_VISIBLE | WS_CAPTION | WS_SYSMENU, 0, 0,
-                          GetSystemMetrics(SM_CXSCREEN), 364, NULL, NULL, inst, NULL);
+                          GetSystemMetrics(SM_CXSCREEN), 410, NULL, NULL, inst, NULL);
     if (!w) return 1;
     SetForegroundWindow(w);
     MSG m; while (GetMessage(&m, NULL, 0, 0)) { TranslateMessage(&m); DispatchMessage(&m); }

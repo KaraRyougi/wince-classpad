@@ -98,6 +98,8 @@ static HANDLE   g_hevSample;                    // manual-reset shutdown event
 static volatile BOOL g_sampling;                // stylus down: keep waking the IST
 static volatile BOOL g_quit, g_suspended;
 static volatile BOOL g_wakePending;             // after a resume: the sample thread powers the sensor up (it may sleep, the power handler may not)
+static volatile BOOL g_powerSwitch;             // suspend option: power the sensor down (off by default; the sample thread reads the registry)
+static volatile BOOL g_poweredDown;
 
 static DWORD RegDword(LPCTSTR name, DWORD dflt)
 {
@@ -148,10 +150,19 @@ static BOOL PenDown(void)
 //  contact stays low, even if no down has been accepted yet.
 static DWORD WINAPI SampleThread(LPVOID)
 {
+    DWORD optionPoll = 0;
     CeSetThreadPriority(GetCurrentThread(), (int)RegDword(TEXT("Priority256"), TOUCH_THREAD_PRIORITY));
     while (!g_quit) {
         DWORD rc = WaitForSingleObject(g_hevSample, 1000 / (DWORD)g_rate);
         if (rc != WAIT_TIMEOUT || g_quit) break;
+        if ((++optionPoll & 63) == 0) {         // the suspend options (classpad_pwrstat.h), every 64 polls
+            HKEY key; DWORD v = 0, type, size = sizeof v;
+            if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, TEXT("Software\\ClassPad\\Suspend"), 0, 0, &key) == ERROR_SUCCESS) {
+                if (RegQueryValueEx(key, TEXT("Options"), NULL, &type, (LPBYTE)&v, &size) != ERROR_SUCCESS || type != REG_DWORD) v = 0;
+                RegCloseKey(key);
+            }
+            g_powerSwitch = (v & 0x08) != 0;    // CLASSPAD_SUSPEND_OPT_TOUCH
+        }
         if (g_wakePending) {                    // resumed: nobody else uses the bus while g_suspended is set
             SensorPowerUp();
             g_wakePending = FALSE;
@@ -306,9 +317,10 @@ LONG DdsiTouchPanelDetach(void)
     return --g_attached;
 }
 
-// Off: the bus stopped and the sensor powered down as the OS does before
-// its standby (it used to stay powered through CE's suspend). On: the sample
-// thread powers it up; until then g_suspended keeps everybody off the bus.
+// Off: the bus stopped and, with the suspend option set (off by default,
+// classpad_pwrstat.h), the sensor powered down as the OS does before its
+// standby. On: after a power-down the sample thread powers it up, and until
+// then g_suspended keeps everybody off the bus.
 void DdsiTouchPanelPowerHandler(BOOL bOff)
 {
     g_iconArmed = -1;
@@ -317,10 +329,17 @@ void DdsiTouchPanelPowerHandler(BOOL bOff)
         g_suspended = TRUE;
         g_wakePending = FALSE;
         MMIO_W8(IIC0_ICCR, 0);
-        MMIO_W8(TOUCH_X19E, MMIO_R8(TOUCH_X19E) & ~TOUCH_X19E_ON);
-        MMIO_W8(TOUCH_PHDR, MMIO_R8(TOUCH_PHDR) | TOUCH_PHDR_OFF);
+        g_poweredDown = g_powerSwitch;
+        if (g_poweredDown) {
+            MMIO_W8(TOUCH_X19E, MMIO_R8(TOUCH_X19E) & ~TOUCH_X19E_ON);
+            MMIO_W8(TOUCH_PHDR, MMIO_R8(TOUCH_PHDR) | TOUCH_PHDR_OFF);
+        }
+    } else if (g_poweredDown) {
+        g_wakePending = TRUE;                   // g_suspended stays set until the sample thread has powered the sensor up
     } else {
-        g_wakePending = TRUE;
+        TouchBusReset();                        // as before the power switch existed
+        g_sampling = TRUE;
+        g_suspended = FALSE;
     }
 }
 

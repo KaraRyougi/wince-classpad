@@ -35,19 +35,38 @@ extern UINT32 ClasspadRtcSuspendSeconds(void);
 // What the last suspend did, for the Battery program (classpad_pwrstat.h)
 static CLASSPAD_SUSPEND_STATS g_stats;
 
+static DWORD g_suspendOptions;           // CLASSPAD_SUSPEND_OPT_*: nothing by default
+
+// The registers the suspend path reads anyway, always; the others (never
+// read by CE before) only with the PROBE option.
 static void WakeSnapshot(CLASSPAD_WAKE_SNAPSHOT *s)
 {
+    memset(s, 0, sizeof *s);
     s->rcr1     = MMIO_R8(RTC_RCR1);
     s->rcr2     = MMIO_R8(RTC_RCR2);
-    s->intreq00 = MMIO_R8(0xA4140024);          // INTREQ00: IRQ0..7 pin requests
-    s->intmsk00 = MMIO_R8(0xA4140044);          // INTMSK00
     s->kiuint   = MMIO_R16(KEYSC_KIUINTREG);
     s->kiudata0 = MMIO_R16(KEYSC_KIUDATA(0));
-    s->kiustate = MMIO_R16(SH7305_REG_PA_KEYSC + 0x12);
-    s->cmstr    = MMIO_R16(0xA44A0000);         // CMT: CMSTR
-    s->cmcsr    = MMIO_R16(0xA44A0060);         //      CMCSR
-    s->rwtcsr   = MMIO_R16(0xA4520004);         // RWDT: RWTCSR
     s->r64cnt   = MMIO_R8(RTC_R64CNT);
+    if (g_suspendOptions & CLASSPAD_SUSPEND_OPT_PROBE) {
+        s->intreq00 = MMIO_R8(0xA4140024);          // INTREQ00: IRQ0..7 pin requests
+        s->intmsk00 = MMIO_R8(0xA4140044);          // INTMSK00
+        s->kiustate = MMIO_R16(SH7305_REG_PA_KEYSC + 0x12);
+        s->cmstr    = MMIO_R16(0xA44A0000);         // CMT: CMSTR
+        s->cmcsr    = MMIO_R16(0xA44A0060);         //      CMCSR
+        s->rwtcsr   = MMIO_R16(0xA4520004);         // RWDT: RWTCSR
+    }
+}
+
+BOOL OALIoCtlHalClasspadSuspendOptions(UINT32 code, VOID *in, UINT32 insize,
+    VOID *out, UINT32 outsize, UINT32 *returned)
+{
+    if (returned) *returned = 0;
+    if (in && insize >= sizeof(DWORD)) g_suspendOptions = *(DWORD *)in;
+    if (out && outsize >= sizeof(DWORD)) {
+        *(DWORD *)out = g_suspendOptions;
+        if (returned) *returned = sizeof(DWORD);
+    }
+    return TRUE;
 }
 
 //------------------------------------------------------------------------------
@@ -78,8 +97,10 @@ static void WakeSnapshot(CLASSPAD_WAKE_SNAPSHOT *s)
 //  CE has no use for either, and the launcher's takeover (dbt/hhk/
 //  takeover.S) masked all eight IRQ pins before CE started, so nothing is
 //  done about them here.
-//  Only when the display driver has named the panel (IOCTL_HAL_CLASSPAD_PANEL):
-//  the tables are the fx-CP400's.
+//  The panel's part only when the display driver has named the panel
+//  (IOCTL_HAL_CLASSPAD_PANEL). And every part only when it has been switched
+//  on (IOCTL_HAL_CLASSPAD_SUSPEND_OPTIONS, classpad_pwrstat.h): with all of
+//  them the calculator did not come back from the standby on 2026-11-10.
 //
 #define PORT_PULCRBSC   0xA40501C3      // bus pin pull-ups: the memory standby's
 #define PORT_PHCR       0xA405010E
@@ -147,72 +168,84 @@ static void LcdPlay(const UINT16 *s, UINT32 count)
     }
 }
 
-static BOOL HardwareOff(void)
+// Returns the CLASSPAD_SUSPEND_OPT_* steps performed (g_suspendOptions,
+// the panel's only when the display driver has named the panel).
+static DWORD HardwareOff(void)
 {
     UINT32 i;
-    if (g_panelKind != CLASSPAD_PANEL_NEW && g_panelKind != CLASSPAD_PANEL_OLD) return FALSE;
+    DWORD done = 0;
 
-    // the ports. Two entries of the OS's table belong to the memory standby
-    // and are left to the translator's standby code (dbt/rt/standby.S), which
-    // does the OS's 0x8002095E (PULCRBSC |= 0x12, PH6 to its function) right
-    // before SLEEP and, after the wake-up, writes back what it saved there:
-    // PULCRBSC (the table's first entry) and PH6 in PHCR (bits 13:12). With
-    // the table's values already in place the saved ones were the power-off
-    // ones, PH6 came back as "function" instead of the output the SDRAM
-    // needs (the OS's own resume 0x800209C4 writes PHCR = (& 0xCFFF) | 0x1000
-    // and clears PHDR bit 6 whatever was there before), and the calculator
-    // did not come back from the standby (2026-11-10).
-    for (i = 0; i < sizeof g_pinsOff / sizeof g_pinsOff[0]; i++) {
-        const CLASSPAD_PIN_OP *op = &g_pinsOff[i];
-        UINT32 v;
-        g_pinSaved[i] = PinRead(op->addr, op->size);
-        if (op->addr == PORT_PULCRBSC) continue;
-        v = (g_pinSaved[i] & op->andMask) | op->orValue;
-        if (op->addr == PORT_PHCR) v = (v & ~PHCR_PH6) | (g_pinSaved[i] & PHCR_PH6);
-        PinWrite(op->addr, op->size, v);
+    if (g_suspendOptions & CLASSPAD_SUSPEND_OPT_PINS) {
+        // the ports. Two entries of the OS's table belong to the memory standby
+        // and are left to the translator's standby code (dbt/rt/standby.S), which
+        // does the OS's 0x8002095E (PULCRBSC |= 0x12, PH6 to its function) right
+        // before SLEEP and, after the wake-up, writes back what it saved there:
+        // PULCRBSC (the table's first entry) and PH6 in PHCR (bits 13:12). The
+        // OS's own resume 0x800209C4 does not depend on saved values: it writes
+        // PHCR = (& 0xCFFF) | 0x1000 and clears PHDR bit 6.
+        for (i = 0; i < sizeof g_pinsOff / sizeof g_pinsOff[0]; i++) {
+            const CLASSPAD_PIN_OP *op = &g_pinsOff[i];
+            UINT32 v;
+            g_pinSaved[i] = PinRead(op->addr, op->size);
+            if (op->addr == PORT_PULCRBSC) continue;
+            v = (g_pinSaved[i] & op->andMask) | op->orValue;
+            if (op->addr == PORT_PHCR) v = (v & ~PHCR_PH6) | (g_pinSaved[i] & PHCR_PH6);
+            PinWrite(op->addr, op->size, v);
+        }
+        g_hw.pfdr = MMIO_R8(PORT_PFDR); g_hw.x162 = MMIO_R8(PORT_X162);
+        MMIO_W8(PORT_PFDR, g_hw.pfdr | 0x80);
+        MMIO_W8(PORT_X162, g_hw.x162 | 0x04);
+        // the RTC: no carry interrupt, flags clear; the alarm enable stays
+        MMIO_W8(RTC_RCR1, MMIO_R8(RTC_RCR1) & 0x0F);
+        done |= CLASSPAD_SUSPEND_OPT_PINS;
     }
-    g_hw.pfdr = MMIO_R8(PORT_PFDR); g_hw.x162 = MMIO_R8(PORT_X162);
-    MMIO_W8(PORT_PFDR, g_hw.pfdr | 0x80);
-    MMIO_W8(PORT_X162, g_hw.x162 | 0x04);
 
-    // the A/D converter as the OS leaves it (0x800813A0; that routine's
-    // other half, the touch sensor's power pin, is the touch driver's)
-    g_hw.adcX8e = MMIO_R16(ADC_X8E);
-    MMIO_W16(ADC_ADCCSR, MMIO_R16(ADC_ADCCSR) & 0xDFFF);
-    MMIO_W16(ADC_ADCUST, 0x8000);
-    MMIO_W16(ADC_X8E, (g_hw.adcX8e & 0x0FFF) | 0x8000);
+    if (g_suspendOptions & CLASSPAD_SUSPEND_OPT_ADC) {
+        // the A/D converter as the OS leaves it (0x800813A0; that routine's
+        // other half, the touch sensor's power pin, is the touch driver's)
+        g_hw.adcX8e = MMIO_R16(ADC_X8E);
+        MMIO_W16(ADC_ADCCSR, MMIO_R16(ADC_ADCCSR) & 0xDFFF);
+        MMIO_W16(ADC_ADCUST, 0x8000);
+        MMIO_W16(ADC_X8E, (g_hw.adcX8e & 0x0FFF) | 0x8000);
+        done |= CLASSPAD_SUSPEND_OPT_ADC;
+    }
 
-    // the panel: the driver's power handler has sent backlight 0, DISPOFF
-    // and SLPIN; the OS waits 100 (120) ms after SLPIN before the deep standby
-    g_hw.lcdCr4 = MMIO_R16(LCDIF_CR4); g_hw.lcdCr6 = MMIO_R8(LCDIF_CR6); g_hw.lcdStart = MMIO_R8(LCDIF_START);
-    g_hw.phdr = MMIO_R8(PORT_PHDR);
-    WaitMs(120);
-    if (g_panelKind == CLASSPAD_PANEL_NEW) LcdPlay(g_lcdOffNew, sizeof g_lcdOffNew / sizeof g_lcdOffNew[0]);
-    else                                   LcdPlay(g_lcdOffOld, sizeof g_lcdOffOld / sizeof g_lcdOffOld[0]);
-    MMIO_W8(PORT_PHDR, MMIO_R8(PORT_PHDR) & ~0x20);
-    MMIO_W8(LCDIF_START, MMIO_R8(LCDIF_START) & ~0x04);
-
-    // the RTC: no carry interrupt, flags clear; the alarm enable stays
-    MMIO_W8(RTC_RCR1, MMIO_R8(RTC_RCR1) & 0x0F);
-    return TRUE;
+    if ((g_suspendOptions & CLASSPAD_SUSPEND_OPT_PANEL) &&
+        (g_panelKind == CLASSPAD_PANEL_NEW || g_panelKind == CLASSPAD_PANEL_OLD)) {
+        // the panel: the driver's power handler has sent backlight 0, DISPOFF
+        // and SLPIN; the OS waits 100 (120) ms after SLPIN before the deep standby
+        g_hw.lcdCr4 = MMIO_R16(LCDIF_CR4); g_hw.lcdCr6 = MMIO_R8(LCDIF_CR6); g_hw.lcdStart = MMIO_R8(LCDIF_START);
+        g_hw.phdr = MMIO_R8(PORT_PHDR);
+        WaitMs(120);
+        if (g_panelKind == CLASSPAD_PANEL_NEW) LcdPlay(g_lcdOffNew, sizeof g_lcdOffNew / sizeof g_lcdOffNew[0]);
+        else                                   LcdPlay(g_lcdOffOld, sizeof g_lcdOffOld / sizeof g_lcdOffOld[0]);
+        MMIO_W8(PORT_PHDR, MMIO_R8(PORT_PHDR) & ~0x20);
+        MMIO_W8(LCDIF_START, MMIO_R8(LCDIF_START) & ~0x04);
+        done |= CLASSPAD_SUSPEND_OPT_PANEL;
+    }
+    return done;
 }
 
-static void HardwareOn(void)
+static void HardwareOn(DWORD done)
 {
     UINT32 i;
-    MMIO_W16(ADC_X8E, g_hw.adcX8e);              // the battery driver sets the rest up before every conversion
-    MMIO_W8(PORT_X162, g_hw.x162);
-    MMIO_W8(PORT_PFDR, g_hw.pfdr);
-    for (i = sizeof g_pinsOff / sizeof g_pinsOff[0]; i-- > 0; )
-        PinWrite(g_pinsOff[i].addr, g_pinsOff[i].size, g_pinSaved[i]);
-
-    // the LCD interface's module as it was (its clock, MSTPCR2, is back: StandbyRestore), then the panel from cold
-    MMIO_W16(LCDIF_CR4, g_hw.lcdCr4);
-    MMIO_W8(LCDIF_CR6, g_hw.lcdCr6);
-    if (g_panelKind == CLASSPAD_PANEL_NEW) LcdPlay(g_lcdOnNew, sizeof g_lcdOnNew / sizeof g_lcdOnNew[0]);
-    else                                   LcdPlay(g_lcdOnOld, sizeof g_lcdOnOld / sizeof g_lcdOnOld[0]);
-    MMIO_W8(LCDIF_START, g_hw.lcdStart);
-    if (!(g_hw.phdr & 0x20)) MMIO_W8(PORT_PHDR, MMIO_R8(PORT_PHDR) & ~0x20);   // was off before: leave it as it was
+    if (done & CLASSPAD_SUSPEND_OPT_ADC)
+        MMIO_W16(ADC_X8E, g_hw.adcX8e);          // the battery driver sets the rest up before every conversion
+    if (done & CLASSPAD_SUSPEND_OPT_PINS) {
+        MMIO_W8(PORT_X162, g_hw.x162);
+        MMIO_W8(PORT_PFDR, g_hw.pfdr);
+        for (i = sizeof g_pinsOff / sizeof g_pinsOff[0]; i-- > 0; )
+            PinWrite(g_pinsOff[i].addr, g_pinsOff[i].size, g_pinSaved[i]);
+    }
+    if (done & CLASSPAD_SUSPEND_OPT_PANEL) {
+        // the LCD interface's module as it was (its clock, MSTPCR2, is back: StandbyRestore), then the panel from cold
+        MMIO_W16(LCDIF_CR4, g_hw.lcdCr4);
+        MMIO_W8(LCDIF_CR6, g_hw.lcdCr6);
+        if (g_panelKind == CLASSPAD_PANEL_NEW) LcdPlay(g_lcdOnNew, sizeof g_lcdOnNew / sizeof g_lcdOnNew[0]);
+        else                                   LcdPlay(g_lcdOnOld, sizeof g_lcdOnOld / sizeof g_lcdOnOld[0]);
+        MMIO_W8(LCDIF_START, g_hw.lcdStart);
+        if (!(g_hw.phdr & 0x20)) MMIO_W8(PORT_PHDR, MMIO_R8(PORT_PHDR) & ~0x20);   // was off before: leave it as it was
+    }
 }
 
 BOOL OALIoCtlHalClasspadSuspendStats(UINT32 code, VOID *in, UINT32 insize,
@@ -371,7 +404,7 @@ VOID OEMPowerOff(void)
 
     reason = STANDBY_NOT_ENTERED;
     if (ClasspadCanTrap()) {
-        BOOL hw;
+        DWORD hw;
         StandbySave();
         hw = HardwareOff();
         g_stats.hardwareOff = hw;
@@ -387,7 +420,7 @@ VOID OEMPowerOff(void)
             }
         } while (reason == 0);
         StandbyRestore();
-        if (hw) HardwareOn();
+        HardwareOn(hw);
     }
     if (reason == STANDBY_NOT_ENTERED) {
         g_stats.path = CLASSPAD_SUSPEND_PATH_CPUSLEEP;
