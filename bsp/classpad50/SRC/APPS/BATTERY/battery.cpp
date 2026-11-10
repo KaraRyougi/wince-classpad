@@ -4,6 +4,9 @@
 // the driver reads again within 10 seconds. The registry lives in RAM: the
 // choice lasts until CE is started again, platform.reg holds the default.
 #include <windows.h>
+#include <winioctl.h>
+#include <pkfuncs.h>
+#include "classpad_pwrstat.h"
 
 #define BATT_REG_KEY TEXT("Software\\ClassPad\\Battery")
 #define ID_ALKALINE 100
@@ -11,6 +14,7 @@
 #define ID_CLOSE    110
 
 static TCHAR g_line[3][96];
+static TCHAR g_susp[4][64];         // what the last suspend did (classpad_pwrstat.h)
 
 static DWORD GetType(void)
 {
@@ -29,6 +33,32 @@ static void SetType(DWORD v)
         RegCloseKey(key);
     }
 }
+static void SnapLine(LPTSTR out, LPCTSTR tag, const CLASSPAD_WAKE_SNAPSHOT *p)
+{
+    wsprintf(out, TEXT("%s %02X %02X %02X %02X %04X %04X %04X %04X %04X %04X"), tag, p->rcr1, p->rcr2, p->intreq00, p->intmsk00,
+             p->kiuint, p->kiudata0, p->kiustate, p->cmstr, p->cmcsr, p->rwtcsr);
+}
+static void GetSuspendStats(void)
+{
+    CLASSPAD_SUSPEND_STATS st;
+    DWORD n = 0;
+    int i;
+    for (i = 0; i < 4; i++) g_susp[i][0] = 0;
+    memset(&st, 0, sizeof st);
+    if (!KernelIoControl(IOCTL_HAL_CLASSPAD_SUSPEND_STATS, NULL, 0, &st, sizeof st, &n) || n < sizeof st) return;
+    if (st.path == CLASSPAD_SUSPEND_PATH_NONE) {
+        lstrcpy(g_susp[0], TEXT("Suspend: none since the start"));
+        return;
+    }
+    if (st.seconds == 0xFFFFFFFF) wsprintf(g_susp[0], TEXT("Suspend %u: length unknown, woke by %s"), st.suspends, st.wokeByAlarm ? TEXT("alarm") : TEXT("Clear"));
+    else wsprintf(g_susp[0], TEXT("Suspend %u: %u s, woke by %s"), st.suspends, st.seconds, st.wokeByAlarm ? TEXT("alarm") : TEXT("Clear"));
+    if (st.path == CLASSPAD_SUSPEND_PATH_CPUSLEEP) wsprintf(g_susp[1], TEXT("CPU sleep only (standby entries %u)"), st.entries);
+    else wsprintf(g_susp[1], TEXT("Standby entries %u, stray wake-ups %u"), st.entries, st.unexplained);
+    if (st.unexplained) {
+        SnapLine(g_susp[2], TEXT("1:"), &st.first);
+        SnapLine(g_susp[3], TEXT("n:"), &st.last);
+    }
+}
 static void Refresh(HWND w)
 {
     SYSTEM_POWER_STATUS_EX2 s;
@@ -43,6 +73,7 @@ static void Refresh(HWND w)
         lstrcpy(g_line[1], TEXT("No reading from the battery driver"));
         g_line[2][0] = 0;
     }
+    GetSuspendStats();
     InvalidateRect(w, NULL, TRUE);
 }
 static LRESULT CALLBACK WindowProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
@@ -67,6 +98,7 @@ static LRESULT CALLBACK WindowProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         FillRect(dc, &r, (HBRUSH)GetStockObject(WHITE_BRUSH));
         SetBkMode(dc, TRANSPARENT);
         for (i = 0; i < 3; i++) ExtTextOut(dc, 12, 16 + i * 24, 0, NULL, g_line[i], lstrlen(g_line[i]), NULL);
+        for (i = 0; i < 4; i++) ExtTextOut(dc, 8, 246 + i * 17, 0, NULL, g_susp[i], lstrlen(g_susp[i]), NULL);
         EndPaint(w, &ps);
         return 0;
     }
@@ -80,7 +112,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPTSTR, int)
     wc.lpfnWndProc = WindowProc; wc.hInstance = inst; wc.lpszClassName = TEXT("ClasspadBattery");
     RegisterClass(&wc);
     HWND w = CreateWindow(wc.lpszClassName, TEXT("Battery"), WS_VISIBLE | WS_CAPTION | WS_SYSMENU, 0, 0,
-                          GetSystemMetrics(SM_CXSCREEN), 290, NULL, NULL, inst, NULL);
+                          GetSystemMetrics(SM_CXSCREEN), 346, NULL, NULL, inst, NULL);
     if (!w) return 1;
     SetForegroundWindow(w);
     MSG m; while (GetMessage(&m, NULL, 0, 0)) { TranslateMessage(&m); DispatchMessage(&m); }

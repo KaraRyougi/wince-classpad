@@ -27,6 +27,7 @@
 #include "bsp_base_regs.h"
 #include "image_cfg.h"
 #include "ioctl_cfg.h"
+#include "classpad_pwrstat.h"
 #include "intr_cfg.h"
 #include "classpad_mmio.h"
 #include "classpad_hc.h"
@@ -48,6 +49,7 @@ DWORD SC_GetTickCount(void);
 
 // BSP
 BOOL OALIoCtlHalPresuspend(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);
+BOOL OALIoCtlHalClasspadSuspendStats(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);
 BOOL OALIoCtlHalPostInit(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);
 BOOL OALIoCtlHalInitRTC(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);
 BOOL OALIoCtlHalGetCacheInfo(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);

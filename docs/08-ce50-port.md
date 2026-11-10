@@ -747,6 +747,24 @@ PHDR bit 4 置 1，含义不明。这三步各占多少电流没有数据，也�
 R-standby 本身的电流。下一步的想法：用一个小的 SH-4 解释器跑 ROM 里的初始化例程，
 把两种面板的上电命令序列抄出来，CE 休眠时照 Casio 的做法断电、恢复时重放。
 
+**休眠一晚耗尽四节电池：先量再改（2026-11-10）。** 四节电池一晚上用完，平均约
+100 mA，这是机器在运行的电流，不是 R-standby 的，也远超面板只睡眠不深度待机能
+解释的量级。两种可能：(a) 内核一断电就被唤醒，`OEMPowerOff` 的循环
+（`RStandbyOnce` 返回 0 就再进一次，仿 OS 的 0x80020ED2）整夜空转，2026-11-06 的
+第三次真机测试就见过"一进待机立刻醒"；(b) 根本没进 R-standby，走了 CPU 睡眠的
+后备路径。真机没有调试输出，所以加了统计（`classpad_pwrstat.h`）：OAL 记每次休眠
+的 RTC 时长、R-standby 进入次数、无理由唤醒次数，以及第一次和最后一次无理由唤醒
+时的唤醒源寄存器（RCR1、RCR2、INTREQ00、INTMSK00、KIUINTREG、KIUDATA0、
+KIUSTATEREG、CMSTR、CMCSR、RWTCSR），经 `IOCTL_HAL_CLASSPAD_SUSPEND_STATS` 给
+Battery 程序显示。RTC 启动时不再保留周期中断设置（PES = 0）。
+
+与 Casio 对照，CE 的待机入口还缺的硬件步骤（都没做，等统计结果再定先后）：
+- 0x800810CC 在进待机前后各调一个引脚配置例程（0x80081198 / 0x80081234：一串
+  PULCR 上拉和引脚功能寄存器），0x80020E4C 里另有 PFC 的几步（docs/06 表 3.1 的
+  2、9）；
+- LCD 断电 0x80038A9A 的面板深度待机、PHDR bit 5、0xA44C0020 bit 2；
+- KEYSC 中断优先级清零（表 3.1 的 5）。
+
 SpreadCE（casio-emu，心跳采样每 2M 指令一个，`-DDBT_TRACE_BLOCKS` 把宿主 PC 映射回
 客户机块）：启动约 2.8 G 指令，敲三个数加回车（6 个键）约 1 G 指令且全程不空闲，
 点四个单元格的 41 秒里大半空闲。敲数阶段：间接调用/返回查表（`_dbt_lki_ts`）

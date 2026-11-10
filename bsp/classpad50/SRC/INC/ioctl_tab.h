@@ -18,6 +18,7 @@
 { IOCTL_HAL_GET_UUID,                       0,  OALIoCtlHalGetUUID          },
 { IOCTL_PROCESSOR_INFORMATION,              0,  OALIoCtlProcessorInfo       },
 { IOCTL_HAL_PRESUSPEND,                     0,  OALIoCtlHalPresuspend       },
+{ IOCTL_HAL_CLASSPAD_SUSPEND_STATS,         0,  OALIoCtlHalClasspadSuspendStats },
 { IOCTL_HAL_ENABLE_WAKE,                    0,  OALIoCtlHalEnableWake       },
 { IOCTL_HAL_DISABLE_WAKE,                   0,  OALIoCtlHalDisableWake      },
 { IOCTL_HAL_GET_WAKE_SOURCE,                0,  OALIoCtlHalGetWakeSource    },

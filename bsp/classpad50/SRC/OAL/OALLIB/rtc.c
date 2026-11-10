@@ -156,7 +156,7 @@ static UINT32 FromBcd(UINT32 v)
 #define RTC_RCR2_START  0x01
 #define RTC_RCR2_RESET  0x02            // the divider below one second
 #define RTC_RCR2_RTCEN  0x08
-#define RTC_RCR2_PES    0x70            // the periodic interrupt setting, kept as it is
+#define RTC_RCR2_PES    0x70            // the periodic interrupt setting: left at 0
 
 // The calendar as seconds since 2000, whether it is counting or not
 static BOOL ReadCalendar(UINT64 *seconds)
@@ -196,7 +196,7 @@ VOID ClasspadRtcStart(void)
     if (rcr2 & RTC_RCR2_START) return;
     kept = ReadCalendar(&seconds);
     if (!kept) {
-        MMIO_W8(RTC_RCR2, (UINT8)((rcr2 & RTC_RCR2_PES) | RTC_RCR2_RTCEN | RTC_RCR2_RESET));
+        MMIO_W8(RTC_RCR2, (UINT8)(RTC_RCR2_RTCEN | RTC_RCR2_RESET));
         MMIO_W8(SH7305_REG_PA_RTC + 2, 0x00);       // second
         MMIO_W8(SH7305_REG_PA_RTC + 4, 0x00);       // minute
         MMIO_W8(SH7305_REG_PA_RTC + 6, 0x00);       // hour
@@ -205,7 +205,10 @@ VOID ClasspadRtcStart(void)
         MMIO_W8(SH7305_REG_PA_RTC + 12, 0x01);      // month
         MMIO_W16(SH7305_REG_PA_RTC + 14, 0x2000);   // year
     }
-    MMIO_W8(RTC_RCR2, (UINT8)((rcr2 & RTC_RCR2_PES) | RTC_RCR2_RTCEN | RTC_RCR2_START));
+    // The periodic interrupt setting is dropped (PES = 0): CE does not use
+    // it, a stopped calendar never raised it, and a running one would raise
+    // it up to 256 times a second, in R-standby too.
+    MMIO_W8(RTC_RCR2, (UINT8)(RTC_RCR2_RTCEN | RTC_RCR2_START));
     RETAILMSG(1, (L"CLASSPAD RTC: calendar counters started (RCR2 was %02X, %s)\r\n",
                   rcr2, kept ? L"date kept" : L"set to 2000-01-01"));
 }
@@ -214,9 +217,15 @@ VOID ClasspadRtcSuspend(void)
 {
     g_suspendRtcValid = ReadHardwareSeconds(&g_suspendRtc);
 }
+static UINT32 g_suspendSeconds = 0xFFFFFFFF;
 VOID ClasspadRtcResume(void)
 {
     UINT64 now;
-    if (g_suspendRtcValid && ReadHardwareSeconds(&now) && now >= g_suspendRtc)
+    g_suspendSeconds = 0xFFFFFFFF;
+    if (g_suspendRtcValid && ReadHardwareSeconds(&now) && now >= g_suspendRtc) {
         g_baseSeconds += now - g_suspendRtc;
+        g_suspendSeconds = (UINT32)(now - g_suspendRtc);
+    }
 }
+// How long the last suspend lasted by the calendar; 0xFFFFFFFF = not known
+UINT32 ClasspadRtcSuspendSeconds(void) { return g_suspendSeconds; }

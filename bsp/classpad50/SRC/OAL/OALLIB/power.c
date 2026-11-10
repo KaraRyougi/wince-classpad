@@ -20,6 +20,7 @@
 #include <bsp.h>
 #include "classpad_keysc.h"
 #include "classpad_power.h"
+#include "classpad_pwrstat.h"
 
 static ClasspadPowerState g_power;              // the CPU-sleep fallback (classpad_power.h)
 extern VOID ClasspadSleepUntilInterrupt(volatile unsigned *wake);
@@ -27,6 +28,36 @@ extern VOID ClasspadRtcSuspend(void);
 extern VOID ClasspadRtcResume(void);
 extern BOOL ClasspadRtcAlarmArmed(void);
 extern BOOL ClasspadRtcAlarmFired(void);
+extern UINT32 ClasspadRtcSuspendSeconds(void);
+
+// What the last suspend did, for the Battery program (classpad_pwrstat.h)
+static CLASSPAD_SUSPEND_STATS g_stats;
+
+static void WakeSnapshot(CLASSPAD_WAKE_SNAPSHOT *s)
+{
+    s->rcr1     = MMIO_R8(RTC_RCR1);
+    s->rcr2     = MMIO_R8(RTC_RCR2);
+    s->intreq00 = MMIO_R8(0xA4140024);          // INTREQ00: IRQ0..7 pin requests
+    s->intmsk00 = MMIO_R8(0xA4140044);          // INTMSK00
+    s->kiuint   = MMIO_R16(KEYSC_KIUINTREG);
+    s->kiudata0 = MMIO_R16(KEYSC_KIUDATA(0));
+    s->kiustate = MMIO_R16(SH7305_REG_PA_KEYSC + 0x12);
+    s->cmstr    = MMIO_R16(0xA44A0000);         // CMT: CMSTR
+    s->cmcsr    = MMIO_R16(0xA44A0060);         //      CMCSR
+    s->rwtcsr   = MMIO_R16(0xA4520004);         // RWDT: RWTCSR
+    s->r64cnt   = MMIO_R8(RTC_R64CNT);
+}
+
+BOOL OALIoCtlHalClasspadSuspendStats(UINT32 code, VOID *in, UINT32 insize,
+    VOID *out, UINT32 outsize, UINT32 *returned)
+{
+    if (returned) *returned = 0;
+    if (!out || outsize < sizeof g_stats) return FALSE;
+    g_stats.size = sizeof g_stats;
+    memcpy(out, &g_stats, sizeof g_stats);
+    if (returned) *returned = sizeof g_stats;
+    return TRUE;
+}
 
 #define CP_POWER_MSTPCR2    0xA4150038u
 #define STANDBY_NOT_ENTERED ((UINT32)-1)
@@ -166,14 +197,29 @@ VOID OEMPowerOff(void)
                   ClasspadRtcAlarmArmed() ? L" or RTC alarm" : L""));
     g_oalWakeSource = SYSWAKE_UNKNOWN;
     ClasspadRtcSuspend();
+    g_stats.suspends++;
+    g_stats.path = CLASSPAD_SUSPEND_PATH_NONE;
+    g_stats.entries = g_stats.unexplained = g_stats.wokeByAlarm = 0;
+    g_stats.seconds = 0xFFFFFFFF;
 
     reason = STANDBY_NOT_ENTERED;
     if (ClasspadCanTrap()) {
         StandbySave();
-        do reason = RStandbyOnce(key); while (reason == 0);
+        do {
+            reason = RStandbyOnce(key);
+            if (reason != STANDBY_NOT_ENTERED) {
+                g_stats.path = CLASSPAD_SUSPEND_PATH_RSTANDBY;
+                g_stats.entries++;
+            }
+            if (reason == 0) {                  // nobody asked for this wake-up: what do the wake sources say?
+                if (g_stats.unexplained++ == 0) WakeSnapshot(&g_stats.first);
+                WakeSnapshot(&g_stats.last);
+            }
+        } while (reason == 0);
         StandbyRestore();
     }
     if (reason == STANDBY_NOT_ENTERED) {
+        g_stats.path = CLASSPAD_SUSPEND_PATH_CPUSLEEP;
         RETAILMSG(1, (L"CLASSPAD POWER: no R-standby, CPU sleep with Clear/ON wake\r\n"));
         ClasspadPowerPrepare(&g_power, g_oalTimer.countsPerMSec);
         while (!g_power.wake) ClasspadSleepUntilInterrupt(&g_power.wake);
@@ -182,6 +228,8 @@ VOID OEMPowerOff(void)
     }
 
     ClasspadRtcResume();
+    g_stats.seconds = ClasspadRtcSuspendSeconds();
+    g_stats.wokeByAlarm = reason == SYSINTR_RTC_ALARM;
     g_oalWakeSource = reason;
     RETAILMSG(1, (L"CLASSPAD POWER: resumed by %s\r\n", reason == SYSINTR_RTC_ALARM ? L"the RTC alarm" : L"Clear/ON"));
 }
