@@ -6,8 +6,8 @@ rem  5.0's romimage cannot lay out two regions that are not contiguous, so
 rem  EXT gets its own run): ext.bib = ext.bib.hdr (the region's MEMORY and
 rem  CONFIG) + MODULES from ext.modules.bib + FILES from ext.files.bib, the
 rem  entries PostFmergeBib.bat took out of ce.bib; then "romimage ext.bib"
-rem  writes EXT.bin. Flash it into the eActivity area with nkflash.hhk /
-rem  wince.hhk, or give it to the emulator with EXTBIN=.
+rem  writes EXT.bin. Flash it into the eActivity area with wince.hh3,
+rem  or give it to the emulator with EXTBIN=.
 rem ===========================================================================
 setlocal
 set "REL=%_FLATRELEASEDIR%"

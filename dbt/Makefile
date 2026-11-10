@@ -78,7 +78,7 @@ NKBIN       ?=
 # before that date, NK in the eActivity area and EXT in the hole. NK_FLASH is
 # the NK offset as a P1 address; NK_FLASH_OFF/NK_FLASH_MAX can also be given
 # directly (an emulator run of a 7 MiB image linked at 0x81000000:
-# NK_FLASH_OFF=0x01000000 NK_FLASH_MAX=0x00800000). wince.hhk/nkflash.hhk
+# NK_FLASH_OFF=0x01000000 NK_FLASH_MAX=0x00800000). wince.hh3
 # flash \fls0\NK.bin and \fls0\EXT.bin into the two windows; the *_WINDOW_EACT
 # define tells them which window is the eActivity volume (theirs to erase).
 # EXTBIN=<EXT.bin> adds the EXT region to an emulator run's NOR; the
@@ -263,12 +263,11 @@ $(IMG).g3a: $(IMG)-loader.bin
 	( dd if=/dev/zero bs=28672 count=1 2>/dev/null; cat $< ) > $@
 
 # --- HollyHock program for the real fx-CP400 (dbt/hhk, docs/03, loader/README.md) ---
-# wince.hhk: the stub (hhk/launcher.c, loaded by HollyHock at 0x8CFF0000) with
-# the translator image $(IMG).bin as a second loadable region at IMAGE_BASE;
-# the stub quiets the OS's interrupt sources and jumps into it the way the
-# .g3a launcher does (hhk/takeover.S). nkflash.hhk writes \fls0\NK.bin and
-# \fls0\EXT.bin into the NOR windows at NK_FLASH and EXT_FLASH. Both are plain
-# ELF files (also copied as .hh3).
+# wince.hh3: the calculator's loader (hhk/loader.c, a gint program that
+# HollyHock 3 starts from Casio's OS) with the translator image as a second
+# loadable section; it flashes \fls0\NK.bin and \fls0\EXT.bin into the NOR
+# windows at NK_FLASH and EXT_FLASH when asked, then hands the machine to the
+# translator (hhk/takeover.S). The only program the calculator needs.
 HHK_BASE   := 0x8CFF0000
 HHK_LIMIT  := 0x8D000000
 # Where HollyHock's own copy puts the translator payload (~64 KiB) while
@@ -292,13 +291,12 @@ $(BUILD)/lcdprobe.hh3: $(HHK_COMMON) hhk/lcdprobe.c rt/lcd_io.h hhk/hhk.ld | $(B
 	$(CC) $(HHK_CFLAGS) -DHHK_APP_NAME='"LCD takeover probe"' -DHHK_APP_DESC='"Step through display handoff without booting CE or flashing"' $(HHK_LD) -o $@ $(HHK_COMMON) hhk/lcdprobe.c -lgcc
 	python3 ../tools/hhkcheck.py $@
 PAYLOAD_H  := $(BUILD)/dbt-$(GUEST)-payload.h
-WINCE_HHK  := $(BUILD)/wince.hhk
-NKFLASH_HHK := $(BUILD)/nkflash.hhk
+WINCE_HHK  := $(BUILD)/wince.hh3
 
 $(PAYLOAD_H): $(IMG).bin ../tools/hhkpayload.py
 	python3 ../tools/hhkpayload.py $< > $@
 
-# wince.hhk and nkflash.hhk are gint programs for the fx-CP400 (gint's
+# wince.hh3 is a gint program for the fx-CP400 (gint's
 # libgint-cp and its HollyHock 3 linker script fxcp_hh3.ld, from the fxSDK
 # sysroot: giteapc install Lephenixnoir/gint, or fxsdk build-cp install in
 # its checkout). gint owns the display, keyboard, clock and the storage
@@ -309,7 +307,7 @@ GINT_LIB   := $(shell fxsdk path lib 2>/dev/null)
 GINT_CFLAGS := $(HHK_CFLAGS) -DFXCP -fstrict-volatile-bitfields -Wa,--dsp
 GINT_LD    := -T $(GINT_LIB)/fxcp_hh3.ld -L$(GINT_LIB) -Wl,--section-start=.wince.payload=$(HHK_PAYLOAD) -Wl,--no-warn-rwx-segments \
               -Wl,--start-group -lgint-cp -lc -lopenlibm -lgcc -Wl,--end-group
-# wince.hhk carries the flasher: NK.bin and EXT.bin on the calculator are
+# wince.hh3 carries the flasher: NK.bin and EXT.bin on the calculator are
 # written to their windows when the chosen action asks for it, then CE boots
 HHK_FLASH := hhk/nkflash.c hhk/norflash.c hhk/util.c
 # the Luna loader's screens (hhk/ui.c, docs/design/loader-luna.html): drawing,
@@ -318,13 +316,8 @@ HHK_FLASH := hhk/nkflash.c hhk/norflash.c hhk/util.c
 HHK_UI := hhk/ui.c hhk/gfx.c hhk/font_data.c hhk/art_data.c
 $(WINCE_HHK): $(HHK_FLASH) $(HHK_UI) hhk/loader.c hhk/takeover.S hhk/payload.S hhk/util.h hhk/nkflash.h hhk/norflash.h hhk/ui.h hhk/gfx.h $(IMG).bin $(PAYLOAD_H) $(LAYOUT_STAMP)
 	$(CC) $(GINT_CFLAGS) -include $(PAYLOAD_H) -DIMAGE='"$(IMG).bin"' -o $@ hhk/loader.c $(HHK_FLASH) $(HHK_UI) hhk/takeover.S hhk/payload.S $(GINT_LD)
-	cp $@ $(@:.hhk=.hh3)
 
-$(NKFLASH_HHK): $(HHK_FLASH) hhk/util.h hhk/nkflash.h hhk/norflash.h $(LAYOUT_STAMP)
-	$(CC) $(GINT_CFLAGS) -DNKFLASH_STANDALONE -o $@ $(HHK_FLASH) $(GINT_LD)
-	cp $@ $(@:.hhk=.hh3)
-
-hhk: $(WINCE_HHK) $(NKFLASH_HHK) hhk-check
+hhk: $(WINCE_HHK) hhk-check
 
 # the loader's screens rendered on the host with sample data: <build>/ui-*.ppm
 HOSTCC ?= cc
@@ -334,9 +327,8 @@ hhk-preview: $(BUILD)/uipreview
 	$< $(BUILD)
 
 # the .hhk carries the very bytes the emulator runs (and loads where the layout says)
-hhk-check: $(WINCE_HHK) $(NKFLASH_HHK) $(IMG).g3a ../tools/hhkcheck.py
+hhk-check: $(WINCE_HHK) $(IMG).g3a ../tools/hhkcheck.py
 	python3 ../tools/hhkcheck.py $(WINCE_HHK) $(IMG).bin $(IMG).g3a $(HHK_PAYLOAD)
-	python3 ../tools/hhkcheck.py $(NKFLASH_HHK)
 
 # the same stub as a casio-emu payload: hhk_takeover (quiesce, copy, cache sync,
 # jump) runs the current guest in the emulator. make GUEST=hello hhkrun

@@ -17,7 +17,7 @@ trap-and-emulate FPU lives in the kernel's illegal-instruction path.
 | `docs/` | Plan, hardware facts, FPU emulation design, boot/image notes |
 | `fpuemu/` | Integer-only SH-4 FPU emulator core + host test harness (clang) |
 | `tools/nkbin.py` | Parser/inspector for CE `.bin` images (B000FF) and ROMHDR |
-| `dbt/hhk/` | HollyHock 3 programs for the real fx-CP400: `wince.hhk` starts the translator from Casio's OS, `nkflash.hhk` writes NK.bin into the NOR (docs/03) |
+| `dbt/hhk/` | HollyHock 3 programs for the real fx-CP400: `wince.hh3` (a gint program) shows the loader, flashes NK.bin/EXT.bin when asked and starts the translator from Casio's OS |
 | `loader/` | history only: the pre-translator loader idea (see its README) |
 | `bsp/classpad/` | Platform Builder 6.0 BSP (OAL, drivers, .bib/.reg files); needs PB 6.0 on Windows |
 | `bsp/classpad50/` | the same BSP for Windows CE 5.0 (the current target, docs/08); needs PB 5.0 on Windows |
@@ -44,7 +44,7 @@ python3 tools/cesym.py NK.bin RELDIR 8c186010  # guest address -> module!symbol 
 make -C dbt GUEST=nkimg nkrun      # loader self-test with a synthetic CE-format image (copied into RAM)
 make -C dbt GUEST=nkxip nkrun      # the same for an image executing in place from the emulated NOR (XIP)
 make -C dbt BUILD=build-x ...      # a private build directory per run: runs (and emulators) can go in parallel
-make -C dbt DEVICE=1 BUILD=build-dev hhk   # wince.hhk + nkflash.hhk for a real fx-CP400 with HollyHock 3 (docs/03), checked against the .g3a
+make -C dbt DEVICE=1 BUILD=build-dev hhk   # wince.hh3 for a real fx-CP400 with HollyHock 3 (docs/03), checked against the .g3a
 make -C dbt hhkrun                 # the device stub (hhk/takeover.S) running the current guest in casio-emu
 make -C dbt flashtest              # hhk/norflash.c against casio-emu's NOR command model
 python3 tools/nkbin.py path/to/NK.bin

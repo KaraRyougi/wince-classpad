@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""mkbitmapfont.py - 1-bit bitmap fonts for the loader (wince.hhk) and its mockup.
+"""mkbitmapfont.py - 1-bit bitmap fonts for the loader (wince.hh3) and its mockup.
 
     mkbitmapfont.py js          > tables for docs/design/loader-luna.html (const BMF)
     mkbitmapfont.py c <out.c>   the loader's fonts as C (dbt/hhk/font_data.c)

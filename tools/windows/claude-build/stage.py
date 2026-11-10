@@ -126,7 +126,6 @@ def main(argv):
     dbt = os.path.join(REPO, "dbt")
     run("make", "DEVICE=1", "NK_WINDOW=eact", "BUILD=" + BUILD, "hhk", cwd=dbt)
     shutil.copy(os.path.join(dbt, BUILD, "wince.hh3"), os.path.join(hhk, "wince-eact.hh3"))
-    shutil.copy(os.path.join(dbt, BUILD, "nkflash.hh3"), os.path.join(hhk, "nkflash-eact.hh3"))
 
     for f in ("build.bat", "README.txt"):
         shutil.copy(os.path.join(HERE, f), os.path.join(dest, f))

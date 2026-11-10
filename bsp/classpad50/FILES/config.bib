@@ -5,13 +5,13 @@
 ;   NK   the kernel, the shell, the drivers and the BSP's own programs, in
 ;        the erased hole inside Casio's OS image (P1 0x80EE0000, 5 MiB), which
 ;        Casio's OS never writes after an OS update: flashed once by
-;        wince.hhk / nkflash.hhk and kept (translator NK_WINDOW=hole, the
+;        wince.hh3 and kept (translator NK_WINDOW=hole, the
 ;        default). This file. The 2026-11-09 image fills 4.9 MB of it.
 ;   EXT  a second XIP region in the eActivity area of the chip (P1
 ;        0x83860000, 7.625 MiB): Math Xpander and the libraries only it needs
 ;        (platform.bib entries with EXT in the region column). Casio's OS
 ;        reformats the area at every boot that finds it holding something
-;        else, so wince.hhk reflashes EXT.bin before a CE session when it
+;        else, so wince.hh3 reflashes EXT.bin before a CE session when it
 ;        differs, or skips it on request. OEMInit hands the region to the
 ;        kernel through OEMRomChain (SRC\INC\classpad_extrom.h); without it
 ;        CE boots as if the region were empty.

@@ -1,4 +1,4 @@
-/* loader.c - the Windows CE loader (wince.hhk) on the fx-CP400: a gint
+/* loader.c - the Windows CE loader (wince.hh3) on the fx-CP400: a gint
  * program that HollyHock 3 starts from Casio's OS. It shows the Luna-style
  * screens of hhk/ui.c (docs/design/loader-luna.html) with four actions:
  *   - Flash CE Core OS: NK.bin into the NK window, the hole inside Casio's
@@ -303,7 +303,7 @@ static int flash_failed(int action, int file, int phase)
         hhk_format(detail, sizeof detail, "Writing %s stopped part way, so the image in flash is incomplete.", n);
     else
         hhk_format(detail, sizeof detail, "%s was written, but the flash does not read back the same.", n);
-    hhk_format(again, sizeof again, "Start wince.hhk again and choose %s. %s is still in \\fls0.", action_name[action], n);
+    hhk_format(again, sizeof again, "Start wince.hh3 again and choose %s. %s is still in \\fls0.", action_name[action], n);
     hhk_format(copy, sizeof copy, "If it fails again, copy %s over USB once more.", n);
     todo[0] = "Press EXE to return to HollyHock.";
     todo[1] = again;
@@ -326,7 +326,6 @@ static int loader(void)
 {
     int sel, k, i, r;
     gfx_fb = gint_vram;
-    nk_quiet = 1;
     scan_files();
     sel = UA_BOOT;
     ui_menu(&scan, sel, 1); show();
@@ -350,7 +349,7 @@ static int loader(void)
     }
     if (sel != UA_BOOT) {
         if (plan(sel)) {
-            static const char *const todo[] = { "Press EXE to return to HollyHock.", "Check the files in \\fls0 and start wince.hhk again." };
+            static const char *const todo[] = { "Press EXE to return to HollyHock.", "Check the files in \\fls0 and start wince.hh3 again." };
             return error_screen("Flashing stopped", "A file changed after the check.", reason(), todo, 2);
         }
         nk_progress = on_progress;
@@ -375,8 +374,8 @@ int main(void)
     int r;
     gfx_fb = gint_vram;
     if (len != PAYLOAD_SIZE || bytesum(payload_start, len) != PAYLOAD_SUM) {
-        static const char *const todo[] = { "Press EXE to return to HollyHock.", "Copy wince.hhk to the calculator again." };
-        return error_screen("Loader damaged", "wince.hhk is incomplete.",
+        static const char *const todo[] = { "Press EXE to return to HollyHock.", "Copy wince.hh3 to the calculator again." };
+        return error_screen("Loader damaged", "wince.hh3 is incomplete.",
                             "The translator inside it does not match the sum the build recorded, so it is not started.", todo, 2);
     }
     r = loader();

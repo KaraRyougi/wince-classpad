@@ -18,12 +18,11 @@
  * B000FF header) or the window is the eActivity area (*_WINDOW_EACT);
  * anything else stops before the first erase.
  *
- * Two users, both gint programs: wince.hhk (hhk/loader.c) calls
- * nkflash_open / compare / write per window, with its screens following
- * nk_progress and nk_say silenced (nk_quiet; the last line stays in nk_last
- * for the error screen), and nkflash.hhk (NKFLASH_STANDALONE) is the same as
- * a tool of its own that prints nk_say's lines. Files are read through
- * gint's file system (POSIX open/read/lseek on /NK.bin = \fls0\NK.bin). */
+ * Used by wince.hh3 (hhk/loader.c), a gint program: it calls nkflash_open /
+ * compare / write per window and follows nk_progress; nk_say's lines are
+ * not shown, the last one stays in nk_last for the error screen. Files are
+ * read through gint's file system (POSIX open/read/lseek on /NK.bin =
+ * \fls0\NK.bin). */
 #include <fcntl.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -65,8 +64,6 @@ const nkwindow nk_windows[] = {
 };
 const int nk_nwindows = sizeof nk_windows / sizeof nk_windows[0];
 
-void (*nk_print)(const char *line);
-int nk_quiet;
 char nk_last[48];
 void (*nk_progress)(int what, u32 done, u32 total, u32 addr);
 #define PROGRESS(w, d, t, a) do { if (nk_progress) nk_progress(w, d, t, a); } while (0)
@@ -90,7 +87,6 @@ void nk_say(const char *fmt, ...)
     hhk_vformat(buf, 41, fmt, ap);
     va_end(ap);
     memcpy(nk_last, buf, sizeof nk_last);
-    if (!nk_quiet && nk_print) nk_print(buf);
 }
 
 static int fail(const char *fmt, ...)
@@ -320,66 +316,3 @@ void nkflash_info(nkinfo *i)
     i->sectors = nk.hi > nk.lo ? ((nk.hi - 1) / NOR_SECTOR - nk.lo / NOR_SECTOR + 1) : 0;
     i->xip = nk.xip;
 }
-
-#ifdef NKFLASH_STANDALONE
-/* nkflash.hhk: the same flasher as a gint program of its own, printing one
- * line per step in gint's font; EXE goes on, Clear stops */
-#include <gint/display.h>
-#include <gint/keyboard.h>
-HHK_NAME("CE image flasher");
-HHK_DESCRIPTION("writes fls0/NK.bin (and EXT.bin) into the NOR for Windows CE");
-HHK_AUTHOR("wince-classpad");
-HHK_VERSION(HHK_APP_VERSION);
-
-static int row;
-static void print_line(const char *line)
-{
-    if (row > 40) { dclear(C_WHITE); row = 0; }
-    dtext(4, 4 + 12 * row++, C_BLACK, line);
-    dupdate();
-}
-
-static int exe_or_clear(void)
-{
-    for (;;) {
-        key_event_t e = getkey_opt(GETKEY_NONE, NULL);
-        if (e.key == KEY_EXE) return 1;
-        if (e.key == KEY_CLEAR) return 0;
-    }
-}
-
-int main(void)
-{
-    int i, r, bad = 0, pending[4];
-    dclear(C_WHITE);
-    nk_print = print_line;
-    nk_say("CE image flasher (wince-classpad)");
-    for (i = 0; i < nk_nwindows; i++) {
-        const nkwindow *w = &nk_windows[i];
-        pending[i] = 0;
-        nk_say("%s window %08x..%08x %s", w->name, w->base, w->base + w->max, nkflash_window_state(w));
-        r = nkflash_open(w);
-        if (r == NKF_NOFILE) { nk_say("no %s.bin", w->name); continue; }
-        if (r != NKF_READY) { bad = 1; continue; }
-        r = nkflash_compare();
-        nkflash_close();
-        if (r == 1) nk_say("%s.bin already in flash", w->name);
-        else if (r == 0) pending[i] = 1;
-        else bad = 1;
-    }
-    for (r = 0, i = 0; i < nk_nwindows; i++) r |= pending[i];
-    if (bad || !r) { nk_say(bad ? "nothing was written. EXE or Clear." : "nothing to write. EXE or Clear."); exe_or_clear(); return bad; }
-    nk_say("EXE: erase and program   Clear: cancel");
-    if (!exe_or_clear()) return 0;
-    for (i = 0; i < nk_nwindows; i++) {
-        if (!pending[i]) continue;
-        if (nkflash_open(&nk_windows[i]) != NKF_READY) { bad = 1; break; }
-        r = nkflash_write();
-        nkflash_close();
-        if (r) { bad = 1; break; }
-    }
-    nk_say(bad ? "nothing more was written. EXE or Clear." : "done. Start wince.hhk to boot it. EXE or Clear.");
-    exe_or_clear();
-    return bad;
-}
-#endif

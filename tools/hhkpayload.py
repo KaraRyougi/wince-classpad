@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""hhkpayload.py - describe the translator image embedded in wince.hhk.
+"""hhkpayload.py - describe the translator image embedded in wince.hh3.
 
   hhkpayload.py <dbt-image.bin>   -> C defines on stdout (PAYLOAD_SIZE, PAYLOAD_SUM)
 

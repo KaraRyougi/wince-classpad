@@ -37,7 +37,7 @@ int main(int argc, char **argv)
                  { UI_DONE, UI_DONE, UI_NOW, UI_TODO, UI_TODO } };
     static const char *const todo[] = {
         "Press EXE to return to HollyHock.",
-        "Start wince.hhk again and choose Flash CE Core OS. NK.bin is still in \\fls0.",
+        "Start wince.hh3 again and choose Flash CE Core OS. NK.bin is still in \\fls0.",
         "If it fails again, copy NK.bin over USB once more.",
     };
     gfx_fb = fb;
