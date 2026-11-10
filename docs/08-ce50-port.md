@@ -823,8 +823,8 @@ casio-emu：`dbt/emu-patch/add_classpad_lcdpower.py`（深度待机后帧为空�
   接管代码（`dbt/hhk/takeover.S`，默认 `IRQPINS=mask`）在离开 Casio OS 时已经把
   INTMSK00 写成全屏蔽，交付的镜像都是这样构建的。所以 IRQ1 在 CE 运行和待机期间一直
   是屏蔽的（除非被屏蔽的引脚请求也能结束 R-standby，这一点没有依据）。主因仍然未知，
-  要看休眠统计。`RStandbyOnce` 现在每次进待机前都再屏蔽一次（原先只在面板断电那段
-  里做），`StandbySave` / `StandbyRestore` 保存恢复这个屏蔽字，属于保险。
+  要看休眠统计。OAL 里对 IRQ 引脚的屏蔽（先在 `HardwareOff`，后挪到 `RStandbyOnce`）
+  既然多余，已按用户意见全部去掉；快照里仍读 INTREQ00 / INTMSK00 供诊断。
 - USB 插线的电平：Casio 用 0x8006F942 读 `(PUDR & 2) != 0`（PUDR = 0xA4050162，
   Port U bit 1，高 = 插着），调用者是 USB 状态机 0x8007267A（已连接状态下线拔掉的
   判断）、USB 打开的等待循环 0x80076E72、电池测量 0x8002A5CA，以及 0x80146FC4。

@@ -71,18 +71,13 @@ static void WakeSnapshot(CLASSPAD_WAKE_SNAPSHOT *s)
 //  power-on is replayed from classpad_pwrseq.h up to the point where the
 //  display driver's own resume takes over (SLPOUT again, its backlight
 //  level, the repaint, DISPON).
-//  One thing differs on purpose. The OS arms two IRQ pins as wake-up
-//  sources (0x8006F7DA): IRQ1, always (0x8006F63A: priority 12, unmasked;
-//  falling edge, ICR1 set by 0x80062100), whose handler 0x8006F6D8 resets
-//  the USB cable state machine's variable 0x8C1F6F48 and posts an event:
-//  the USB cable being plugged in; and IRQ2 (0x8006F668: priority 5), only
-//  under the conditions of 0x8006F78C on the communication settings: a
-//  wake-up by the serial link. CE inherits IRQ1 unmasked at priority 12 and
-//  has no handler for either: an edge latched in INTREQ00 that nothing
-//  clears is a pending, unmasked interrupt, and R-standby ends at once
-//  every time it is entered. All eight IRQ pins are masked for the standby
-//  (RStandbyOnce, whatever the panel; StandbySave / StandbyRestore keep
-//  their masks).
+//  Not copied: the OS arms two IRQ pins as wake-up sources (0x8006F7DA):
+//  IRQ1, always (0x8006F63A; its handler 0x8006F6D8 resets the USB cable
+//  state machine: the cable being plugged in), and IRQ2 under conditions
+//  on the communication settings (0x8006F668: the serial link's wake-up).
+//  CE has no use for either, and the launcher's takeover (dbt/hhk/
+//  takeover.S) masked all eight IRQ pins before CE started, so nothing is
+//  done about them here.
 //  Only when the display driver has named the panel (IOCTL_HAL_CLASSPAD_PANEL):
 //  the tables are the fx-CP400's.
 //
@@ -223,7 +218,6 @@ typedef struct {
     UINT8  imr[13];
     UINT16 kcnt, kmode, kint, kwset, kinterval, kautofix, krows, kcols;
     UINT32 mstpcr0, mstpcr2;
-    UINT8  intmsk00;            // the IRQ pins' masks
 } CLASSPAD_STANDBY_STATE;
 static CLASSPAD_STANDBY_STATE g_sb;
 
@@ -247,7 +241,6 @@ static void StandbySave(void)
     g_sb.kcols     = MMIO_R16(KEYSC_KINPINSET);
     g_sb.mstpcr0   = MMIO_R32(CP_POWER_MSTPCR0);
     g_sb.mstpcr2   = MMIO_R32(CP_POWER_MSTPCR2);
-    g_sb.intmsk00  = MMIO_R8(0xA4140044);       // INTMSK00
 }
 
 static void StandbyRestore(void)
@@ -269,8 +262,6 @@ static void StandbyRestore(void)
     MMIO_W16(KEYSC_KIUMODEREG, g_sb.kmode);
     MMIO_W16(KEYSC_KIUINTREG, g_sb.kint | KEYSC_INT_CLEAR);
     MMIO_W16(KEYSC_KIUCNTREG, g_sb.kcnt);
-    MMIO_W8(0xA4140044, 0xFF);                              // the IRQ pins as they were
-    MMIO_W8(0xA4140064, (UINT8)~g_sb.intmsk00);             // INTMSKCLR00
 }
 
 //------------------------------------------------------------------------------
@@ -283,12 +274,7 @@ static UINT32 RStandbyOnce(UINT32 keySysIntr)
     UINT32 i;
 
     // Only an armed RTC alarm may reach the INTC; everything else is masked.
-    // That includes the eight IRQ pins, which have their own mask register:
-    // CE inherits IRQ1 (Casio's "USB cable plugged in" wake-up, falling edge)
-    // unmasked at priority 12 and never clears its request, so one plug of
-    // the cable made every later standby end at once (docs/08, 2026-11-10).
     for (i = 0; i < 13; i++) MMIO_W8(INTC_IMR(i), 0xFF);
-    MMIO_W8(0xA4140044, 0xFF);
     if (ClasspadRtcAlarmArmed()) MMIO_W8(INTC_IMCR(10), INTC_IMR10_RTC_ALARM);
 
     // KEYSC: autonomous scan of Clear's row and column (the OS's standby
