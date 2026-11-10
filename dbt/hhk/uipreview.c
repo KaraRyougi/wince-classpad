@@ -43,6 +43,11 @@ int main(int argc, char **argv)
     gfx_fb = fb;
     ui_menu(&s, UA_CORE, 0);            save(dir, "menu");
     ui_menu(&s2, UA_BOOT, 0);           save(dir, "menu-noext");
+    ui_pressed = UI_HIT_START;
+    ui_menu(&s, UA_CORE, 0);            save(dir, "menu-pressed");
+    ui_pressed = UI_HIT_CLOSE;
+    ui_menu(&s, UA_CORE, 0);            save(dir, "menu-close");
+    ui_pressed = UI_HIT_NONE;
     ui_flash(&j, 1, "Record 3 of 7 " GFX_MIDDOT " 1.4 MB of 3.2 MB", 430, 610, 6);
     save(dir, "flash");
     ui_boot(7);                         save(dir, "boot");

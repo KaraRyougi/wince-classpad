@@ -75,10 +75,13 @@ static const char *reason(void)
 }
 
 /* input: keys and the touch screen, both from gint's event queue. A tap
- * counts when the stylus lifts (where it went down and came up on the same
- * control, as Windows buttons do). */
-enum { K_NONE, K_EXE, K_CLEAR, K_UP, K_DOWN, K_TAP };
-static int tap_x, tap_y, down_x = -1, down_y = -1;
+ * counts when the stylus lifts on the control it went down on, as Windows
+ * buttons do; meanwhile the button under it is drawn pressed (ui_pressed)
+ * and comes back up if the stylus slides off. EXE and Clear press the
+ * screen's button for a moment too, so every action shows where it came
+ * from. */
+enum { K_NONE, K_EXE, K_CLEAR, K_UP, K_DOWN, K_PRESS, K_DRAG, K_TAP };
+static int tap_x, tap_y, down_x = -1, down_y = -1, cur_x, cur_y;
 
 static int read_input(int block)
 {
@@ -91,7 +94,11 @@ static int read_input(int block)
             if (e.key == KEY_UP) return K_UP;
             if (e.key == KEY_DOWN) return K_DOWN;
         } else if (e.type == KEYEV_TOUCH_DOWN) {
-            down_x = e.x; down_y = e.y;
+            down_x = cur_x = e.x; down_y = cur_y = e.y;
+            return K_PRESS;
+        } else if (e.type == KEYEV_TOUCH_DRAG) {
+            cur_x = e.x; cur_y = e.y;
+            return K_DRAG;
         } else if (e.type == KEYEV_TOUCH_UP) {
             tap_x = e.x; tap_y = e.y;
             if (down_x < 0) { down_x = tap_x; down_y = tap_y; }
@@ -100,21 +107,47 @@ static int read_input(int block)
     }
 }
 
+/* which button the stylus holds down: the control under it, if that is a
+ * button and the one it went down on (hit = the screen's hit test) */
+static int held_button(int (*hit)(int, int))
+{
+    int h = hit(cur_x, cur_y);
+    if (h < UI_HIT_START || h != hit(down_x, down_y)) return UI_HIT_NONE;
+    return h;
+}
+
+/* the error screen being shown, for redrawing it with a button pressed */
+static struct { const char *title, *headline, *detail; const char *const *todo; int n; } E;
+static void draw_error(void) { ui_error(E.title, E.headline, E.detail, E.todo, E.n); show(); }
+
+static void flash_button(int which, void (*draw)(void))
+{
+    ui_pressed = which; draw();
+    sleep_us(120000);
+    ui_pressed = UI_HIT_NONE; draw();
+}
+
 /* a tap on the error screen's button or close box, or EXE / Clear */
 static int wait_back(void)
 {
     for (;;) {
-        int k = read_input(1);
-        if (k == K_EXE || k == K_CLEAR) return 1;
-        if (k == K_TAP && ui_error_hit(tap_x, tap_y) != UI_HIT_NONE
-            && ui_error_hit(tap_x, tap_y) == ui_error_hit(down_x, down_y)) return 1;
+        int k = read_input(1), was = ui_pressed;
+        if (k == K_EXE || k == K_CLEAR) { flash_button(UI_HIT_BACK, draw_error); return 1; }
+        if (k == K_PRESS || k == K_DRAG) ui_pressed = held_button(ui_error_hit);
+        if (k == K_TAP) {
+            int h = ui_error_hit(tap_x, tap_y);
+            ui_pressed = UI_HIT_NONE;
+            if (h != UI_HIT_NONE && h == ui_error_hit(down_x, down_y)) { draw_error(); return 1; }
+        }
+        if (ui_pressed != was) draw_error();
     }
 }
 
 static int error_screen(const char *title, const char *headline, const char *detail, const char *const *todo, int n)
 {
-    ui_error(title, headline, detail, todo, n);
-    show();
+    E.title = title; E.headline = headline; E.detail = detail; E.todo = todo; E.n = n;
+    ui_pressed = UI_HIT_NONE;
+    draw_error();
     return wait_back();
 }
 
@@ -157,20 +190,35 @@ static void menu_move(int dir)
     moved = 1;
 }
 
-/* one input on the menu: 0 nothing more to do, 1 start sel, -1 cancel */
+static int checking;                       /* the files are still being compared */
+static void draw_menu(void) { ui_menu(&scan, sel, checking); show(); }
+
+/* one input on the menu: 0 nothing to do, 2 redraw, 1 start sel, -1 cancel */
 static int menu_input(int k)
 {
-    int hit;
-    if (k == K_CLEAR) return -1;
-    if (k == K_EXE) return ui_action_enabled(&scan, sel) ? 1 : 0;
-    if (k == K_UP || k == K_DOWN) { menu_move(k == K_UP ? -1 : 1); return 0; }
+    int hit, was = ui_pressed;
+    if (k == K_CLEAR) { flash_button(UI_HIT_CANCEL, draw_menu); return -1; }
+    if (k == K_EXE) {
+        if (!ui_action_enabled(&scan, sel)) return 0;
+        flash_button(UI_HIT_START, draw_menu);
+        return 1;
+    }
+    if (k == K_UP || k == K_DOWN) { menu_move(k == K_UP ? -1 : 1); return 2; }
+    if (k == K_PRESS || k == K_DRAG) {
+        ui_pressed = held_button(ui_menu_hit);
+        return ui_pressed != was ? 2 : 0;
+    }
     if (k != K_TAP) return 0;
+    ui_pressed = UI_HIT_NONE;
     hit = ui_menu_hit(tap_x, tap_y);
-    if (hit != ui_menu_hit(down_x, down_y)) return 0;      /* slid off the control */
-    if (hit >= 0 && hit < UA_COUNT) { if (ui_action_enabled(&scan, hit)) { sel = hit; moved = 1; } return 0; }
-    if (hit == UI_HIT_START) return ui_action_enabled(&scan, sel) ? 1 : 0;
-    if (hit == UI_HIT_CANCEL || hit == UI_HIT_CLOSE) return -1;
-    return 0;
+    if (hit != ui_menu_hit(down_x, down_y)) return was != UI_HIT_NONE ? 2 : 0;   /* slid off the control */
+    if (hit >= 0 && hit < UA_COUNT) {
+        if (ui_action_enabled(&scan, hit) && hit != sel) { sel = hit; moved = 1; return 2; }
+        return was != UI_HIT_NONE ? 2 : 0;
+    }
+    if (hit == UI_HIT_START && ui_action_enabled(&scan, sel)) { draw_menu(); return 1; }
+    if (hit == UI_HIT_CANCEL || hit == UI_HIT_CLOSE) { draw_menu(); return -1; }
+    return was != UI_HIT_NONE ? 2 : 0;
 }
 
 /* called back by nkflash_compare every 64 KiB: the menu stays live. Cancel
@@ -182,11 +230,11 @@ static void compare_poll(int what, u32 done, u32 total, u32 addr)
     (void)what; (void)done; (void)total; (void)addr;
     while ((k = read_input(0)) != K_NONE) {
         r = menu_input(k);
-        redraw_menu = 1;
+        if (r == 2) redraw_menu = 1;
         if (r < 0) { asked = -1; nk_abort = 1; }
-        else if (r > 0) { asked = sel + 1; if (sel == UA_BOOT) nk_abort = 1; }
+        else if (r == 1) { asked = sel + 1; if (sel == UA_BOOT) nk_abort = 1; }
     }
-    if (redraw_menu && !nk_abort) { ui_menu(&scan, sel, 1); show(); }
+    if (redraw_menu && !nk_abort) draw_menu();
 }
 
 static void compare_files(void)
@@ -433,17 +481,21 @@ static int loader(void)
     gfx_fb = gint_vram;
     scan_files();
     sel = default_action();                /* provisional: before the comparison every file "differs" */
-    ui_menu(&scan, sel, 1); show();
+    checking = 1;
+    draw_menu();
     compare_files();
+    checking = 0;
+    ui_pressed = UI_HIT_NONE;
     if (asked < 0) return 0;
     if (!moved) sel = default_action();
     if (asked > 0 && ui_action_enabled(&scan, asked - 1)) sel = asked - 1;
     else {
+        draw_menu();
         for (;;) {
-            ui_menu(&scan, sel, 0); show();
             r = menu_input(read_input(1));
             if (r < 0) return 0;
-            if (r > 0) break;
+            if (r == 1) break;
+            if (r == 2) draw_menu();
         }
     }
     if (sel == UA_BOOT || sel == UA_APPS) {

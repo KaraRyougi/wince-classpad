@@ -29,6 +29,8 @@ void ui_menu(const ui_scan *s, int sel, int checking);
 /* touch: what is under (x, y) on the menu (an action 0..3 or UI_HIT_*) and on
  * the error screen */
 enum { UI_HIT_NONE = -1, UI_HIT_START = 100, UI_HIT_CANCEL, UI_HIT_CLOSE, UI_HIT_BACK };
+/* the control drawn pressed (a UI_HIT_* value), UI_HIT_NONE for none */
+extern int ui_pressed;
 int  ui_menu_hit(int x, int y);
 int  ui_error_hit(int x, int y);
 

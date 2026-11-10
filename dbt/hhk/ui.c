@@ -25,6 +25,8 @@ extern const gfx_image art_chip, art_box, art_both, art_go, art_warn, art_err,
 #define C_GROUP     0xD0D0BF
 #define C_GROUPTXT  0x0046D5
 
+int ui_pressed = UI_HIT_NONE;
+
 static void hline(int x, int y, int w, u32 c) { gfx_fill(x, y, w, 1, RGB(c)); }
 
 static void title_bar(const char *label)
@@ -34,7 +36,14 @@ static void title_bar(const char *label)
     gfx_image_draw(8, 7, &art_flag17, 0);
     gfx_text(&font_tr13b, 32, 20, label, RGB(0x001A63));   /* the mockup's 1 px drop shadow */
     gfx_text(&font_tr13b, 31, 19, label, RGB(C_WHITE));
-    gfx_image_draw(W - 27, 4, &art_close, 0);
+    if (ui_pressed == UI_HIT_CLOSE) {            /* pressed: the same box, darker */
+        int keep = gfx_level;
+        gfx_level = keep * 3 / 4;
+        gfx_image_draw(W - 27, 4, &art_close, 0);
+        gfx_level = keep;
+    } else {
+        gfx_image_draw(W - 27, 4, &art_close, 0);
+    }
 }
 
 static void header(const char *title, const char *sub, const gfx_image *icon)
@@ -53,18 +62,22 @@ static void footer_line(void)
     hline(0, H - 49, W, C_WHITE);
 }
 
-static void button(int x, int y, int w, const char *label, int def, int disabled)
+/* Luna push button: raised (light top, darker bottom) or, while pressed,
+ * sunk (darker top, lighter bottom) with the label 1 px down and right */
+static void button(int x, int y, int w, const char *label, int def, int disabled, int pressed)
 {
     static const gfx_stop face[] = { { 0, 0xFFFFFF }, { 217, 0xECEBE6 }, { 255, 0xD6D0C5 } };
-    const int h = 23;
+    static const gfx_stop sunk[] = { { 0, 0xD9D7CD }, { 64, 0xE3E2DA }, { 255, 0xF1F0EA } };
+    const int h = 23, p = pressed && !disabled;
     if (disabled) gfx_rrect(x, y, w, h, 3, RGB(0xF5F4EA));
+    else if (p) gfx_rrect_rows(x, y, w, h, 3, sunk, 3);
     else gfx_rrect_rows(x, y, w, h, 3, face, 3);
     gfx_rrect_line(x, y, w, h, 3, RGB(disabled ? 0xC9C7BA : C_BTNBORDER));
     if (def && !disabled) {
         gfx_rrect_line(x + 1, y + 1, w - 2, h - 2, 2, RGB(0x8CB0EF));
         gfx_rrect_line(x + 2, y + 2, w - 4, h - 4, 2, RGB(0xCEE7FF));
     }
-    gfx_text_align(&font_t11, x + w / 2, y + 16, label, RGB(disabled ? C_GREY : C_INK), GFX_CENTER);
+    gfx_text_align(&font_t11, x + w / 2 + p, y + 16 + p, label, RGB(disabled ? C_GREY : C_INK), GFX_CENTER);
 }
 
 static void group_box(int x, int y, int w, int h, const char *label)
@@ -181,8 +194,8 @@ void ui_menu(const ui_scan *s, int sel, int checking)
     file_line(gy + 38, "NK.bin", &s->nk, checking);
     file_line(gy + 55, "EXT.bin", &s->ext, checking);
     footer_line();
-    button(W - 170, H - 40, 76, sel == UA_BOOT ? "Boot" : "Start", 1, !ui_action_enabled(s, sel));
-    button(W - 86, H - 40, 76, "Cancel", 0, 0);
+    button(W - 170, H - 40, 76, sel == UA_BOOT ? "Boot" : "Start", 1, !ui_action_enabled(s, sel), ui_pressed == UI_HIT_START);
+    button(W - 86, H - 40, 76, "Cancel", 0, 0, ui_pressed == UI_HIT_CANCEL);
     kx = 12;
     dx = gfx_text_width(&font_t11b, "EXE");
     if (gfx_text_width(&font_t11b, "Clear") > dx) dx = gfx_text_width(&font_t11b, "Clear");
@@ -254,7 +267,7 @@ void ui_flash(const ui_job *j, int full, const char *detail, int step_permille, 
         header(j->title, "Keep the calculator powered. Do not press RESET until Windows CE starts.", &art_warn);
         group_box(8, by, W - 16, 134, "Progress");
         footer_line();
-        button(W - 86, H - 40, 76, "Cancel", 0, 1);
+        button(W - 86, H - 40, 76, "Cancel", 0, 1, 0);
     }
     /* the step list and the inside of the progress box change as it runs */
     gfx_fill(0, 92, W, by - 6 - 92, RGB(C_FACE));
@@ -314,5 +327,5 @@ void ui_error(const char *title, const char *headline, const char *detail, const
         group_box(8, gy, W - 16, y - 18 - gy + 20, "What to do");
     }
     footer_line();
-    button(W - 150, H - 40, 138, "Back to HollyHock", 1, 0);
+    button(W - 150, H - 40, 138, "Back to HollyHock", 1, 0, ui_pressed == UI_HIT_BACK);
 }
