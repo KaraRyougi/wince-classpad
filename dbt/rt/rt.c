@@ -3114,6 +3114,29 @@ static sf_u32 dbt_standby(void)
         *kiuint = 0x00FFu;
         *kiuint = 0x0800u;
     }
+    /* KEYSC mode cycle. 0x0800 alone changed nothing (2026-11-10: 50
+     * unexplained wake-ups in one suspend, KIUINTREG 0x0800 without a flag).
+     * What the OS does and CE never did: before every standby (0x80070E78)
+     * it writes KIUMODEREG = 0, waits 1 ms, then writes 0x0200 again, and
+     * after every wake-up (0x80070EB8) KIUMODEREG = 0, 0x0200 and
+     * KIUINTREG |= 0x7F. The OAL only ever wrote 0x0200. If the key-input
+     * wake request of the standby scan is latched and only leaving the mode
+     * clears it, a key pressed at any time since CE started (the Shift +
+     * Clear that asked for the suspend, for one) ends every standby at once.
+     * The wait: two edges of the RTC's 128 Hz counter, 8 to 16 ms. */
+    {
+        volatile sf_u16 *kiumode = (volatile sf_u16 *)0xA44B0010u, *kiuint = (volatile sf_u16 *)0xA44B0014u;
+        volatile sf_u8 *r64 = (volatile sf_u8 *)0xA413FEC0u;
+        sf_u32 last, now, edges = 0, guard;
+        *kiumode = 0;
+        last = *r64 & 0x7Fu;
+        for (guard = 0; edges < 2 && guard < 4000000u; guard++) {
+            now = *r64 & 0x7Fu;
+            if (now != last) { last = now; edges++; }
+        }
+        *kiumode = 0x0200u;
+        *kiuint = (sf_u16)(*kiuint | 0x007Fu);
+    }
     onchip_save();                              /* last: nothing below writes XYRAM before the sleep */
     r = dbt_standby_sleep(block);
 #ifdef DBT_STANDBY_DIAG

@@ -269,6 +269,7 @@ typedef struct {
     UINT32 mstpcr0, mstpcr2;
 } CLASSPAD_STANDBY_STATE;
 static CLASSPAD_STANDBY_STATE g_sb;
+static void WaitMs(UINT32 ms);
 
 static BOOL ClearDown(void)
 {
@@ -331,6 +332,13 @@ static UINT32 RStandbyOnce(UINT32 keySysIntr)
     MMIO_W16(KEYSC_KIUCNTREG, 0);
     MMIO_W16(KEYSC_KOUTPINSET, CP_CLEAR_ROW);
     MMIO_W16(KEYSC_KINPINSET, CP_CLEAR_COL);
+    // The OS leaves the mode and enters it again before every standby and
+    // after every wake-up (0x80070E78: KIUMODEREG = 0, 1 ms, 0x0200;
+    // 0x80070EB8: 0, 0x0200, KIUINTREG |= 0x7F). Writing 0x0200 over 0x0200,
+    // as this did until 2026-11-10, leaves whatever the standby scan has
+    // latched in place (docs/08: every R-standby ended at once).
+    MMIO_W16(KEYSC_KIUMODEREG, 0);
+    WaitMs(2);
     MMIO_W16(KEYSC_KIUMODEREG, KEYSC_MODE_VALUE);
     MMIO_W16(KEYSC_KIUINTREG, KEYSC_INT_CLEAR);     // the OS's order: flags, then enables
     MMIO_W16(KEYSC_KIUINTREG, KEYSC_INT_STANDBY);
