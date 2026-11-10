@@ -3060,9 +3060,9 @@ static void diag_stripe(sf_u32 stage, sf_u32 colour)
 {
     volatile sf_u8 *prdr = (volatile sf_u8 *)0xA405013Cu, *r64 = (volatile sf_u8 *)0xA413FEC0u;
     volatile sf_u16 *port = (volatile sf_u16 *)0xB4000000u;
-    sf_u32 y0 = 66 * (stage - 1), y1 = y0 + 65, n, t;
+    sf_u32 y0 = 66 * (stage - 1), y1 = y0 + 65, n, t, c0 = dbt_lcd_col0(prdr, port), c1 = c0 + 319;
     dbt_lcd_select(prdr, port, 0x2A);
-    dbt_lcd_param(port, 0); dbt_lcd_param(port, 0); dbt_lcd_param(port, 1); dbt_lcd_param(port, 0x3F);
+    dbt_lcd_param(port, c0 >> 8); dbt_lcd_param(port, c0 & 0xFF); dbt_lcd_param(port, c1 >> 8); dbt_lcd_param(port, c1 & 0xFF);
     dbt_lcd_select(prdr, port, 0x2B);
     dbt_lcd_param(port, y0 >> 8); dbt_lcd_param(port, y0 & 0xFF); dbt_lcd_param(port, y1 >> 8); dbt_lcd_param(port, y1 & 0xFF);
     dbt_lcd_select(prdr, port, 0x2C);
@@ -3176,6 +3176,7 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
         volatile sf_u16 *port = (volatile sf_u16 *)0xB4000000u;
         volatile sf_u8 *prdr = (volatile sf_u8 *)0xA405013Cu;
         sf_u32 top = ctx->r[5], rows = ctx->r[6], width = ctx->r[7], x1 = width - 1, y1 = top + rows - 1;
+        sf_u32 col0 = dbt_lcd_col0(prdr, port);         /* 40 on the older fx-CP400 panel (lcd_io.h) */
 #define DCS_CMD(c) dbt_lcd_select(prdr, port, (c))
 #define DCS_PARAM(v) dbt_lcd_param(port, (v))
         if ((ctx->r[7] & CLASSPAD_ROT_PUSH_MASK) == CLASSPAD_ROT_PUSH_TAG) {
@@ -3188,7 +3189,7 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
             sf_u32 px0 = ctx->r[6] & 0xFFFFu, px1 = ctx->r[6] >> 16, px, py;
             const sf_u8 *base = (const sf_u8 *)ctx->r[4];
             if (px0 >= px1 || py0 >= py1 || px1 > LCD_PANEL_W || py1 > LCD_PANEL_H) return RT_ACT_RESUME;
-            DCS_CMD(0x2A); DCS_PARAM(px0 >> 8); DCS_PARAM(px0 & 0xFF); DCS_PARAM((px1 - 1) >> 8); DCS_PARAM((px1 - 1) & 0xFF);
+            DCS_CMD(0x2A); DCS_PARAM((col0 + px0) >> 8); DCS_PARAM((col0 + px0) & 0xFF); DCS_PARAM((col0 + px1 - 1) >> 8); DCS_PARAM((col0 + px1 - 1) & 0xFF);
             DCS_CMD(0x2B); DCS_PARAM(py0 >> 8); DCS_PARAM(py0 & 0xFF); DCS_PARAM((py1 - 1) >> 8); DCS_PARAM((py1 - 1) & 0xFF);
             DCS_CMD(0x2C);
             for (py = py0; py < py1; py++)
@@ -3200,7 +3201,7 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
             dbt_lcd_sync();
             return RT_ACT_RESUME;
         }
-        DCS_CMD(0x2A); DCS_PARAM(0); DCS_PARAM(0); DCS_PARAM(x1 >> 8); DCS_PARAM(x1 & 0xFF);
+        DCS_CMD(0x2A); DCS_PARAM(col0 >> 8); DCS_PARAM(col0 & 0xFF); DCS_PARAM((col0 + x1) >> 8); DCS_PARAM((col0 + x1) & 0xFF);
         DCS_CMD(0x2B); DCS_PARAM(top >> 8); DCS_PARAM(top & 0xFF); DCS_PARAM(y1 >> 8); DCS_PARAM(y1 & 0xFF);
         DCS_CMD(0x2C);
 #undef DCS_CMD

@@ -26,6 +26,17 @@
 //  the OS's zero-X-offset path). Only these commands are modelled; COLMOD
 //  0x3A is sent for a real panel and ignored by the emulator.
 //
+//  The fx-CP400 was built with two kinds of DCS panel, and Casio's OS (OS
+//  02.01.7003) branches on the ID in every LCD routine (RDID 0xDA, 0x8006407A):
+//    ID 0x16 or 0x52 ("new" here): first visible column is GRAM column 0;
+//      backlight level = WRDISBV 0x51 / RDDISBV 0x52.
+//    any other ID ("old"): LCD_SetDrawingBounds (0x80038A10) adds 40 to both
+//      ends of the column window; the backlight level is the second of the
+//      four parameters of register 0xB9, which the OS reads back and
+//      rewrites with the other three unchanged (0x80038550), and reads as
+//      the second parameter (0x800385E0). 0x51 is not sent to it.
+//  Rows and the pixel stream are the same on both.
+//
 //  LCD_PANEL_R61524 - the fx-CG100 panel as casio-emu's fx-cg100 profile
 //  emulates it (the `lcd` guest's protocol): register index with RS low,
 //  value with RS high; 396 GRAM columns x 224 rows, visible window columns
@@ -103,6 +114,50 @@ static __inline void LcdParam(UCHAR v)     { LcdWriteData(v); }
 static __inline UCHAR LcdReadParam(void)
 {
     return (UCHAR)LcdSwap16(*(volatile USHORT *)LCD_DATA_PORT);
+}
+
+// Panel variants (see the top of this file)
+#define LCD_ID_NEW_A        0x16
+#define LCD_ID_NEW_B        0x52
+#define LCD_OLD_COL0        40              // first visible GRAM column of the older panel
+#define LCD_OLD_BLCTL       0xB9            // older panel: four parameters, the second is the backlight level
+
+static __inline USHORT LcdReadId(void)
+{
+    LcdCommand(LCD_DCS_RDID);
+    (void)LcdSwap16(*(volatile USHORT *)LCD_DATA_PORT);            // dummy
+    return LcdSwap16(*(volatile USHORT *)LCD_DATA_PORT);
+}
+static __inline BOOL LcdIdIsNew(USHORT id) { return id == LCD_ID_NEW_A || id == LCD_ID_NEW_B; }
+
+static __inline UCHAR LcdGetBacklight(BOOL isNew)
+{
+    if (isNew) {
+        LcdCommand(LCD_DCS_RDDISBV);
+        (void)LcdReadParam();                   // dummy
+        return LcdReadParam();
+    }
+    LcdCommand(LCD_OLD_BLCTL);
+    (void)LcdReadParam();                       // dummy
+    (void)LcdReadParam();                       // first parameter
+    return LcdReadParam();
+}
+static __inline void LcdSetBacklight(BOOL isNew, UCHAR level)
+{
+    UCHAR p1, p3, p4;
+    if (isNew) {
+        LcdCommand(LCD_DCS_WRDISBV);
+        LcdParam(level);
+        return;
+    }
+    LcdCommand(LCD_OLD_BLCTL);
+    (void)LcdReadParam();                       // dummy
+    p1 = LcdReadParam();
+    (void)LcdReadParam();                       // the level
+    p3 = LcdReadParam();
+    p4 = LcdReadParam();
+    LcdCommand(LCD_OLD_BLCTL);
+    LcdParam(p1); LcdParam(level); LcdParam(p3); LcdParam(p4);
 }
 
 #endif

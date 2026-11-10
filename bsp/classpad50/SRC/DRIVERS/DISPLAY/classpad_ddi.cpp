@@ -81,6 +81,9 @@ class ClasspadGPE : public GPE
     volatile BOOL       m_suspended, m_resumePending;
     volatile BOOL       m_displayOn;        // DCS: DISPON sent (after the first push)
     UCHAR               m_brightness;       // DCS: the backlight level saved at power-off
+    USHORT              m_panelId;          // DCS: what RDID answered
+    BOOL                m_panelNew;         // DCS: ID 0x16 / 0x52; FALSE = the older panel (classpad_lcd.h)
+    unsigned            m_col0;             // DCS: first visible GRAM column (0, or 40 on the older panel)
     BYTE               *m_pFrame;           // the primary surface, physically contiguous (AllocPhysMem)
     ULONG               m_framePa;          // its physical address
     int                 m_blit;             // registry "Blit": 1 = HC_LCD_PUSH (default), 2 = HC_LCD_BLIT with our window commands, 0 = translated stores
@@ -155,6 +158,7 @@ ClasspadGPE::ClasspadGPE()
     m_displayOn = FALSE;
     m_suspended = m_resumePending = FALSE;
     m_brightness = LCD_BRIGHTNESS_DEFAULT;
+    m_panelId = LCD_ID_NEW_A; m_panelNew = TRUE; m_col0 = 0;
 
     m_iRotate = DMDO_0;
     m_cvt16 = NULL;
@@ -186,7 +190,14 @@ ClasspadGPE::ClasspadGPE()
         memset(m_pPrimarySurface->Buffer(), 0, m_pPrimarySurface->Stride() * height);
     }
 
-    if (m_panel == LCD_PANEL_DCS) PanelInit();
+    if (m_panel == LCD_PANEL_DCS) {
+        m_panelId  = LcdReadId();
+        m_panelNew = LcdIdIsNew(m_panelId);
+        m_col0     = m_panelNew ? 0 : LCD_OLD_COL0;
+        RETAILMSG(1, (TEXT("CLASSPAD DDI: panel ID %04X, %s, first column %u\r\n"),
+                      m_panelId, m_panelNew ? TEXT("newer panel") : TEXT("older panel"), m_col0));
+        PanelInit();
+    }
 
     InitializeCriticalSection(&m_cs);
     m_dirtyTop = 0; m_dirtyBottom = height;             // first push: the whole screen
@@ -449,6 +460,7 @@ void ClasspadGPE::PanelInit()
 void ClasspadGPE::SetWindow(unsigned x0, unsigned x1, unsigned y0, unsigned y1)
 {
     if (m_panel == LCD_PANEL_DCS) {
+        x0 += m_col0; x1 += m_col0;         // the older panel's visible columns start at 40
         LcdCommand(LCD_DCS_CASET);
         LcdParam((UCHAR)(x0 >> 8));         LcdParam((UCHAR)x0);
         LcdParam((UCHAR)((x1 - 1) >> 8));   LcdParam((UCHAR)(x1 - 1));
@@ -581,9 +593,7 @@ VOID ClasspadGPE::PowerHandler(BOOL bOff)
         UCHAR level;
         m_suspended = TRUE;
         m_resumePending = FALSE;
-        LcdCommand(LCD_DCS_RDDISBV);
-        (void)LcdReadParam();                   // dummy
-        level = LcdReadParam();
+        level = LcdGetBacklight(m_panelNew);
         // 0 is what the emulator reads (no RDDISBV there), and a level this
         // low would not have been the user's: come back at full brightness
         m_brightness = level >= 0x10 ? level : LCD_BRIGHTNESS_DEFAULT;
@@ -591,8 +601,10 @@ VOID ClasspadGPE::PowerHandler(BOOL bOff)
         // frames, so DISPOFF only once it is dark (60 ms; DISPOFF right after
         // 0x51 = 0 showed the white panel for a moment), then SLPIN 60 ms
         // after DISPOFF. 8 ticks of R64CNT = 62.5 ms.
-        LcdCommand(LCD_DCS_WRDISBV);
-        LcdParam(0);
+        // (The older panel takes the level in register 0xB9; the OS does
+        // not zero it there before DISPOFF but goes on to deep standby,
+        // which CE does not, so the level is zeroed here as well.)
+        LcdSetBacklight(m_panelNew, 0);
         PanelWaitTicks(8);
         LcdCommand(LCD_DCS_DISPOFF);
         PanelWaitTicks(8);
@@ -622,8 +634,7 @@ DWORD WINAPI ClasspadGPE::PushThread(LPVOID pThis)
             LcdCommand(LCD_DCS_SLPOUT);
             Sleep(120); // panel recovery must run in thread context
             if (p->m_suspended) continue;
-            LcdCommand(LCD_DCS_WRDISBV);         // the backlight back (PowerHandler set it to 0)
-            LcdParam(p->m_brightness);
+            LcdSetBacklight(p->m_panelNew, p->m_brightness);   // the backlight back (PowerHandler set it to 0)
             p->Dirty(0, p->m_nScreenHeight);
         }
         EnterCriticalSection(&p->m_cs);

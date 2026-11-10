@@ -45,6 +45,8 @@ static void delay(unsigned n) { volatile unsigned i; for (i = 0; i < n; i++) ; }
 
 static void window(unsigned x0, unsigned x1, unsigned y0, unsigned y1)
 {
+    unsigned col0 = dbt_lcd_col0(&PRDR, &PORT);         /* 40 on the older panel (lcd_io.h) */
+    x0 += col0; x1 += col0;
     cmd(0x2A); dat(x0 >> 8); dat(x0 & 0xFF); dat(x1 >> 8); dat(x1 & 0xFF);     /* CASET */
     cmd(0x2B); dat(y0 >> 8); dat(y0 & 0xFF); dat(y1 >> 8); dat(y1 & 0xFF);     /* PASET */
     cmd(0x2C);                                                                 /* RAMWR */
