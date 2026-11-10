@@ -59,9 +59,17 @@ rem space] and step 2 then takes it out with the platform.bib EXT entries.
 if not exist "%REL%\extmove.txt" goto ext2
 findstr /i /r /g:"%REL%\extmove.txt" "%REL%\ce.bib" > "%REL%\ext.moved.bib"
 if errorlevel 2 goto ext2
-findstr /v /i /r /g:"%REL%\extmove.txt" "%REL%\ce.bib" > "%REL%\ce.bib.kept"
-if errorlevel 2 goto ext2
+rem The rewritten entries go to the TOP of ce.bib, so that they are the first
+rem EXT entries step 2 finds: romimage takes the region's CPU type from its
+rem first module [there is no kernel in EXT], and with Math Xpander's SH3
+rem mfcce300.dll first it refused these SH4 modules: "Module pegcards.dll
+rem built for SH4, kernel built for SH3". The SH3 modules carry flag P [no
+rem CPU check], so an SH4 module first suits both. It also puts EXT.bin into
+rem the release directory, the first module's directory.
+del /q "%REL%\ce.bib.kept" 2>nul
 for /f "usebackq tokens=1,2,3,*" %%a in ("%REL%\ext.moved.bib") do echo     %%a  %%b  EXT  %%d>> "%REL%\ce.bib.kept"
+findstr /v /i /r /g:"%REL%\extmove.txt" "%REL%\ce.bib" >> "%REL%\ce.bib.kept"
+if errorlevel 2 goto ext2
 for /f %%N in ('find /c /v "" ^< "%REL%\ext.moved.bib"') do set NMOVED=%%N
 move /y "%REL%\ce.bib.kept" "%REL%\ce.bib" >nul
 echo PostFmergeBib: %NMOVED% NK entries of extmove.txt sent to the EXT region
