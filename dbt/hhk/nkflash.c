@@ -65,6 +65,7 @@ const nkwindow nk_windows[] = {
 const int nk_nwindows = sizeof nk_windows / sizeof nk_windows[0];
 
 char nk_last[48];
+volatile int nk_abort;
 void (*nk_progress)(int what, u32 done, u32 total, u32 addr);
 #define PROGRESS(w, d, t, a) do { if (nk_progress) nk_progress(w, d, t, a); } while (0)
 
@@ -208,6 +209,7 @@ static int compare_stream(u32 off, u32 n)
 {
     while (n) {
         u32 c = n > CHUNK ? CHUNK : n;
+        if (nk_abort) return -2;
         if (read_exact(nk.fd, nk.buf, c)) return -1;
         if (memcmp(nk.buf, (const void *)(NOR_P1 + off), c)) return 0;
         off += c; n -= c; nk.done += c;

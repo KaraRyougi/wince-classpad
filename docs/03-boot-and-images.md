@@ -87,8 +87,14 @@ it, so `NK_FLASH` stays 0x81000000 and the usable window ends at 0x13E0000:
     that matches is not written again. Flashing shows the steps (check,
     erase N sectors, write N records, verify by comparing again), a bar for
     the step and one for the whole job, and the time left; a failure stops
-    on an error screen that says what was and was not written. EXE runs the
-    action, Clear returns to HollyHock. Then
+    on an error screen that says what was and was not written. EXE (or a tap
+    on Start) runs the action, Clear (or Cancel, or the close box) returns to
+    HollyHock; a tap on an action selects it. The menu answers at once: the
+    files are compared 64 KiB at a time between reads of the keys and the
+    touch screen, Cancel and Boot stop the comparison. The start screen fades
+    in from black, and a `DEVICE=1` translator keeps its marquee moving
+    (`rt/bootmarquee.c`, on the system tick, timed by the RTC) until the
+    display driver's "CLASSPAD DDI:" line (`MARQUEE=0` leaves it still). Then
     `hhk/takeover.S` masks interrupts (IMASK=15, RB=0),
     quiets the OS's interrupt sources (TMU stopped, all INTC priorities 0 and
     sources masked, IRQ pins masked, RTC interrupts off), turns the MMU off

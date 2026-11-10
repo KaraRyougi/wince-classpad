@@ -45,7 +45,7 @@ int main(int argc, char **argv)
     ui_menu(&s2, UA_BOOT, 0);           save(dir, "menu-noext");
     ui_flash(&j, 1, "Record 3 of 7 " GFX_MIDDOT " 1.4 MB of 3.2 MB", 430, 610, 6);
     save(dir, "flash");
-    ui_boot();                          save(dir, "boot");
+    ui_boot(7);                         save(dir, "boot");
     ui_error("Flashing stopped", "Erase failed at 80F00000.",
              "Sectors 1 to 9 were erased. Nothing was written after that, so the old image in flash is no longer complete.",
              todo, 3);

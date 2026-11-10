@@ -21,6 +21,8 @@
 #include <gint/display.h>
 #include <gint/keyboard.h>
 #include <gint/rtc.h>
+#include <gint/clock.h>
+#include "bootmarquee.h"
 #include "util.h"
 #include "nkflash.h"
 #include "ui.h"
@@ -72,23 +74,41 @@ static const char *reason(void)
     return strncmp(nk_last, "FAILED: ", 8) ? nk_last : nk_last + 8;
 }
 
-/* the next key among EXE, Clear, Up, Down (arrows repeat when held) */
-enum { K_EXE = 1, K_CLEAR, K_UP, K_DOWN };
-static int next_key(int arrows)
+/* input: keys and the touch screen, both from gint's event queue. A tap
+ * counts when the stylus lifts (where it went down and came up on the same
+ * control, as Windows buttons do). */
+enum { K_NONE, K_EXE, K_CLEAR, K_UP, K_DOWN, K_TAP };
+static int tap_x, tap_y, down_x = -1, down_y = -1;
+
+static int read_input(int block)
 {
     for (;;) {
-        key_event_t e = getkey_opt(GETKEY_REP_ARROWS, NULL);
-        if (e.key == KEY_EXE) return K_EXE;
-        if (e.key == KEY_CLEAR) return K_CLEAR;
-        if (arrows && e.key == KEY_UP) return K_UP;
-        if (arrows && e.key == KEY_DOWN) return K_DOWN;
+        key_event_t e = block ? waitevent(NULL) : pollevent();
+        if (e.type == KEYEV_NONE) return K_NONE;
+        if (e.type == KEYEV_DOWN) {
+            if (e.key == KEY_EXE) return K_EXE;
+            if (e.key == KEY_CLEAR) return K_CLEAR;
+            if (e.key == KEY_UP) return K_UP;
+            if (e.key == KEY_DOWN) return K_DOWN;
+        } else if (e.type == KEYEV_TOUCH_DOWN) {
+            down_x = e.x; down_y = e.y;
+        } else if (e.type == KEYEV_TOUCH_UP) {
+            tap_x = e.x; tap_y = e.y;
+            if (down_x < 0) { down_x = tap_x; down_y = tap_y; }
+            return K_TAP;
+        }
     }
 }
 
+/* a tap on the error screen's button or close box, or EXE / Clear */
 static int wait_back(void)
 {
-    next_key(0);
-    return 1;
+    for (;;) {
+        int k = read_input(1);
+        if (k == K_EXE || k == K_CLEAR) return 1;
+        if (k == K_TAP && ui_error_hit(tap_x, tap_y) != UI_HIT_NONE
+            && ui_error_hit(tap_x, tap_y) == ui_error_hit(down_x, down_y)) return 1;
+    }
 }
 
 static int error_screen(const char *title, const char *headline, const char *detail, const char *const *todo, int n)
@@ -123,18 +143,68 @@ static void scan_files(void)
     }
 }
 
+/* the menu while it waits: the selection, whether the user moved it, and
+ * what was asked for while the files were still being compared */
+static int sel, moved, asked;              /* asked: 0, UA_* + 1, or -1 cancel */
+
+static void menu_move(int dir)
+{
+    int i;
+    for (i = 0; i < UA_COUNT; i++) {
+        sel = (sel + (dir < 0 ? UA_COUNT - 1 : 1)) % UA_COUNT;
+        if (ui_action_enabled(&scan, sel)) break;
+    }
+    moved = 1;
+}
+
+/* one input on the menu: 0 nothing more to do, 1 start sel, -1 cancel */
+static int menu_input(int k)
+{
+    int hit;
+    if (k == K_CLEAR) return -1;
+    if (k == K_EXE) return ui_action_enabled(&scan, sel) ? 1 : 0;
+    if (k == K_UP || k == K_DOWN) { menu_move(k == K_UP ? -1 : 1); return 0; }
+    if (k != K_TAP) return 0;
+    hit = ui_menu_hit(tap_x, tap_y);
+    if (hit != ui_menu_hit(down_x, down_y)) return 0;      /* slid off the control */
+    if (hit >= 0 && hit < UA_COUNT) { if (ui_action_enabled(&scan, hit)) { sel = hit; moved = 1; } return 0; }
+    if (hit == UI_HIT_START) return ui_action_enabled(&scan, sel) ? 1 : 0;
+    if (hit == UI_HIT_CANCEL || hit == UI_HIT_CLOSE) return -1;
+    return 0;
+}
+
+/* called back by nkflash_compare every 64 KiB: the menu stays live. Cancel
+ * stops the comparison at once, so does Boot (it needs no comparison);
+ * the other actions wait for it to finish */
+static void compare_poll(int what, u32 done, u32 total, u32 addr)
+{
+    int k, r, redraw_menu = 0;
+    (void)what; (void)done; (void)total; (void)addr;
+    while ((k = read_input(0)) != K_NONE) {
+        r = menu_input(k);
+        redraw_menu = 1;
+        if (r < 0) { asked = -1; nk_abort = 1; }
+        else if (r > 0) { asked = sel + 1; if (sel == UA_BOOT) nk_abort = 1; }
+    }
+    if (redraw_menu && !nk_abort) { ui_menu(&scan, sel, 1); show(); }
+}
+
 static void compare_files(void)
 {
     ui_file *f[2] = { &scan.nk, &scan.ext };
     int i, r;
-    for (i = 0; i < 2; i++) {
+    nk_progress = compare_poll;
+    for (i = 0; i < 2 && !nk_abort; i++) {
         if (f[i]->state != UF_DIFF) continue;
         if (nkflash_open(&nk_windows[win_of[i]]) != NKF_READY) { f[i]->state = UF_BAD; memcpy(f[i]->why, reason(), sizeof f[i]->why); continue; }
         r = nkflash_compare();
         nkflash_close();
+        if (r == -2) break;                                   /* cancelled or Boot: left unknown */
         if (r < 0) { f[i]->state = UF_BAD; hhk_format(f[i]->why, sizeof f[i]->why, "cannot be read"); }
         else if (r == 1) f[i]->state = UF_SAME;
     }
+    nk_progress = 0;
+    nk_abort = 0;
 }
 
 static int default_action(void)
@@ -322,27 +392,41 @@ static int ram_mismatch(void)
     return error_screen("Image does not fit", "The CE image in flash is too large.", detail, todo, 2);
 }
 
+/* the start screen fades in from black (about half a second) with its
+ * marquee already moving; the translator keeps it moving (rt/bootmarquee.c) */
+static void boot_screen(void)
+{
+    int lvl, pos = 0;
+    u32 t = rtc_ticks();
+    for (lvl = 0; lvl <= 256; lvl += 16) {
+        u32 now = rtc_ticks();
+        if ((now + DAY_TICKS - t) % DAY_TICKS >= BM_FRAME_TICKS) { t = now; pos = (pos + 1) % BM_POSITIONS; }
+        gfx_level = lvl;
+        ui_boot(pos);
+        show();
+        sleep_us(20000);
+    }
+    gfx_level = 256;
+}
+
 static int loader(void)
 {
-    int sel, k, i, r;
+    int i, r;
     gfx_fb = gint_vram;
     scan_files();
-    sel = UA_BOOT;
+    sel = default_action();                /* provisional: before the comparison every file "differs" */
     ui_menu(&scan, sel, 1); show();
     compare_files();
-    sel = default_action();
-    for (;;) {
-        ui_menu(&scan, sel, 0); show();
-        k = next_key(1);
-        if (k == K_CLEAR) return 0;
-        if (k == K_UP || k == K_DOWN) {
-            for (i = 0; i < UA_COUNT; i++) {
-                sel = (sel + (k == K_UP ? UA_COUNT - 1 : 1)) % UA_COUNT;
-                if (ui_action_enabled(&scan, sel)) break;
-            }
-            continue;
+    if (asked < 0) return 0;
+    if (!moved) sel = default_action();
+    if (asked > 0 && ui_action_enabled(&scan, asked - 1)) sel = asked - 1;
+    else {
+        for (;;) {
+            ui_menu(&scan, sel, 0); show();
+            r = menu_input(read_input(1));
+            if (r < 0) return 0;
+            if (r > 0) break;
         }
-        if (ui_action_enabled(&scan, sel)) break;
     }
     if (sel == UA_BOOT || sel == UA_APPS) {
         if (ce_ram_end() > GUEST_RAM_HI) return ram_mismatch();
@@ -364,7 +448,7 @@ static int loader(void)
         set_state(J.job.n - 1, UI_NOW); J.full = 1; J.phase_units = 0;
         redraw("Handing over to the translator", 1, 1);
     }
-    ui_boot(); show();
+    boot_screen();
     return -1;                                    /* boot */
 }
 

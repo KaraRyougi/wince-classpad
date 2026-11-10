@@ -26,6 +26,8 @@ typedef struct { u8 t; u32 rgb; } gfx_stop;     /* t: 0..255 down the area */
 #define GFX_ELLIP  "\x82"
 
 extern u16 *gfx_fb;
+/* brightness of everything drawn, 0 (black) .. 256 (as is): the start screen fades in */
+extern int gfx_level;
 extern const gfx_font font_t9b, font_t10, font_t11, font_t11b, font_t12b, font_tr13b;
 
 void gfx_fill(int x, int y, int w, int h, u16 c);

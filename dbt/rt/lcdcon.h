@@ -11,4 +11,9 @@
 void lcdcon_putc(int c);
 void lcdcon_halt(const char *why);
 #endif
+#ifdef DBT_BOOT_MARQUEE                 /* rt/bootmarquee.c: the start screen's moving blocks */
+void bootmarquee_tick(void);
+void bootmarquee_putc(int c);
+void bootmarquee_stop(void);
+#endif
 #endif

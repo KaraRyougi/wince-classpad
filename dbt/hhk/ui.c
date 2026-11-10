@@ -1,6 +1,7 @@
 /* ui.c - see ui.h. Coordinates and colours are the mockup's
  * (docs/design/loader-luna.html: drawMenu, drawFlash, drawBoot, drawError). */
 #include "ui.h"
+#include "bootmarquee.h"
 
 extern const gfx_image art_chip, art_box, art_both, art_go, art_warn, art_err,
     art_radio_on, art_radio_off, art_radio_dis_on, art_radio_dis_off,
@@ -192,6 +193,26 @@ void ui_menu(const ui_scan *s, int sel, int checking)
     gfx_text(&font_t11, dx, H - 19, "back to HollyHock", RGB(C_TEXT2));
 }
 
+static int inside(int x, int y, int x0, int y0, int w, int h) { return x >= x0 && x < x0 + w && y >= y0 && y < y0 + h; }
+
+int ui_menu_hit(int x, int y)
+{
+    int i;
+    for (i = 0; i < UA_COUNT; i++)
+        if (inside(x, y, 6, 96 + i * 74, W - 12, 70)) return i;
+    if (inside(x, y, W - 170, H - 40, 76, 23)) return UI_HIT_START;
+    if (inside(x, y, W - 86, H - 40, 76, 23)) return UI_HIT_CANCEL;
+    if (inside(x, y, W - 27, 4, 21, 21)) return UI_HIT_CLOSE;
+    return UI_HIT_NONE;
+}
+
+int ui_error_hit(int x, int y)
+{
+    if (inside(x, y, W - 150, H - 40, 138, 23)) return UI_HIT_BACK;
+    if (inside(x, y, W - 27, 4, 21, 21)) return UI_HIT_CLOSE;
+    return UI_HIT_NONE;
+}
+
 /* --- flashing --- */
 
 #define CHUNK_W 6
@@ -260,9 +281,9 @@ void ui_flash(const ui_job *j, int full, const char *detail, int step_permille, 
 
 /* --- start and error --- */
 
-void ui_boot(void)
+void ui_boot(int pos)
 {
-    const int lw = 207, x = (W - lw + 1) / 2, y = 232, mx = W / 2 - 46, my = 430, mw = 92;
+    const int lw = 207, x = (W - lw + 1) / 2, y = 232, mx = BM_X, my = BM_Y, mw = BM_W;
     int s;
     gfx_fill(0, 0, W, H, RGB(0x000000));
     gfx_image_draw(x - 3, y + (32 - art_flag36.h) / 2, &art_flag36, 0);
@@ -270,7 +291,8 @@ void ui_boot(void)
     gfx_rrect(mx, my, mw, 14, 4, RGB(0x000000));
     gfx_rrect_line(mx, my, mw, 14, 4, RGB(0xB9B9B9));
     gfx_rrect_line(mx + 1, my + 1, mw - 2, 12, 3, RGB(0x4A4A4A));
-    for (s = 4; s < 7; s++) chunk(mx + 4 + s * (CHUNK_W + CHUNK_GAP), my + 3, blue_rows);
+    for (s = 0; s < BM_SLOTS; s++)
+        if (BM_LIT(s, pos - 3)) chunk(BM_X0 + s * BM_STEP, BM_Y0, blue_rows);
 }
 
 void ui_error(const char *title, const char *headline, const char *detail, const char *const *todo, int ntodo)

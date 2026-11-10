@@ -56,7 +56,7 @@ HOST_CFLAGS  := -mb -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-sta
 GUEST_CFLAGS := -ml -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables -Wall \
                 -DGUEST_RAM_LO=$(GUEST_RAM_LO)u -DGUEST_RAM_HI=$(GUEST_RAM_HI)u -DGUEST_LINK=$(GUEST_LINK)u -DMAX_BLOCKS=$(BLOCKS)
 
-RT_SRC := rt/crt0.S rt/stubs.S rt/standby.S rt/main.c rt/rt.c rt/kdev.c rt/lcdcon.c rt/irqpins.c rt/nkbin.c rt/bench.c bench/loops.S src/sh4dec.c src/sh4emit.c src/translate.c \
+RT_SRC := rt/crt0.S rt/stubs.S rt/standby.S rt/main.c rt/rt.c rt/kdev.c rt/lcdcon.c rt/bootmarquee.c rt/irqpins.c rt/nkbin.c rt/bench.c bench/loops.S src/sh4dec.c src/sh4emit.c src/translate.c \
           ../fpuemu/src/fpuemu.c ../fpuemu/src/softfloat.c
 
 # A Windows CE .bin to run instead of the embedded guest, placed in the emulated
@@ -119,7 +119,10 @@ CONSOLE ?= 0
 # stage on the panel (rt/standby.S, rt.c; docs/06 section 8). Diagnostic only.
 STANDBY_DIAG ?= 0
 HOST_CFLAGS  += $(if $(filter 1,$(STANDBY_DIAG)),-DDBT_STANDBY_DIAG,)
-HOST_CFLAGS  += $(if $(filter 1,$(DEVICE)),-DDBT_NO_DEBUG_PORT -DDBT_IRQPIN_GUARD $(if $(filter 1,$(CONSOLE)),-DDBT_LCD_CONSOLE,),)
+# DEVICE=1 also keeps the loader's start-screen marquee moving until the CE
+# display driver signs on (rt/bootmarquee.c); MARQUEE=0 leaves it still.
+MARQUEE ?= 1
+HOST_CFLAGS  += $(if $(filter 1,$(DEVICE)),-DDBT_NO_DEBUG_PORT -DDBT_IRQPIN_GUARD $(if $(filter 1,$(MARQUEE)),-DDBT_BOOT_MARQUEE,) $(if $(filter 1,$(CONSOLE)),-DDBT_LCD_CONSOLE,),)
 # Code cache policy (docs/04 "Metadata on demand, second chance"):
 # LAZY_META=1 keeps no recovery metadata for ROM blocks until an exception
 # lands in one (the block is translated again to rebuild it); SECOND_CHANCE=1
@@ -218,7 +221,7 @@ DEVALL_STAMP := $(BUILD)/.devall-$(if $(filter 1,$(DEVALL)),1,0)
 $(DEVALL_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.devall-*
 	touch $@
-LAYOUT_STAMP := $(BUILD)/.layout-$(GUEST_RAM_LO)-$(HHK_PAYLOAD)-$(GUEST_RAM_HI)-$(IMAGE_BASE)-$(CACHE_BASE)-$(CACHE_SIZE)-$(BLOCKS)-$(ARENA_KB)-$(NK_FLASH)-$(NK_FLASH_MAX)-$(EXT_FLASH)-$(DEVICE)-$(CONSOLE)-$(IRQPINS)-$(LAZY_META)$(SECOND_CHANCE)$(KDEV)$(HASH_TAG)$(TLB_REFILL)$(FAST_HELPERS)-$(HASH_ENTRIES)
+LAYOUT_STAMP := $(BUILD)/.layout-$(GUEST_RAM_LO)-$(HHK_PAYLOAD)-$(GUEST_RAM_HI)-$(IMAGE_BASE)-$(CACHE_BASE)-$(CACHE_SIZE)-$(BLOCKS)-$(ARENA_KB)-$(NK_FLASH)-$(NK_FLASH_MAX)-$(EXT_FLASH)-$(DEVICE)-$(CONSOLE)-$(MARQUEE)-$(IRQPINS)-$(LAZY_META)$(SECOND_CHANCE)$(KDEV)$(HASH_TAG)$(TLB_REFILL)$(FAST_HELPERS)-$(HASH_ENTRIES)
 $(LAYOUT_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.layout-*
 	touch $@
@@ -245,7 +248,7 @@ $(BUILD)/extrom-test.bin: guest/extrom.txt guest/extrom-data.txt ../tools/mkextr
 
 # --- translator image (big-endian) ---
 # image files are named after the guest so that switching GUEST= relinks
-$(IMG).elf: $(RT_SRC) $(wildcard src/*.h) rt/guest_blob.S rt/image.ld rt/rt.h rt/nkbin.h rt/kdev.h rt/kernel_dev.h rt/kernel_dev50.h rt/ctx_offsets.h rt/lcdcon.h rt/lcdfont.h $(BUILD)/$(GUEST).bin $(LAYOUT_STAMP)
+$(IMG).elf: $(RT_SRC) $(wildcard src/*.h) rt/guest_blob.S rt/image.ld rt/rt.h rt/nkbin.h rt/kdev.h rt/kernel_dev.h rt/kernel_dev50.h rt/ctx_offsets.h rt/lcdcon.h rt/lcdfont.h rt/bootmarquee.h $(BUILD)/$(GUEST).bin $(LAYOUT_STAMP)
 	$(CC) $(HOST_CFLAGS) $(LAYOUT_LD) -DGUEST='"$(BUILD)/$(GUEST).bin"' -T rt/image.ld -o $@ $(RT_SRC) rt/guest_blob.S -lgcc
 
 $(IMG).bin: $(IMG).elf
@@ -322,7 +325,7 @@ hhk: $(WINCE_HHK) hhk-check
 # the loader's screens rendered on the host with sample data: <build>/ui-*.ppm
 HOSTCC ?= cc
 $(BUILD)/uipreview: $(HHK_UI) hhk/uipreview.c hhk/util.c hhk/ui.h hhk/gfx.h hhk/util.h | $(BUILD)
-	$(HOSTCC) -DHHK_HOST -O1 -Wall -Wextra -Wno-unused-parameter -I hhk -o $@ hhk/uipreview.c $(HHK_UI) hhk/util.c
+	$(HOSTCC) -DHHK_HOST -O1 -Wall -Wextra -Wno-unused-parameter -I hhk -I rt -o $@ hhk/uipreview.c $(HHK_UI) hhk/util.c
 hhk-preview: $(BUILD)/uipreview
 	$< $(BUILD)
 

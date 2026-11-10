@@ -2,6 +2,13 @@
 #include "gfx.h"
 
 u16 *gfx_fb;
+int gfx_level = 256;
+
+static u16 level(u16 c)
+{
+    if (gfx_level >= 256) return c;
+    return (u16)((((c >> 11) * gfx_level) >> 8) << 11 | ((((c >> 5) & 63) * gfx_level) >> 8) << 5 | (((c & 31) * gfx_level) >> 8));
+}
 
 /* rounded corners without antialiasing: how far row i (0 = the outermost) of
  * a corner of radius r is pulled in, r - (int)(sqrt(r^2 - (r - i - .5)^2) + .3) */
@@ -27,6 +34,7 @@ static void span(int x, int y, int w, u16 c)
     if (x < 0) { w += x; x = 0; }
     if (x + w > GFX_W) w = GFX_W - x;
     p = gfx_fb + y * GFX_W + x;
+    c = level(c);
     while (w-- > 0) *p++ = c;
 }
 
@@ -110,6 +118,7 @@ static void blend(int x, int y, u16 c, int a)
     u16 *p;
     if (!a || x < 0 || y < 0 || x >= GFX_W || y >= GFX_H) return;
     p = gfx_fb + y * GFX_W + x;
+    c = level(c);
     *p = a >= 15 ? c : mix(*p, c, a, 15);
 }
 
