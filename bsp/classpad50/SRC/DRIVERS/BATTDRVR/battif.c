@@ -131,10 +131,26 @@ static BOOL Sample(void)
 
 // A USB cable is supplying power. The level is read until three reads in a
 // row agree (the controller's manual asks for that: the bit is not latched).
+// The first read is guarded: where the controller is not there to read
+// (casio-emu's ClassPad profile has none, and every read raised an exception
+// in device.exe, twice a second with the taskbar polling) the driver stops
+// asking and reports battery power.
+static int g_usbThere;                  // 0 not tried, 1 readable, -1 faulted
 static BOOL UsbPowered(void)
 {
     UINT16 a, b, c;
     int i;
+    if (g_usbThere < 0) return FALSE;
+    if (g_usbThere == 0) {
+        __try {
+            a = MMIO_R16(USB_INTSTS0);
+            g_usbThere = 1;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            g_usbThere = -1;
+            RETAILMSG(1, (TEXT("CLASSPAD BATTERY: no USB controller to read, AC line reported offline\r\n")));
+        }
+        if (g_usbThere < 0) return FALSE;
+    }
     for (i = 0; i < 8; i++) {
         a = MMIO_R16(USB_INTSTS0) & USB_VBSTS;
         b = MMIO_R16(USB_INTSTS0) & USB_VBSTS;

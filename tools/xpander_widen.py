@@ -9,9 +9,10 @@ places keep that size (docs/08, 2026-11-09):
     the GraphicalDomainC (the world-to-pixel mapping) with a pixel width of
     231 (height 161 for the graph, 211 for geometry). SH-3 code builds 231
     as "mov #127,rN; add #104,rN" (an immediate is at most 127); each such
-    pair becomes "mov #78,rN; shll2 rN" = 312, the widest value two
-    instructions give that fits the 320-pixel pane with the margins of the
-    original (240 - 231 = 9, 320 - 312 = 8). The heights stay.
+    pair becomes "mov #79,rN; shll2 rN" = 316: the plane starts at column 2
+    inside its frame and the frame's right edge is column 318, so 316 fills
+    it exactly (312, tried first, left a 5-pixel strip the curves never
+    reached). The heights stay.
   - GraphicsPlane.dll's RectPlaneViewC::OnCreate draws the plane through a
     back buffer from CreateCompatibleBitmap(dc, 240, 320): everything past
     x = 240 was cut off whatever the window and domain said. The two
@@ -34,7 +35,7 @@ import pe4k
 # module -> expected number of sites (231-width pairs, or the one back-buffer call)
 MODULES = {"GraphFrame.dll": 4, "GeometryPane.dll": 4, "GraphicsPlane.dll": 1}
 OLD_VALUE = 127 + 104
-NEW_MOV_IMM = 78            # 78 << 2 = 312
+NEW_MOV_IMM = 79            # 79 << 2 = 316
 
 # GraphicsPlane.dll, RectPlaneViewC::OnCreate: CreateCompatibleBitmap(dc, r5 = 240, r6 = 320)
 #   mov #120,r5 / (one instruction) / shll r5 / mov #80,r6 / shll2 r6
