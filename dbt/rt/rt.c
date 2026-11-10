@@ -3072,10 +3072,38 @@ static void diag_stripe(sf_u32 stage, sf_u32 colour)
     while (((*r64 - t) & 63) < 32) ;
 }
 #endif
+/* Wake-source search (2026-11-10). Three single guesses (CMT flag, KEYSC
+ * enable 0x4000, KEYSC mode cycle) each cost a round trip to the calculator
+ * and none stopped R-standby ending at once. So the translator steps through
+ * the remaining suspects by itself within one suspend: every standby that
+ * ends at once (under 7 s) adds the next measure to the following entry.
+ *   step 1: IRQ0..7 pins masked (INTMSK00 = 0xFF; the OAL's snapshot read 00)
+ *   step 2: KEYSC as the OS programs it (all rows and columns, its timings)
+ *   step 3, 4: KEYSC silenced (no rows, no columns, no enables, mode 0)
+ * From step 1 on an RTC alarm 20 s ahead (10 s for steps 3 and 4) is the
+ * safety wake-up, so a standby that holds still comes back. The verdict goes
+ * where the OAL's wake snapshot (Battery program, Probe ticked) shows it:
+ * CMCSR's clock select bits, the CMT being stopped and unused by CE:
+ *   0 nothing held yet, 1 or 2 = that step made the standby hold,
+ *   4 = it held with KEYSC silenced (KEYSC is the source),
+ *   7 = it ended at once even then (not an INTC-visible source at all). */
+static sf_u32 g_sb_step, g_sb_code, g_sb_last = 0xFFFFu;
+static sf_u32 sb_bcd(sf_u32 v) { return (v >> 4) * 10 + (v & 15); }
+static sf_u32 sb_now(void)      /* seconds within the hour */
+{
+    volatile sf_u8 *rtc = (volatile sf_u8 *)0xA413FEC0u;
+    sf_u32 s0, m, s1;
+    do { s0 = rtc[2]; m = rtc[4]; s1 = rtc[2]; } while (s0 != s1);
+    return sb_bcd(m & 0x7F) * 60 + sb_bcd(s0 & 0x7F);
+}
 static sf_u32 dbt_standby(void)
 {
     sf_u32 *stub = (sf_u32 *)RS_STUB, *block = (sf_u32 *)RS_BLOCK;
     sf_u32 n = (sf_u32)(dbt_standby_stub_end - dbt_standby_stub), i, r, cmt_gate;
+    volatile sf_u8 *rtc = (volatile sf_u8 *)0xA413FEC0u;
+    volatile sf_u16 *ksc = (volatile sf_u16 *)0xA44B0000u;
+    volatile sf_u16 *iprk = (volatile sf_u16 *)0xA4080028u;
+    sf_u32 sb_t0, sb_probe, sb_alarm, sb_sv_al[6], sb_sv_rcr1 = 0, sb_sv_rcr3 = 0, sb_sv_imr10 = 0, sb_sv_iprk = 0, sb_sv_k[6];
     for (i = 0; i < n; i++) stub[i] = dbt_standby_stub[i];
     stub[n - 1] = RS_BLOCK;                     /* the stub's last longword: where the block is */
     g_standbys++;
@@ -3137,6 +3165,38 @@ static sf_u32 dbt_standby(void)
         *kiumode = 0x0200u;
         *kiuint = (sf_u16)(*kiuint | 0x007Fu);
     }
+    /* the wake-source search: see the comment above this function */
+    sb_t0 = sb_now();
+    if (((sb_t0 + 3600 - g_sb_last) % 3600) > 6) { g_sb_step = 0; g_sb_code = 0; }     /* a new suspend: the OAL's loop comes back within 3 s */
+    sb_probe = g_sb_step == 3 || g_sb_step == 4;
+    sb_alarm = g_sb_step >= 1;
+    sb_sv_k[0] = ksc[0x0E >> 1]; sb_sv_k[1] = ksc[0x16 >> 1]; sb_sv_k[2] = ksc[0x18 >> 1];
+    sb_sv_k[3] = ksc[0x1A >> 1]; sb_sv_k[4] = ksc[0x1C >> 1]; sb_sv_k[5] = ksc[0x14 >> 1];
+    if (g_sb_step >= 1) *(volatile sf_u8 *)0xA4140044u = 0xFF;                          /* INTMSK00: IRQ0..7 */
+    if (g_sb_step >= 2 && !sb_probe) {
+        ksc[0x1A >> 1] = 0x0FFF; ksc[0x1C >> 1] = 0x00FF;                               /* KOUT, KIN: all */
+        ksc[0x0E >> 1] = 0x8042; ksc[0x18 >> 1] = 0x00C8; ksc[0x16 >> 1] = 0;           /* AUTOFIX, INTERVAL, WSET */
+        ksc[0x14 >> 1] = 0x00FF; ksc[0x14 >> 1] = 0x0800;
+    }
+    if (sb_probe) {
+        ksc[0x1A >> 1] = 0; ksc[0x1C >> 1] = 0;
+        ksc[0x14 >> 1] = 0x00FF; ksc[0x14 >> 1] = 0;
+        ksc[0x10 >> 1] = 0;
+    }
+    if (sb_alarm) {
+        sf_u32 at = (sb_t0 % 60 + (sb_probe ? 10 : 20)) % 60;
+        for (i = 0; i < 6; i++) sb_sv_al[i] = rtc[0x10 + 2 * i];
+        sb_sv_rcr1 = rtc[0x1C]; sb_sv_rcr3 = rtc[0x24];
+        sb_sv_imr10 = *(volatile sf_u8 *)(0xA4080080u + 4 * 10);
+        sb_sv_iprk = *iprk;
+        rtc[0x1C] = (sf_u8)(sb_sv_rcr1 & 0x90);                                         /* alarm interrupt off while the registers change */
+        for (i = 1; i < 6; i++) rtc[0x10 + 2 * i] = 0;                                  /* minute..month: not compared */
+        rtc[0x24] = (sf_u8)(sb_sv_rcr3 & 0x7F);                                         /* year: not compared */
+        rtc[0x10] = (sf_u8)(0x80 | ((at / 10) << 4) | (at % 10));                       /* second: compared */
+        rtc[0x1C] = (sf_u8)((sb_sv_rcr1 & 0x90) | 0x08);                                /* AF cleared, AIE set */
+        if (!(sb_sv_iprk & 0xF000u)) *iprk = (sf_u16)(sb_sv_iprk | 0x2000u);
+        *(volatile sf_u8 *)(0xA40800C0u + 4 * 10) = 0x01;                               /* IMCR10: RTC alarm unmasked */
+    }
     onchip_save();                              /* last: nothing below writes XYRAM before the sleep */
     r = dbt_standby_sleep(block);
 #ifdef DBT_STANDBY_DIAG
@@ -3161,6 +3221,39 @@ static sf_u32 dbt_standby(void)
      * registers and VBR; the rest of the machine is the guest's business */
     *(volatile sf_u32 *)0xA4150030u = (block[(0x40 + 0x10) / 4] & ~0x4000u) | cmt_gate;     /* MSTPCR0, the CMT's gate as it was before the standby */
     *(volatile sf_u32 *)0xA4150020u = block[(0x40 + 0x14) / 4];     /* STBCR */
+    /* the wake-source search: everything it changed back, then the verdict */
+    if (sb_alarm) {
+        rtc[0x1C] = (sf_u8)(sb_sv_rcr1 & 0x90);
+        for (i = 0; i < 6; i++) rtc[0x10 + 2 * i] = (sf_u8)sb_sv_al[i];
+        rtc[0x24] = (sf_u8)sb_sv_rcr3;
+        rtc[0x1C] = (sf_u8)(sb_sv_rcr1 & 0x98);                                         /* AF cleared: the alarm was this search's */
+        *iprk = (sf_u16)sb_sv_iprk;
+        if (sb_sv_imr10 & 0x01) *(volatile sf_u8 *)(0xA4080080u + 4 * 10) = 0x01;
+    }
+    if (g_sb_step >= 2) {
+        ksc[0x0E >> 1] = (sf_u16)sb_sv_k[0]; ksc[0x16 >> 1] = (sf_u16)sb_sv_k[1]; ksc[0x18 >> 1] = (sf_u16)sb_sv_k[2];
+        ksc[0x1A >> 1] = (sf_u16)sb_sv_k[3]; ksc[0x1C >> 1] = (sf_u16)sb_sv_k[4];
+        if (sb_probe) { ksc[0x10 >> 1] = 0x0200; ksc[0x14 >> 1] = (sf_u16)(sb_sv_k[5] & 0xFF00u); }
+    }
+    if (r) {
+        sf_u32 held;
+        g_sb_last = sb_now();
+        held = ((g_sb_last + 3600 - sb_t0) % 3600) >= 7;
+        if (sb_probe) {
+            if (held) { g_sb_code = 4; g_sb_step = 5; }
+            else if (++g_sb_step == 5) g_sb_code = 7;
+        } else if (held) {
+            if (!g_sb_code && g_sb_step >= 1 && g_sb_step <= 2) g_sb_code = g_sb_step;
+        } else if (g_sb_step < 3) g_sb_step++;
+        {
+            volatile sf_u32 *mstp0 = (volatile sf_u32 *)0xA4150030u;
+            volatile sf_u16 *cmcsr = (volatile sf_u16 *)0xA44A0060u;
+            sf_u32 gate = *mstp0 & 0x4000u;
+            *mstp0 &= ~0x4000u;
+            *cmcsr = (sf_u16)((*cmcsr & 0x3FF8u) | g_sb_code);
+            *mstp0 |= gate;
+        }
+    }
     if (r) {
         g_standby_wakes++;
         user_mappings_changed(0);               /* the UTLB is empty; the page tables survived */

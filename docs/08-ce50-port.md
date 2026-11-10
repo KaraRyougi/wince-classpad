@@ -1017,3 +1017,18 @@ SpreadCE（casio-emu，心跳采样每 2M 指令一个，`-DDBT_TRACE_BLOCKS` �
 - 内核侧可选：`INC\kernel.h` 的 `InvalidateRange` 对 SH 传真实范围
   （一行改动，需在 VM 里重建 nk.lib），翻译器的 F9 有范围路径就能直接用，
   不必走页表核对；现在不改内核也已经不是瓶颈。
+
+### Wake-source search built into the translator (2026-11-10)
+
+The KEYSC mode cycle did not stop the stray wake-ups either (third single
+guess to fail on the calculator). Note that the OAL masks every INTC source
+(IMR0..12 = 0xFF) before the standby, so no on-chip peripheral interrupt
+should be able to end it; what the INTC masks do not cover are the IRQ pins
+(INTMSK00, which the OAL's snapshot reads as 00) and, by design, the KEYSC
+standby scan. `dbt_standby()` now steps through these within one suspend:
+each standby that ends in under 7 s adds a measure to the next entry
+(1: INTMSK00 = 0xFF; 2: KEYSC programmed as the OS does; 3 and 4: KEYSC
+silenced), with an RTC alarm 20 s (10 s) ahead as the safety wake-up. The
+verdict is written to CMCSR bits 2:0, which the Probe snapshot shows:
+0 none, 1 / 2 the step that held, 4 held with KEYSC silenced, 7 ended at
+once even then. Result on the calculator: pending.
