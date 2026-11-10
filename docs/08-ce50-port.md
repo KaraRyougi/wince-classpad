@@ -796,6 +796,28 @@ casio-emu：`dbt/emu-patch/add_classpad_lcdpower.py`（深度待机后帧为空�
 冷启动的寄存器初始化再 SLPOUT 才恢复；`HLE_CP_LCD_LOG=1` 打印命令流；补上
 0xA44C0006）。尚未在 VM 编译，模拟器和真机都未验证。
 
+**IRQ1 / IRQ2 和"ADC 那一步"是什么（2026-11-10）。**
+- Casio 待机前布置两个外部中断引脚作唤醒源（0x8006F7DA）。IRQ1 总是开
+  （0x8006F63A：清请求、优先级 12、解除屏蔽；下降沿，ICR1 由 0x80062100 设），它的
+  处理函数 0x8006F6D8 把 USB 插线状态机（0x8007399C）用的变量 0x8C1F6F48 清零并投递
+  事件：IRQ1 是 **USB 插线**。这也回答了之前的问题：Casio 平时不是靠轮询控制器发现
+  插线，而是靠这个引脚的中断，状态机随后才给控制器上电读 VBUS。IRQ2 只在通信设置
+  满足 0x8006F78C 的条件时才开（0x8006F668：ICR1 bit 11:10 清零、优先级 5），是
+  **串口通信唤醒**（Link 设置里的 Wakeup）；醒来后 0x80062156 重新屏蔽它。
+- 对 CE 的含义：CE 从 Casio 继承了"IRQ1 未屏蔽、优先级 12"，却没有处理函数。只要
+  INTREQ00 里锁存过一次下降沿（插过 USB 线）而没人清，它就是一个一直挂着的未屏蔽
+  中断，R-standby 每次一进就醒，`OEMPowerOff` 的循环整夜空转。这与"一晚耗尽四节
+  电池"相符，是目前最可能的主因；`HardwareOff` 已在进待机前屏蔽全部 IRQ 引脚。
+- "ADC 那一步" 0x800813A0 其实是两件事：A/D 转换器（ADCCSR &= 0xDFFF、ADCUST =
+  0x8000、0xA461008E 高 4 位 = 8），和 **触摸控制器断电**：PHDR bit 4 置 1 后等
+  40 ms。触摸驱动模块在 0x8008A0xx..0x8008ABxx（IIC0）：断电 0x8008AA1C（0xA405019E
+  bit 5 清零、PH4 = 1），上电 0x8008AA5C（PH4 = 0、等 20 ms、发单字节命令 0x02、
+  0xA405019E bit 5 置 1）。CE 的触摸驱动休眠时只停了 IIC，控制器一直通着电。
+- 改动：`classpad_touch.cpp` 的 PowerHandler 休眠时照 Casio 断电；恢复时由采样线程
+  （能 Sleep）上电、发 0x02（`TouchBusCommand`，新加的单字节写事务），期间
+  `g_suspended` 保持置位。OAL 的 `HardwareOff` 加上 A/D 那三次写，恢复时写回
+  0xA461008E。未编译、未验证；触摸控制器对 0x02 的要求只来自反汇编。
+
 SpreadCE（casio-emu，心跳采样每 2M 指令一个，`-DDBT_TRACE_BLOCKS` 把宿主 PC 映射回
 客户机块）：启动约 2.8 G 指令，敲三个数加回车（6 个键）约 1 G 指令且全程不空闲，
 点四个单元格的 41 秒里大半空闲。敲数阶段：间接调用/返回查表（`_dbt_lki_ts`）

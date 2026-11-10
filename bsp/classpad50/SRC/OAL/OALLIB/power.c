@@ -71,9 +71,16 @@ static void WakeSnapshot(CLASSPAD_WAKE_SNAPSHOT *s)
 //  power-on is replayed from classpad_pwrseq.h up to the point where the
 //  display driver's own resume takes over (SLPOUT again, its backlight
 //  level, the repaint, DISPON).
-//  One thing differs on purpose: the OS leaves IRQ1 unmasked as a wake-up
-//  source (0x8006F7DA); CE has no handler for it and would only go back to
-//  sleep, so all eight IRQ pins are masked for the standby.
+//  One thing differs on purpose. The OS arms two IRQ pins as wake-up
+//  sources (0x8006F7DA): IRQ1, always (0x8006F63A: priority 12, unmasked;
+//  falling edge, ICR1 set by 0x80062100), whose handler 0x8006F6D8 resets
+//  the USB cable state machine's variable 0x8C1F6F48 and posts an event:
+//  the USB cable being plugged in; and IRQ2 (0x8006F668: priority 5), only
+//  under the conditions of 0x8006F78C on the communication settings: a
+//  wake-up by the serial link. CE inherits IRQ1 unmasked at priority 12 and
+//  has no handler for either: an edge latched in INTREQ00 that nothing
+//  clears is a pending, unmasked interrupt, and R-standby ends at once
+//  every time it is entered. All eight IRQ pins are masked for the standby.
 //  Only when the display driver has named the panel (IOCTL_HAL_CLASSPAD_PANEL):
 //  the tables are the fx-CP400's.
 //
@@ -84,6 +91,9 @@ static void WakeSnapshot(CLASSPAD_WAKE_SNAPSHOT *s)
 #define LCDIF_CR4       0xA44C0004      // the LCD interface's module (16-bit)
 #define LCDIF_CR6       0xA44C0006
 #define LCDIF_START     0xA44C0020      // bit 2
+#define ADC_ADCCSR      0xA461008A
+#define ADC_ADCUST      0xA461008C
+#define ADC_X8E         0xA461008E
 #define INTC_INTMSK00   0xA4140044
 #define INTC_INTMSKCLR00 0xA4140064
 
@@ -91,7 +101,7 @@ static DWORD g_panelKind = CLASSPAD_PANEL_NONE;
 static UINT32 g_pinSaved[sizeof g_pinsOff / sizeof g_pinsOff[0]];
 static struct {
     UINT8 pfdr, phdr, x162, lcdStart, lcdCr6, intmsk;
-    UINT16 lcdCr4;
+    UINT16 lcdCr4, adcX8e;
 } g_hw;
 
 BOOL OALIoCtlHalClasspadPanel(UINT32 code, VOID *in, UINT32 insize,
@@ -158,6 +168,13 @@ static BOOL HardwareOff(void)
     MMIO_W8(PORT_PFDR, g_hw.pfdr | 0x80);
     MMIO_W8(PORT_X162, g_hw.x162 | 0x04);
 
+    // the A/D converter as the OS leaves it (0x800813A0; that routine's
+    // other half, the touch sensor's power pin, is the touch driver's)
+    g_hw.adcX8e = MMIO_R16(ADC_X8E);
+    MMIO_W16(ADC_ADCCSR, MMIO_R16(ADC_ADCCSR) & 0xDFFF);
+    MMIO_W16(ADC_ADCUST, 0x8000);
+    MMIO_W16(ADC_X8E, (g_hw.adcX8e & 0x0FFF) | 0x8000);
+
     // the panel: the driver's power handler has sent backlight 0, DISPOFF
     // and SLPIN; the OS waits 100 (120) ms after SLPIN before the deep standby
     g_hw.lcdCr4 = MMIO_R16(LCDIF_CR4); g_hw.lcdCr6 = MMIO_R8(LCDIF_CR6); g_hw.lcdStart = MMIO_R8(LCDIF_START);
@@ -176,6 +193,7 @@ static BOOL HardwareOff(void)
 static void HardwareOn(void)
 {
     UINT32 i;
+    MMIO_W16(ADC_X8E, g_hw.adcX8e);              // the battery driver sets the rest up before every conversion
     MMIO_W8(PORT_X162, g_hw.x162);
     MMIO_W8(PORT_PFDR, g_hw.pfdr);
     for (i = sizeof g_pinsOff / sizeof g_pinsOff[0]; i-- > 0; )

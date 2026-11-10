@@ -97,6 +97,7 @@ static HANDLE   g_hSampler;                     // sample thread
 static HANDLE   g_hevSample;                    // manual-reset shutdown event
 static volatile BOOL g_sampling;                // stylus down: keep waking the IST
 static volatile BOOL g_quit, g_suspended;
+static volatile BOOL g_wakePending;             // after a resume: the sample thread powers the sensor up (it may sleep, the power handler may not)
 
 static DWORD RegDword(LPCTSTR name, DWORD dflt)
 {
@@ -122,6 +123,20 @@ static BOOL TouchReadPacket(UINT8 *pkt, int n)
     return FALSE;
 }
 
+// The sensor back on after a suspend, the way the OS's power-up does it
+// (classpad_touch.h): PH4 low, 20 ms, command 0x02, 0xA405019E bit 5.
+static void SensorPowerUp(void)
+{
+    int tries;
+    BOOL ok = FALSE;
+    MMIO_W8(TOUCH_PHDR, MMIO_R8(TOUCH_PHDR) & ~TOUCH_PHDR_OFF);
+    Sleep(TOUCH_POWER_UP_MS);
+    for (tries = 0; tries < 3 && !ok; tries++) ok = TouchBusCommand(TOUCH_CMD_START);
+    MMIO_W8(TOUCH_X19E, MMIO_R8(TOUCH_X19E) | TOUCH_X19E_ON);
+    TouchBusReset();
+    RETAILMSG(1, (TEXT("CLASSPAD TOUCH: sensor powered up, start command %s\r\n"), ok ? TEXT("sent") : TEXT("not acknowledged")));
+}
+
 static BOOL PenDown(void)
 {
     return (MMIO_R8(SH7305_REG_PA_PRDR) & TOUCH_PRDR_CONTACT) == 0;
@@ -137,6 +152,12 @@ static DWORD WINAPI SampleThread(LPVOID)
     while (!g_quit) {
         DWORD rc = WaitForSingleObject(g_hevSample, 1000 / (DWORD)g_rate);
         if (rc != WAIT_TIMEOUT || g_quit) break;
+        if (g_wakePending) {                    // resumed: nobody else uses the bus while g_suspended is set
+            SensorPowerUp();
+            g_wakePending = FALSE;
+            g_suspended = FALSE;
+            g_sampling = TRUE;
+        }
         if (!g_suspended && hTouchPanelEvent && (PenDown() || g_sampling)) SetEvent(hTouchPanelEvent);
     }
     return 0;
@@ -285,13 +306,22 @@ LONG DdsiTouchPanelDetach(void)
     return --g_attached;
 }
 
+// Off: the bus stopped and the sensor powered down as the OS does before
+// its standby (it used to stay powered through CE's suspend). On: the sample
+// thread powers it up; until then g_suspended keeps everybody off the bus.
 void DdsiTouchPanelPowerHandler(BOOL bOff)
 {
-    g_suspended = bOff;
     g_iconArmed = -1;
-    if (!g_panel) return;
-    if (bOff) MMIO_W8(IIC0_ICCR, 0);
-    else { TouchBusReset(); g_sampling = TRUE; }
+    if (!g_panel) { g_suspended = bOff; return; }
+    if (bOff) {
+        g_suspended = TRUE;
+        g_wakePending = FALSE;
+        MMIO_W8(IIC0_ICCR, 0);
+        MMIO_W8(TOUCH_X19E, MMIO_R8(TOUCH_X19E) & ~TOUCH_X19E_ON);
+        MMIO_W8(TOUCH_PHDR, MMIO_R8(TOUCH_PHDR) | TOUCH_PHDR_OFF);
+    } else {
+        g_wakePending = TRUE;
+    }
 }
 
 void DdsiTouchPanelGetPoint(P_TOUCH_PANEL_SAMPLE_FLAGS pTipState, INT *pUncalX, INT *pUncalY)

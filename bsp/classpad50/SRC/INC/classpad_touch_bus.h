@@ -72,4 +72,27 @@ fail:
     MMIO_W8(IIC0_ICCR, 0);                /* next sample starts from a known state */
     return 0;
 }
+
+/* One command byte and a stop: start, address + W, the byte, then ICCR =
+ * ICE | TRS with BBSY clear (the stop condition) at the byte's WAIT. */
+static int TouchBusCommand(unsigned char cmd)
+{
+    TouchBusReset();
+    if (!TouchBusWait(ICSR_BUSY, 0, 11)) goto fail;
+    MMIO_W8(IIC0_ICCR, ICCR_ICE | ICCR_TRS | ICCR_BBSY);
+    if (!TouchBusWait(ICSR_DTE, ICSR_DTE, 12)) goto fail;
+    MMIO_W8(IIC0_ICDR, TOUCH_IIC_ADDRESS << 1);
+    if (!TouchBusWait(ICSR_WAIT, ICSR_WAIT, 13)) goto fail;
+    MMIO_W8(IIC0_ICDR, cmd);
+    TouchBusReleaseWait();
+    if (!TouchBusWait(ICSR_WAIT, ICSR_WAIT, 14)) goto fail;
+    MMIO_W8(IIC0_ICCR, ICCR_ICE | ICCR_TRS);
+    TouchBusReleaseWait();
+    if (!TouchBusWait(ICSR_BUSY, 0, 15)) goto fail;
+    MMIO_W8(IIC0_ICCR, 0);
+    return 1;
+fail:
+    MMIO_W8(IIC0_ICCR, 0);
+    return 0;
+}
 #endif

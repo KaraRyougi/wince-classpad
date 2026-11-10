@@ -65,6 +65,19 @@
 
 #define TOUCH_PRDR_CONTACT      0x20    // Port R bit 5, 0 = pressed
 
+// The sensor's power, as Casio's OS switches it (OS 02.01.7003): its
+// power-down 0x8008AA1C clears 0xA405019E bit 5 and sets PHDR bit 4; its
+// power-up 0x8008AA5C clears PHDR bit 4, waits 20 ms, sends the one-byte
+// command 0x02 (0x8008A9FC -> 0x8008A7CC(2)) and sets 0xA405019E bit 5.
+// The OS's power-off routine 0x800813A0 sets PHDR bit 4 (and waits 40 ms)
+// before the standby; its touch task powers the sensor up again afterwards.
+#define TOUCH_PHDR              0xA405012E
+#define TOUCH_PHDR_OFF          0x10    // PH4: 1 = sensor off
+#define TOUCH_X19E              0xA405019E
+#define TOUCH_X19E_ON           0x20
+#define TOUCH_CMD_START         0x02
+#define TOUCH_POWER_UP_MS       20
+
 // casio-emu's stylus to raw mapping (classpadSetTouch) for the registry
 // calibration data and the hello window's annotation
 #define TOUCH_RAW_X0            0x20B
