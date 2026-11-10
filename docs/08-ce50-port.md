@@ -611,6 +611,15 @@ IE_MODULES_HTMLHELP`），所以镜像里一页都没有。platform.bib 现在�
 （NK，约 155 KB），word.htm 跟 WordPad 进 EXT；`test_peghelp` 的解析器过了这
 几页的 478 个链接。
 
+**Xpander 平面宽度 312 改 316；USB 读取加保护（2026-11-10）。** 用 Function Plot
+的 Sine 类型画 y = sin x（Type 下拉 → Sine → 公式，OK）：312 宽时曲线到第 313 列为止，
+离右边框（318）还有 5 像素空着，这就是"函数画不到最右侧"；平面从第 2 列开始，
+所以 316（`mov #79; shll2`）正好填满，重画后曲线到第 317 列。casio-emu 的
+ClassPad 配置没有 USB 控制器，电池 PDD 每次读 VBUS 都在 device.exe 里抛异常
+（任务栏每秒轮询两次，拖慢了整个界面，注入的点击都对不上时间）；PDD 现在第一次
+读用 `__try` 包住，读不到就不再读并报电池供电。时钟实测去掉了对 RCR2.START 的
+检查（casio-emu 里该位为 0 但 128 Hz 分频照走）。
+
 ## 九、还没做的
 
 - 在 VM 里构建（第一次构建会暴露 SDK 的差异：头文件、`WARNISERROR`）。

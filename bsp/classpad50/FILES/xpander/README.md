@@ -56,7 +56,7 @@ and GeometryPane.dll build their plane's layout rectangle and its
 GraphicalDomainC pixel width as 231 (`mov #127; add #104`), and
 GraphicsPlane.dll's `RectPlaneViewC::OnCreate` draws through a
 `CreateCompatibleBitmap(dc, 240, 320)` back buffer that clipped everything
-past x = 240. `tools/xpander_widen.py` patches the three DLLs (231 -> 312,
+past x = 240. `tools/xpander_widen.py` patches the three DLLs (231 -> 316,
 the buffer -> 320x512; stage.py runs it after sh3imports, and it can be run
 on this folder's copies directly, `--check` only reports). The constants
 were found by disassembling the modules with `sh-elf-objdump` and reading
