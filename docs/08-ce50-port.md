@@ -704,6 +704,15 @@ BatteryPDDGetStatus 只取结果。没照做的：中断控制器（不用中断
 读到的没有记录。Battery 程序底部的诊断行随后去掉，驱动仍把寄存器值写到注册表
 `UsbDiag`。
 
+**休眠期间时钟不走（2026-11-10）。** 真机上休眠后系统时间没有前进。rtc.c 早有补时
+（`ClasspadRtcSuspend` / `ClasspadRtcResume`：休眠前后各读一次硬件 RTC 的日历，差值
+加到 `g_baseSeconds`），但 `ReadHardwareSeconds` 要求 RCR2.START = 1，而 CE 启动时
+日历计数器是停的（START = 0，ClassPad 自己没有时钟；只有 64 Hz 分频器在走，时钟
+实测靠的就是它），所以每次读取都失败，补时被跳过；`OEMSetAlarmTime` 也因为同一个
+读取而一直失败。现在 OEMInit 调 `ClasspadRtcStart`：START 为 0 时启动日历计数器，
+日历里有合法日期就原样启动，否则先设成 2000-01-01 00:00:00；RCR2 的周期中断设置
+保留。只用它的差值，CE 的日期不取自它。未验证（待 VM 重建后在模拟器和真机上试）。
+
 SpreadCE（casio-emu，心跳采样每 2M 指令一个，`-DDBT_TRACE_BLOCKS` 把宿主 PC 映射回
 客户机块）：启动约 2.8 G 指令，敲三个数加回车（6 个键）约 1 G 指令且全程不空闲，
 点四个单元格的 41 秒里大半空闲。敲数阶段：间接调用/返回查表（`_dbt_lki_ts`）

@@ -37,6 +37,8 @@ static void OALExtRomInit(void)
                   g_extRom.pTOC->physfirst, g_extRom.pTOC->physlast, g_extRom.pTOC->nummods, g_extRom.pTOC->numfiles));
 }
 
+extern VOID ClasspadRtcStart(void);
+
 void OEMInit(void)
 {
     OALLogSetZones((1 << OAL_LOG_ERROR) | (1 << OAL_LOG_WARN) | (1 << OAL_LOG_INFO));
@@ -57,6 +59,7 @@ void OEMInit(void)
         OALMSG(OAL_ERROR, (L"ERROR: OEMInit: OALIntrInit failed\r\n"));
     }
     InitClock();
+    ClasspadRtcStart();     // rtc.c: the calendar counters, for the time spent suspended and the alarm
 
     // Files in the NOR hole (Math Xpander and the like), if flashed
     OALExtRomInit();

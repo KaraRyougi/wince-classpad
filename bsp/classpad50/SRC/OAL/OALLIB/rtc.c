@@ -1,9 +1,13 @@
 //------------------------------------------------------------------------------
 //  rtc.c - real-time clock
 //
-//  A software clock driven by the system tick for now (the SH7305 RTC at
-//  0xA413FEC0 comes later). Time is kept as seconds since 2000-01-01 plus the
-//  millisecond tick at which it was set.
+//  A software clock driven by the system tick: seconds since 2000-01-01 plus
+//  the millisecond tick at which it was set. The SH7305 RTC (0xA413FEC0) is
+//  used for what the tick cannot do: the time spent suspended and the kernel
+//  alarm. Its calendar counters are stopped when CE starts (RCR2.START = 0:
+//  the ClassPad has no clock of its own; only the 64 Hz divider runs), so
+//  ClasspadRtcStart starts them at boot. Until 2026-11-10 nothing did, every
+//  calendar read failed and the clock stood still across a suspend.
 //------------------------------------------------------------------------------
 #include <bsp.h>
 
@@ -149,12 +153,17 @@ static UINT32 FromBcd(UINT32 v)
 {
     return (v & 15) + ((v >> 4) & 15) * 10 + ((v >> 8) & 15) * 100 + ((v >> 12) & 15) * 1000;
 }
-static BOOL ReadHardwareSeconds(UINT64 *seconds)
+#define RTC_RCR2_START  0x01
+#define RTC_RCR2_RESET  0x02            // the divider below one second
+#define RTC_RCR2_RTCEN  0x08
+#define RTC_RCR2_PES    0x70            // the periodic interrupt setting, kept as it is
+
+// The calendar as seconds since 2000, whether it is counting or not
+static BOOL ReadCalendar(UINT64 *seconds)
 {
     SYSTEMTIME t;
     UINT8 sec;
     UINT32 attempts;
-    if (!(MMIO_R8(SH7305_REG_PA_RTC + 0x1E) & 1)) return FALSE;
     for (attempts = 0; attempts < 4; ++attempts) {
         memset(&t, 0, sizeof t);
         sec = MMIO_R8(SH7305_REG_PA_RTC + 2);
@@ -169,6 +178,38 @@ static BOOL ReadHardwareSeconds(UINT64 *seconds)
     }
     return FALSE;
 }
+static BOOL ReadHardwareSeconds(UINT64 *seconds)
+{
+    if (!(MMIO_R8(RTC_RCR2) & RTC_RCR2_START)) return FALSE;
+    return ReadCalendar(seconds);
+}
+
+// OEMInit: the calendar counters count from here on. A calendar that holds a
+// date is started as it is; one that does not (never set) starts at
+// 2000-01-01 00:00:00. Only differences of it are used (suspend, alarm), so
+// what it shows does not matter, and CE's own date is not taken from it.
+VOID ClasspadRtcStart(void)
+{
+    UINT8 rcr2 = MMIO_R8(RTC_RCR2);
+    UINT64 seconds;
+    BOOL kept;
+    if (rcr2 & RTC_RCR2_START) return;
+    kept = ReadCalendar(&seconds);
+    if (!kept) {
+        MMIO_W8(RTC_RCR2, (UINT8)((rcr2 & RTC_RCR2_PES) | RTC_RCR2_RTCEN | RTC_RCR2_RESET));
+        MMIO_W8(SH7305_REG_PA_RTC + 2, 0x00);       // second
+        MMIO_W8(SH7305_REG_PA_RTC + 4, 0x00);       // minute
+        MMIO_W8(SH7305_REG_PA_RTC + 6, 0x00);       // hour
+        MMIO_W8(SH7305_REG_PA_RTC + 8, 6);          // day of the week: Saturday
+        MMIO_W8(SH7305_REG_PA_RTC + 10, 0x01);      // day
+        MMIO_W8(SH7305_REG_PA_RTC + 12, 0x01);      // month
+        MMIO_W16(SH7305_REG_PA_RTC + 14, 0x2000);   // year
+    }
+    MMIO_W8(RTC_RCR2, (UINT8)((rcr2 & RTC_RCR2_PES) | RTC_RCR2_RTCEN | RTC_RCR2_START));
+    RETAILMSG(1, (L"CLASSPAD RTC: calendar counters started (RCR2 was %02X, %s)\r\n",
+                  rcr2, kept ? L"date kept" : L"set to 2000-01-01"));
+}
+
 VOID ClasspadRtcSuspend(void)
 {
     g_suspendRtcValid = ReadHardwareSeconds(&g_suspendRtc);
