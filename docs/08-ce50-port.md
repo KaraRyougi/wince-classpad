@@ -573,6 +573,16 @@ makeimg）：Graph 的坐标轴从 x=1 到 308，两端的 −11.5 / 11.5 标签
   （02100000..02400000，NK 改为 02400000..04000000）。EXT 不在时桌面的
   WordPad 快捷方式和游戏菜单项随 .lnk 一起消失，和 Xpander 一样。
 
+上面两项的 VM 构建与模拟器验证（2026-11-10）：NK.bin 实占 4,372,980 字节
+（空洞余量约 850 KiB），EXT.bin 4.83 MiB、34 模块。构建中踩到的坑：增量 sysgen
+不重建 `coredll_ALL.lib`（def 已含电池导出，链接缺 6 个符号，删掉它重来）；
+sysgen 不提供 battdrvr.def，common.bib/common.reg 也没有电池驱动的条目，都由
+BSP 自带；romimage 以区里第一个模块定 CPU 类型，EXT 以 SH3 的 mfcce300 开头时
+拒绝 SH4 模块，所以挪过去的条目排在最前；备用电池要报 UNKNOWN，报 NO_BATTERY
+任务栏每次开机弹 "Backup Battery Very Low"。模拟器（电池固定 4.70 V）：驱动
+读数 470，碱性第 2 档 96%，Battery 程序切到镍氢后第 1 档 100%；WordPad 从 EXT
+启动正常；无弹窗。Low / Critical 两档只有主机测试覆盖。
+
 ## 九、还没做的
 
 - 在 VM 里构建（第一次构建会暴露 SDK 的差异：头文件、`WARNISERROR`）。
