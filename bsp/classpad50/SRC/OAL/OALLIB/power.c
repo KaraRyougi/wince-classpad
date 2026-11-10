@@ -81,6 +81,9 @@ static void WakeSnapshot(CLASSPAD_WAKE_SNAPSHOT *s)
 //  Only when the display driver has named the panel (IOCTL_HAL_CLASSPAD_PANEL):
 //  the tables are the fx-CP400's.
 //
+#define PORT_PULCRBSC   0xA40501C3      // bus pin pull-ups: the memory standby's
+#define PORT_PHCR       0xA405010E
+#define PHCR_PH6        0x3000          // PH6: the memory standby's
 #define PORT_PADR       0xA4050120      // bit 4: the panel's reset line
 #define PORT_PFDR       0xA405012A
 #define PORT_PHDR       0xA405012E      // bit 5: the panel's supply
@@ -149,11 +152,24 @@ static BOOL HardwareOff(void)
     UINT32 i;
     if (g_panelKind != CLASSPAD_PANEL_NEW && g_panelKind != CLASSPAD_PANEL_OLD) return FALSE;
 
-    // the ports
+    // the ports. Two entries of the OS's table belong to the memory standby
+    // and are left to the translator's standby code (dbt/rt/standby.S), which
+    // does the OS's 0x8002095E (PULCRBSC |= 0x12, PH6 to its function) right
+    // before SLEEP and, after the wake-up, writes back what it saved there:
+    // PULCRBSC (the table's first entry) and PH6 in PHCR (bits 13:12). With
+    // the table's values already in place the saved ones were the power-off
+    // ones, PH6 came back as "function" instead of the output the SDRAM
+    // needs (the OS's own resume 0x800209C4 writes PHCR = (& 0xCFFF) | 0x1000
+    // and clears PHDR bit 6 whatever was there before), and the calculator
+    // did not come back from the standby (2026-11-10).
     for (i = 0; i < sizeof g_pinsOff / sizeof g_pinsOff[0]; i++) {
         const CLASSPAD_PIN_OP *op = &g_pinsOff[i];
+        UINT32 v;
         g_pinSaved[i] = PinRead(op->addr, op->size);
-        PinWrite(op->addr, op->size, (g_pinSaved[i] & op->andMask) | op->orValue);
+        if (op->addr == PORT_PULCRBSC) continue;
+        v = (g_pinSaved[i] & op->andMask) | op->orValue;
+        if (op->addr == PORT_PHCR) v = (v & ~PHCR_PH6) | (g_pinSaved[i] & PHCR_PH6);
+        PinWrite(op->addr, op->size, v);
     }
     g_hw.pfdr = MMIO_R8(PORT_PFDR); g_hw.x162 = MMIO_R8(PORT_X162);
     MMIO_W8(PORT_PFDR, g_hw.pfdr | 0x80);
