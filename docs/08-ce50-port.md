@@ -720,6 +720,33 @@ BatteryPDDGetStatus 只取结果。没照做的：中断控制器（不用中断
 要到唤醒后 10 秒才出现。补上的量约一分钟，分钟分辨率下与 86 秒大致相符，没有更
 精确的读数。真机未验证。KDEV 表按新 nk.exe 重新生成（kern.map 多了一个函数）。
 
+**老面板（2026-11-10）。** fx-CP400 有两种 DCS 面板，Casio OS（02.01.7003）的每个
+LCD 例程都按面板 ID 分路（RDID 0xDA，一次空读后读 ID，0x8006407A）。ID 为 0x16 或
+0x52 的是一类（我们原先唯一支持的）；其他 ID 是另一类，区别：
+- `LCD_SetDrawingBounds`（0x80038A10）把列窗口两端各加 40，行不变；
+- 背光亮度不是 0x51 / 0x52，而是寄存器 0xB9 四个参数里的第二个：设置时先读回四个
+  参数再原样写回并替换第二个（0x80038550），读取取第二个参数（0x800385E0）；
+- 关屏（0x8003809C）：DISPOFF、等 60、SLPIN、等 120，不发 0x51。
+我们的改动：`dbt/rt/lcd_io.h` 的 `dbt_lcd_col0`（读一次 ID）用于 HC_LCD_PUSH 的两种
+形式、面板控制台和休眠诊断条纹；`classpad_lcd.h` 的 `LcdReadId` / `LcdGetBacklight`
+/ `LcdSetBacklight`，`classpad_ddi.cpp` 启动时读 ID、`SetWindow` 加偏移、休眠和恢复
+按面板类型处理背光（老面板 CE 不进深度待机，所以也把亮度清零）。casio-emu：
+`dbt/emu-patch/add_classpad_oldpanel.py`（`HLE_CP_LCD_ID=<hex>`：非 0x16/0x52 时
+显示 GRAM 列 40..359，保存 0xB9 的参数并打印写入）。验证：`GUEST=dcsrot` 在 ID 16
+和 ID 30 下截图逐字节相同；当前 CE 镜像加新翻译器在 ID 30 下桌面和开始菜单正常。
+驱动里的背光和 SetWindow 改动要等 VM 重建才能测。真机未验证；老面板的具体 ID、
+0xB9 其余三个参数的含义不明。
+
+**休眠功耗高（新面板也是），调查到的差距（2026-11-10）。** Casio OS 进待机的入口
+0x80020E4C 在设好引脚后调用 LCD 断电 0x80038A9A，它比 CE 多做三件事：面板深度待机
+（新面板 0xB9 FF 52 98、0xBD 00、0xB1 51；老面板 0xB1 01）、PHDR（0xA405012E）
+bit 5 清零、0xA44C0020 bit 2 清零（0x80081390 是把它置 1 的对应例程）。CE 只做到
+SLPIN。深度待机后面板要完整重新初始化（Casio 的初始化例程在 0x800379xx 和
+0x80037Fxx 附近，各有几百条指令），所以一直没照搬。另外 0x800813A0 的 ADC 设置把
+PHDR bit 4 置 1，含义不明。这三步各占多少电流没有数据，也没有在真机上量过
+R-standby 本身的电流。下一步的想法：用一个小的 SH-4 解释器跑 ROM 里的初始化例程，
+把两种面板的上电命令序列抄出来，CE 休眠时照 Casio 的做法断电、恢复时重放。
+
 SpreadCE（casio-emu，心跳采样每 2M 指令一个，`-DDBT_TRACE_BLOCKS` 把宿主 PC 映射回
 客户机块）：启动约 2.8 G 指令，敲三个数加回车（6 个键）约 1 G 指令且全程不空闲，
 点四个单元格的 41 秒里大半空闲。敲数阶段：间接调用/返回查表（`_dbt_lki_ts`）
