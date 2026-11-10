@@ -30,12 +30,11 @@
 typedef struct {
     unsigned short level1, level2, level3;  // raw > levelN: Casio level N; else 4
     unsigned short floor;                   // raw <= floor: do not run
-    unsigned short full;                    // our own 100 % point (1.5 V / 1.3 V per cell)
 } CLASSPAD_BATT_CURVE;
 
 static const CLASSPAD_BATT_CURVE g_ClasspadBattCurves[2] = {
-    { 475, 429, 383, 347, 600 },            // alkaline
-    { 465, 447, 429, 402, 520 },            // Ni-MH
+    { 475, 429, 383, 347 },                 // alkaline
+    { 465, 447, 429, 402 },                 // Ni-MH
 };
 
 // Casio's level (1..4, 5 below the floor) of one averaged reading
@@ -58,19 +57,18 @@ static int ClasspadBattLatch(int *latched, int level)
     return *latched;
 }
 
-// 0..100: linear between the curve's points, floor = 0, level3 = 25,
-// level2 = 50, level1 = 75, full = 100
+// 0..100 along Casio's levels: 100 in level 1, linear below it with
+// level2 = 67, level3 = 33, floor = 0
 static unsigned ClasspadBattPercent(unsigned raw, int type)
 {
     const CLASSPAD_BATT_CURVE *c = &g_ClasspadBattCurves[type == CLASSPAD_BATT_NIMH];
     unsigned lo, hi, base;
-    if (raw <= c->floor) return 0;
-    if (raw >= c->full)  return 100;
-    if (raw > c->level1)      { lo = c->level1; hi = c->full;   base = 75; }
-    else if (raw > c->level2) { lo = c->level2; hi = c->level1; base = 50; }
-    else if (raw > c->level3) { lo = c->level3; hi = c->level2; base = 25; }
-    else                      { lo = c->floor;  hi = c->level3; base = 0; }
-    return base + (raw - lo) * 25 / (hi - lo);
+    if (raw <= c->floor)  return 0;
+    if (raw >= c->level1) return 100;
+    if (raw > c->level2)      { lo = c->level2; hi = c->level1; base = 67; return base + (raw - lo) * 33 / (hi - lo); }
+    else if (raw > c->level3) { lo = c->level3; hi = c->level2; base = 33; return base + (raw - lo) * 34 / (hi - lo); }
+    lo = c->floor; hi = c->level3; base = 0;
+    return base + (raw - lo) * 33 / (hi - lo);
 }
 
 #endif

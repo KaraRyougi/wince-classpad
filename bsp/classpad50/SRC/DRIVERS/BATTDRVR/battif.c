@@ -7,7 +7,7 @@
 //  levels and a percentage. Reported through the public battery MDD:
 //    BatteryFlag         HIGH for Casio's levels 1..3, LOW for level 4,
 //                        CRITICAL at or below Casio's power-on floor
-//    BatteryLifePercent  0..100 along the selected curve
+//    BatteryLifePercent  100 in Casio's level 1, falling to 0 at the floor
 //    BatteryVoltage      mV, counts * "MilliVoltsPerCount" (10: inferred
 //                        from Casio's thresholds, not measured)
 //    BatteryChemistry    alkaline or Ni-MH, the registry choice
@@ -48,7 +48,7 @@ static int   g_latched, g_logged = -1;
 static void ReadConfig(void)
 {
     HKEY key;
-    DWORD v, type, size;
+    DWORD v, type, size, was = g_type;
     g_type = CLASSPAD_BATT_ALKALINE; g_mvPerCount = 10;
     if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, BATT_REG_KEY, 0, 0, &key) == ERROR_SUCCESS) {
         size = sizeof v;
@@ -59,6 +59,7 @@ static void ReadConfig(void)
             g_mvPerCount = v;
         RegCloseKey(key);
     }
+    if (g_haveConfig && g_type != was) { g_latched = 0; g_logged = -1; }    // another curve: its levels start over
     g_configTick = GetTickCount(); g_haveConfig = TRUE;
 }
 

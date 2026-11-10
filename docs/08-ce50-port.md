@@ -551,14 +551,19 @@ makeimg）：Graph 的坐标轴从 x=1 到 308，两端的 −11.5 / 11.5 标签
 - CE 侧：`SRC\DRIVERS\BATTDRVR\battif.c` 是公共电池 MDD（battdrvr_lib）的 PDD，
   轮询转换（不开 A/D 中断），逻辑在 `classpad_battery.h`（`bsp/tests/test_battery`
   覆盖阈值边界、锁存、百分比单调）。上报：BatteryFlag HIGH（Casio 1–3 档）/
-  LOW（4 档）/ CRITICAL（门限以下），BatteryLifePercent 沿所选曲线分段线性
-  （门限 0%、三个阈值 25/50/75%、100% 点取每节 1.5 V / 1.3 V，这一点是我们
-  自己定的），BatteryVoltage，BatteryChemistry。CE 没有内建的碱性/镍氢切换，
+  LOW（4 档）/ CRITICAL（门限以下），BatteryLifePercent（Casio 第 1 档即 100%，
+  往下分段线性：第 2 档下沿 67%、第 3 档下沿 33%、门限 0%），BatteryVoltage，
+  BatteryChemistry。CE 没有内建的碱性/镍氢切换，
   类型放在 `HKLM\Software\ClassPad\Battery` 的 `Type`（0 碱性、1 镍氢），
   `MilliVoltsPerCount` 可校正比例；档位变化时把原始读数打到调试输出，便于和
-  Casio OS 的显示对照。需要 catalog 的 Battery Driver（SYSGEN_BATTERY：coredll
-  里才有 GetSystemPowerStatusEx2，battdrvr_lib 才会 sysgen 出来）；Power
-  Manager 保持 Minimal 即可。
+  Casio OS 的显示对照。类型改变时锁存重新开始。`SRC\APPS\BATTERY`
+  （classpad_battery.exe，开始菜单 Programs\Battery）显示百分比、电压、状态并
+  提供 Alkaline / Ni-MH 两个按钮写这个注册表值；注册表在 RAM 里，选择只保持到
+  下次启动 CE，默认值在 platform.reg。需要 SYSGEN_BATTERY（winceos.bat：
+  coredll 加 battery 组件才有 GetSystemPowerStatusEx2，CE_MODULES 加 battdrvr
+  才 sysgen 出 battdrvr_lib，还带出控制面板的 Power 小程序）；PB 的 catalog
+  视图里找不到这一项，所以直接写在 `classpad.bat` 里（`set SYSGEN_BATTERY=1`）。
+  Power Manager 保持 Minimal 即可。
 - 腾空间：NK 在空洞里只剩 12 KiB。`FILES\extmove.txt`（每行一个 findstr
   正则，和 romexclude.txt 同样的写法）列出要从 NK 改到 EXT 的微软条目：
   WordPad（pword、pwwiff、office、pwd_res、riched20、模板和链接）和两个纸牌

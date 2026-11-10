@@ -13,6 +13,10 @@ set BSP_NOUSB=1
 set BSP_NOETHER=1
 REM The translator is the debugger: no KITL, no kernel debugger in the image,
 REM so common.bib picks kern.exe (SRC\OAL\KERN) as nk.exe.
+REM The battery driver (SRC\DRIVERS\BATTDRVR needs the public MDD library and
+REM coredll's battery API; the catalog item is SYSGEN_BATTERY, set here so the
+REM OS design does not have to carry it). Sysgen again after adding this.
+set SYSGEN_BATTERY=1
 set IMGNOKITL=1
 set IMGNODEBUGGER=1
 set IMGNOSHAREETH=1

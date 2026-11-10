@@ -33,9 +33,10 @@ int main(void)
             CHECK(p <= 100 && p >= prev, "type %d raw %u: percent %u after %u", type, raw, p, prev);
             prev = p;
         }
-        CHECK(ClasspadBattPercent(c->floor, type) == 0 && ClasspadBattPercent(c->full, type) == 100, "type %d ends", type);
-        CHECK(ClasspadBattPercent(c->level3, type) == 25 && ClasspadBattPercent(c->level2, type) == 50 && ClasspadBattPercent(c->level1, type) == 75, "type %d thresholds: %u %u %u", type,
-              ClasspadBattPercent(c->level3, type), ClasspadBattPercent(c->level2, type), ClasspadBattPercent(c->level1, type));
+        CHECK(ClasspadBattPercent(c->floor, type) == 0 && ClasspadBattPercent(c->level1, type) == 100 && ClasspadBattPercent(1023, type) == 100, "type %d ends", type);
+        CHECK(ClasspadBattPercent(c->level3, type) == 33 && ClasspadBattPercent(c->level2, type) == 67, "type %d thresholds: %u %u", type,
+              ClasspadBattPercent(c->level3, type), ClasspadBattPercent(c->level2, type));
+        CHECK(ClasspadBattPercent(c->level1 - 1, type) < 100, "type %d: below level 1 is under 100", type);
     }
     printf("battery: %d failures\n", fails);
     return fails != 0;

@@ -7,3 +7,6 @@ Directory("\Windows\Programs"):-File("Math Xpander.lnk", "\Windows\mathxpander.l
 
 ; Plotter-Z (SRC\APPS\PLOTTERZ, in NK)
 Directory("\Windows\Programs"):-File("Plotter-Z.lnk", "\Windows\plotterz.lnk")
+
+; Battery status and type (SRC\APPS\BATTERY, in NK)
+Directory("\Windows\Programs"):-File("Battery.lnk", "\Windows\battery.lnk")

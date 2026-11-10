@@ -1,4 +1,5 @@
 DIRS=\
+    BATTERY \
     ROTATE \
     ROTATEKEY \
     SH3CRT \

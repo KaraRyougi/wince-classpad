@@ -53,6 +53,12 @@ FILES
 MODULES
     classpad_rotate.exe $(_FLATRELEASEDIR)\classpad_rotate.exe NK  S
 
+; Battery status and battery type (SRC\APPS\BATTERY; the driver is battdrvr.dll)
+MODULES
+    classpad_battery.exe $(_FLATRELEASEDIR)\classpad_battery.exe NK  S
+FILES
+    battery.lnk         $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\battery.lnk      NK   S
+
 MODULES
     classpad_rotatekey.exe $(_FLATRELEASEDIR)\classpad_rotatekey.exe NK  S
 
