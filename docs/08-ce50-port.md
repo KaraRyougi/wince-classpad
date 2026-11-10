@@ -620,6 +620,24 @@ ClassPad 配置没有 USB 控制器，电池 PDD 每次读 VBUS 都在 device.ex
 读用 `__try` 包住，读不到就不再读并报电池供电。时钟实测去掉了对 RCR2.START 的
 检查（casio-emu 里该位为 0 但 128 Hz 分频照走）。
 
+**重建后的验证；帮助目录页 mainhelp.htm（2026-11-09 晚）。** VM 重建的镜像在
+casio-emu 里：OAL 报 `TMU0 counts 1772920 Hz by the RTC (nominal 7372800)`
+（另一次 1625320）：casio-emu 的 RTC 走宿主机时间而 TMU 走模拟指令，翻译器下的
+机器比实时慢约四倍，量出来的就是这个比值，说明实测生效；副作用是模拟器里系统
+时钟比以前快四倍，对话框还没画完点击就到了（注入序列要拉长间隔），空闲约两分钟
+墙上时间就关屏，取帧要取关屏前的。USB：device.exe 里只有第一次读的一个异常，
+随后 `no USB controller to read, AC line reported offline`。Xpander（VM 构建的
+EXT）：正弦曲线到第 317 列。帮助：Start > Help 打开了 PegHelp，但报
+`Cannot open the help file mainhelp.htm`：explorer 的 IDS_HELPFILE 是
+`mainhelp.htm#Help_Contents`，而 CE 5.0 的 WCESHELLFE / WCEAPPSFE 文件目录里没有
+这个文件（那几页帮助各自有 Main_Contents，总目录要 OEM 给）。加了
+`FILES\mainhelp.htm`（链接 wince、ctpnl、rnetw、word、Math Xpander 的目录和
+copy），列在 platform.bib 的 NK 里；还要一次重建。KDEV 表按新 nk.exe 重新生成
+（与加了 SpreadCE 的镜像算出的表相同）。注意：两个会话都往同一个
+`PLATFORM\CLASSPAD` 暂存，`stage_bsp50.py` 会把另一边改过的文本文件盖掉
+（这次盖了 SpreadCE 那边的 platform.bib、platform.dat、sh3crt.c/.def，已按那边
+的工作树恢复，platform.bib 另带 mainhelp 一行）。
+
 ## 九、还没做的
 
 - 在 VM 里构建（第一次构建会暴露 SDK 的差异：头文件、`WARNISERROR`）。

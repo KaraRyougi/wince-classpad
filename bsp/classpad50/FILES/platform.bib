@@ -132,12 +132,15 @@ FILES
    workbook_keybswitch.2BP  $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\workbook_keybswitch.2BP   EXT  S
    mathxpander.lnk          $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\xpander\mathxpander.lnk           EXT  S
 
-; Windows CE's own help pages (Start > Help runs \Windows\peghelp.exe file:wince.htm).
+; Windows CE's own help pages. Start > Help opens mainhelp.htm#Help_Contents
+; (explorer's IDS_HELPFILE), a contents page CE 5.0 does not ship: FILES\mainhelp.htm
+; here links the pages below and Math Xpander's.
 ; Microsoft's bib lists them only with its IE-based help viewer
 ; (WCESHELLFE_MODULES_PEGHELP || IE_MODULES_HTMLHELP), which this image
 ; replaces with SRC\APPS\PEGHELP, so they are listed here from the public
 ; tree. word.htm goes with WordPad to EXT.
 FILES
+    mainhelp.htm       $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\mainhelp.htm  NK   SH
     wince.htm          $(_WINCEROOT)\PUBLIC\WCESHELLFE\OAK\FILES\INTLFILE\0409\wince.htm  NK   SH
     ctpnl.htm          $(_WINCEROOT)\PUBLIC\WCESHELLFE\OAK\FILES\INTLFILE\0409\ctpnl.htm  NK   SH
     copy.htm           $(_WINCEROOT)\PUBLIC\WCESHELLFE\OAK\FILES\INTLFILE\0409\copy.htm  NK   SH
