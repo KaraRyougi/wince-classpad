@@ -1113,3 +1113,25 @@ branch itself has only been read in the disassembly, not run. Calculator:
 pending. The loop does not remove the source of the stray wake-ups; if they
 arrive back to back the core still cycles, only without the SDRAM, caches
 and CE in between. rs / sec from the calculator says how often.
+
+Calculator, first run with the loop: `rs 00000001 sec 0019`. One stray
+wake-up in 25 s: they do not come back to back. Each full entry is followed
+by one, and after the stub's SLEEP the standby holds. This was the first
+time the machine really stayed off for seconds, and it showed a second
+fault: after the wake-up it sometimes reset into the OS, sometimes came up
+frozen with touch and keys dead. Both look like RAM that did not keep its
+contents.
+
+What the way down did differently from the OS around the memory standby
+(0x8002095E: RTCSR, SDCR = 0, PLLCR bit 1, PULCRBSC |= 0x12, PH6 released):
+the OS is out of the SDRAM before it (stack in RS memory since 0x80020414,
+code in ROM) and spends a long time between it and SLEEP (INTC save, pins,
+the panel's power-off with its waits); `standby.S` kept fetching from the
+SDRAM and executed SLEEP a few instructions after the PHCR write. Changed:
+the memory standby and the SLEEP now run from RS memory (a tail at the end
+of the stub's blob), with a wait of more than 4 R64CNT steps in between;
+on the way up the pins come back in the OS's order (PULCRBSC, PHDR bit 6
+low, PHCR). The STANDBY_DIAG build sums the guest's 8 MiB before and after
+and prints `mem <before> <after> OK|BAD`. Emulator: suspend 50 s, Clear,
+"mem D2495524 D2495524 OK", resumed. Calculator: pending; whether the wait
+is what the SDRAM needed is a guess until the mem line says OK there.

@@ -3144,6 +3144,9 @@ static sf_u32 dbt_standby(void)
     volatile sf_u8 *rtc = (volatile sf_u8 *)0xA413FEC0u;
     volatile sf_u16 *ksc = (volatile sf_u16 *)0xA44B0000u;
     volatile sf_u16 *iprk = (volatile sf_u16 *)0xA4080028u;
+#ifdef DBT_STANDBY_DIAG
+    sf_u32 sb_sum0, sb_sum1;
+#endif
     sf_u32 sb_t0, sb_tk0, sb_dt = 0, sb_secs = 0, sb_step0, sb_sv_mstp2 = 0, sb_sv_imr5, sb_sv_iprf, sb_probe, sb_alarm, sb_sv_al[6], sb_sv_rcr1 = 0, sb_sv_rcr3 = 0, sb_sv_imr10 = 0, sb_sv_iprk = 0, sb_sv_k[6];
     for (i = 0; i < n; i++) stub[i] = dbt_standby_stub[i];
     stub[n - 1] = RS_BLOCK;                     /* the stub's last longword: where the block is */
@@ -3263,8 +3266,21 @@ static sf_u32 dbt_standby(void)
     *(volatile sf_u8 *)(0xA40800C0u + 4 * 5) = 0x80;
     do { sb_tk0 = rtc[2]; i = rtc[0] & 0x7Fu; } while (sb_tk0 != rtc[2]);
     sb_tk0 = sb_bcd(sb_tk0 & 0x7F) * 128 + i;                                           /* 1/128 s within the minute */
+#ifdef DBT_STANDBY_DIAG
+    /* the guest's RAM summed before and after: did the SDRAM keep its contents? */
+    {
+        const volatile sf_u32 *m = (const volatile sf_u32 *)GUEST_RAM_LO;
+        for (sb_sum0 = 0, i = 0; i < (GUEST_RAM_HI - GUEST_RAM_LO) / 4; i++) sb_sum0 += m[i] ^ i;
+    }
+#endif
     onchip_save();                              /* last: nothing below writes XYRAM before the sleep */
     r = dbt_standby_sleep(block);
+#ifdef DBT_STANDBY_DIAG
+    {
+        const volatile sf_u32 *m = (const volatile sf_u32 *)GUEST_RAM_LO;
+        for (sb_sum1 = 0, i = 0; i < (GUEST_RAM_HI - GUEST_RAM_LO) / 4; i++) sb_sum1 += m[i] ^ i;
+    }
+#endif
 #ifdef DBT_STANDBY_DIAG
     /* 5: the translator's C code in SDRAM runs again; blue, or yellow if the
      * RTC alarm flag (RCR1.AF) is set, i.e. an alarm ended the standby */
@@ -3346,7 +3362,8 @@ static sf_u32 dbt_standby(void)
      *   now: IMR5 IMR10 IPRF IPRK MSTPCR0
      *   MSTPCR2 now, MSTPCR0 and MSTPCR2 at the launch (over stripe 3)
      *   rs <wake-ups the stub answered with SLEEP> sec <seconds since the entry>
-     *   EV0 and EV1 of the first of those */
+     *   EV0 and EV1 of the first of those
+     *   mem <sum of the guest's RAM before> <after> OK or BAD */
     if (r) {
         char t[48], *q;
         volatile sf_u8 *r64 = (volatile sf_u8 *)0xA413FEC0u;
@@ -3371,6 +3388,9 @@ static sf_u32 dbt_standby(void)
         diag_text(5, t);
         q = diag_hex(t, g_sb_first0, 8); q = diag_hex(q, g_sb_first1, 8); *q = 0;
         diag_text(6, t);
+        q = diag_str(t, "mem "); q = diag_hex(q, sb_sum0, 8); q = diag_hex(q, sb_sum1, 8);
+        q = diag_str(q, sb_sum0 == sb_sum1 ? "OK" : "BAD"); *q = 0;
+        diag_text(7, t);
         for (k = 0; k < 6; k++) { w = *r64; while (((*r64 - w) & 63) < 32) ; }
     }
 #endif
