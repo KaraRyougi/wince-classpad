@@ -1135,3 +1135,42 @@ low, PHCR). The STANDBY_DIAG build sums the guest's 8 MiB before and after
 and prints `mem <before> <after> OK|BAD`. Emulator: suspend 50 s, Clear,
 "mem D2495524 D2495524 OK", resumed. Calculator: pending; whether the wait
 is what the SDRAM needed is a guess until the mem line says OK there.
+
+### The OS's standby does not keep the RAM; self-refresh instead (2026-11-10)
+
+Calculator with the wait before SLEEP: the wake-up painted the stripes up
+to cyan (SDRAM controller set up, about to jump into the translator) and
+reset. The translator's code in the SDRAM was gone. The wait was the wrong
+idea; reading on showed why.
+
+After its standby loop the OS does not return to its caller. 0x80020DF0
+ends in 0x800204A8, which runs the memory resume 0x800209C4, switches to a
+fresh stack (0x8C2361D4) and enters the main loop 0x8006FA54 for ever: a
+warm restart. And 0x800209C4 is a cold SDRAM initialisation: PH6 driven,
+a settling wait, RTCSR, SDCR = 0xA09, RTCNT/RTCOR, a mode register set
+(0xFEC15040), RTCSR. Its counterpart on the way down (0x8002095E:
+RTCSR = 0xA55A0000, SDCR = 0, PLLCR bit 1 = CKO off, bus pulls, PH6
+released) stops the refresh and the clock. Nothing in it puts the SDRAM into
+self-refresh. The OS's power-off does not need the RAM's contents; what CE
+needs, it never did.
+
+That `standby.S` copied this "instruction for instruction" went unnoticed
+because every standby ended within 0.1 s (the stray wake-up), and DRAM
+cells hold that long, and mostly for tens of seconds, without refresh.
+
+The OS does have self-refresh, for its clock changes (0x80020F60,
+0x80020FC4): 0x80020F1C clears SDCR bit 9 (power-down) and sets bit 10
+(RMODE), 0x80020F3C does the reverse. The classic SH BSC layout (SDCR bit
+11 RFSH, 10 RMODE, 9 PDOWN). `standby.S` now does that from RS memory before
+SLEEP, writes it again in the standby loop, and on the way up leaves SDCR
+alone until the controller is set up (the SDCR = 0xA09 write ends the
+self-refresh). The OS's other three steps are optional (save block + 0x94:
+bit 0 CKO off, bit 1 bus pulls, bit 2 PH6): whether the SDRAM survives them
+is not known, so the STANDBY_DIAG build adds one per suspend (v 0, 1, 3, 7)
+and other builds stay at 0. EV2 is now SDCR and PLLCR as the stub finds
+them at the wake-up (is the BSC kept across R-standby?).
+
+Emulator: suspend 55 s, Clear, "v 0 ... mem OK", resumed. Calculator:
+pending. Open: whether CKE stays low while the core is off; if the mem line
+says BAD or the wake-up resets with v 0, it does not, and R-standby cannot
+keep CE's RAM on this board at all.

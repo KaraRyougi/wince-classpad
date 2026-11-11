@@ -66,13 +66,16 @@
 #define B_SSR       0x30
 #define B_EV0       0x34                /* wake evidence, read first thing in the resume stub: */
 #define B_EV1       0x38                /* EV0 = RSECCNT<<24 | R64CNT<<16 | NMIFCR, EV1 = INTREQ00<<24 | RCR1<<16 | KIUINTREG */
-#define B_EV2       0x3C                /* EV2 = STBCR */
+#define B_EV2       0x3C                /* EV2 = SDCR<<16 | PLLCR (low words) */
 #define B_SIZE      0x80
 /* third base, block + 0x80: the standby loop of the resume stub */
 #define B2_COUNT    0x00                /* wake-ups answered with another SLEEP */
 #define B2_LOOP     0x04                /* rt.c: non-zero = the loop is on */
 #define B2_EV0      0x08                /* EV0 and EV1 of the first such wake-up */
 #define B2_EV1      0x0C
+#define B2_EV2      0x10
+#define B2_VAR      0x14                /* rt.c: which of the OS's memory-standby steps follow the self-refresh:
+                                         * bit 0 PLLCR bit 1 (CKO off), bit 1 the bus pulls, bit 2 PH6 released */
 
         .text
         .align  2
@@ -189,17 +192,8 @@ _dbt_standby_sleep:
         mov.l   .Lintevt, r1
         mov     #0, r0
         mov.l   r0, @r1
-        /* The memory standby and the SLEEP run from RS memory (the tail at
-         * the end of the resume stub's blob), not from here. The OS is out of
-         * the SDRAM before it starts: 0x80020414 moves its stack to RS memory
-         * at 0xFD802000 first, its code is in ROM, and between its memory
-         * standby (0x8002095E) and its SLEEP it saves the INTC, moves pins
-         * and switches the panel off with that routine's waits. Until
-         * 2026-11-10 this went on fetching from the SDRAM and executed SLEEP
-         * a few instructions after the last pin write; every standby then
-         * ended within 0.1 s, so nobody noticed. With the standby loop the
-         * machine stayed off for 25 s for the first time and came back
-         * resetting some of the times. */
+        /* the SDRAM's self-refresh and the SLEEP run from RS memory: the
+         * tail in the resume stub's blob (.Ls_sleep_tail, see there) */
         mov.l   .Lrs_tail, r0
         jmp     @r0
         nop
@@ -324,8 +318,13 @@ _dbt_standby_stub:
         extu.w  r0, r0
         or      r0, r2
         mov.l   r2, @(B_EV1, r5)
-        mov.l   .Ls_stbcr, r1
+        mov.l   .Ls_sdcr, r1
         mov.l   @r1, r0
+        shll16  r0
+        mov.l   .Ls_pllcr, r1
+        mov.l   @r1, r2
+        extu.w  r2, r2
+        or      r2, r0
         mov.l   r0, @(B_EV2, r5)
         /* The OS's standby is a loop (02.01.7003 0x80020ED2): after every
          * wake-up it asks, from ROM with its stack in RS memory, whether
@@ -360,6 +359,8 @@ _dbt_standby_stub:
         mov.l   r2, @(B2_EV0, r6)
         mov.l   @(B_EV1, r5), r2
         mov.l   r2, @(B2_EV1, r6)
+        mov.l   @(B_EV2, r5), r2
+        mov.l   r2, @(B2_EV2, r6)
 7:      add     #1, r0
         mov.l   r0, @(B2_COUNT, r6)
         mov.w   @(0x12, r1), r0         /* KIUSTATEREG */
@@ -379,6 +380,15 @@ _dbt_standby_stub:
         mov.l   .Lq_rwtcsr, r1
         mov.l   .Lq_a507, r0
         mov.w   r0, @r1
+        /* the SDRAM in self-refresh whatever the wake-up did to SDCR */
+        mov.l   @(B_SDCR, r5), r0
+        mov.l   .Lq_fdff, r2
+        and     r2, r0
+        mov     #4, r2
+        shll8   r2
+        or      r2, r0
+        mov.l   .Lq_sdcr, r1
+        mov.l   r0, @r1
         mov.l   .Lq_bar, r1
         mov.l   .Lq_self, r0
         mov.l   r0, @r1
@@ -404,6 +414,8 @@ _dbt_standby_stub:
 .Lq_stbcr:      .long 0xA4150020
 .Lq_sr_standby: .long 0x70000000
 .Lq_sr:         .long 0x500000F0
+.Lq_fdff:       .long 0xFFFFFDFF
+.Lq_sdcr:       .long 0xFEC10044
 .Ls_resume:
         mov.l   .Ls_stbcr, r1
         mov.l   @r1, r0
@@ -429,8 +441,9 @@ _dbt_standby_stub:
 3:      STAGE   2, .Ls_yellow           /* the save block is intact */
         mov     r4, r5
         add     #B_HI, r5
-        /* OS 0x800209c4: PLLCR bits 1-2 back (here: to their saved state),
-         * SDCR = 0, the pins back, then the settling wait */
+        /* PLLCR bits 1-2 back to their saved state (OS 0x800209c4), the pins
+         * back, the settling wait. The SDRAM stays in self-refresh until
+         * SDCR is written below. */
         mov.l   .Ls_pllcr, r1
         mov.l   @r1, r0
         mov     #-7, r2                 /* ~6 */
@@ -440,20 +453,12 @@ _dbt_standby_stub:
         and     r2, r3
         or      r3, r0
         mov.l   r0, @r1
-        mov.l   .Ls_sdcr, r1            /* SDRAM: leave self-refresh */
-        mov     #0, r0
-        mov.l   r0, @r1
-        /* the OS's order: the bus pulls, PH6's data bit low, then PH6 an output again */
-        mov.l   .Ls_pulcrbsc, r1
-        mov.l   @(B_PULCR, r5), r0
-        mov.b   r0, @r1
-        mov.l   .Ls_phdr, r1
-        mov.b   @r1, r0
-        and     #0xBF, r0
-        mov.b   r0, @r1
         mov.l   .Ls_phcr, r1
         mov.l   @(B_PHCR, r5), r0
         mov.w   r0, @r1
+        mov.l   .Ls_pulcrbsc, r1
+        mov.l   @(B_PULCR, r5), r0
+        mov.b   r0, @r1
         /* wait until the RTC's 64 Hz counter moved by more than 2 (OS 0x80020a32) */
         mov.l   .Ls_r64cnt, r1
         mov.b   @r1, r2
@@ -465,7 +470,8 @@ _dbt_standby_stub:
         and     #63, r0
         cmp/gt  r3, r0
         bf      2b
-        /* SDRAM controller back to its running state (OS 0x80020a42) */
+        /* SDRAM controller back to its running state (OS 0x80020a42); the
+         * SDCR write (RMODE 0) ends the self-refresh */
         mov.l   .Ls_rtcsr, r1
         mov.l   .Ls_a55a0000, r0
         mov.l   r0, @r1
@@ -514,42 +520,71 @@ _dbt_standby_stub:
         nop
 
 /* The way down, entered from _dbt_standby_sleep with the caches off, BAR and
- * STBCR set, r8 = the save block. Memory standby, OS 0x8002095E verbatim:
- * refresh timer and SDCR off, PLLCR bit 1, bus pull-ups, PH6 released. Then
- * a wait of more than 4 steps of R64CNT (about 35 ms; the OS's way up waits
- * for more than 2 after the same pins, 0x80020A32, and its way down spends
- * far longer in the panel's power-off), then SR = MD|RB|BL with IMASK = 0
- * like the OS (0x80020EDE) and SLEEP. r0-r7 are bank 1 after the ldc. */
+ * STBCR set, r8 = the save block; it runs in RS memory because the SDRAM is
+ * not to be touched from its first instruction on.
+ *
+ * The OS's "memory standby" (0x8002095E: RTCSR = 0xA55A0000, SDCR = 0,
+ * PLLCR bit 1, PULCRBSC |= 0x12, PH6 released), which this copied until
+ * 2026-11-10, does not keep the SDRAM's contents: no refresh, no clock.
+ * The OS does not need them. After its standby loop it initialises the
+ * SDRAM from cold (0x800209C4: wait, SDCR = 0xA09, mode register set) and
+ * restarts its main loop on a new stack (0x800204A8); it never returns into
+ * what was running. With every standby over in 0.1 s the cells held; in
+ * the first 25 s one some did not (resets, freezes), after a minute or two
+ * the translator's own code was gone (reset at the jump back into SDRAM).
+ *
+ * What keeps an SDRAM alive is self-refresh, and the OS has that too, for
+ * its clock changes (0x80020F1C / 0x80020F3C): SDCR bit 9 (power-down)
+ * clear and bit 10 (RMODE) set on the way in, the reverse on the way out.
+ * That is done here. Of the OS's other steps, each only if its bit in
+ * B2_VAR is set (rt.c tries them one by one): CKO off, the bus pulls, PH6. */
         .align  2
 .Ls_sleep_tail:
+        mov     r8, r6
+        add     #0x40, r6
+        add     #0x40, r6               /* block + 0x80 */
+        mov.l   @(B2_VAR, r6), r7
         mov.l   .Lt_sdcr, r1
-        mov.l   .Lt_a55a0000, r0
-        mov.l   r0, @(4, r1)            /* RTCSR 0xFEC10048 */
-        mov     #0, r0
-        mov.l   r0, @r1                 /* SDCR 0xFEC10044 */
+        mov.l   @r1, r0
+        mov.l   .Lt_fdff, r2
+        and     r2, r0
+        mov     #4, r2
+        shll8   r2
+        or      r2, r0
+        mov.l   r0, @r1                 /* self-refresh */
+        mov     r7, r0
+        tst     #1, r0
+        bt      1f
         mov.l   .Lt_pllcr, r1
         mov.l   @r1, r0
         or      #2, r0
         mov.l   r0, @r1
+1:      mov     r7, r0
+        tst     #2, r0
+        bt      2f
         mov.l   .Lt_pulcrbsc, r1
         mov.b   @r1, r0
         or      #0x12, r0
         mov.b   r0, @r1
+2:      mov     r7, r0
+        tst     #4, r0
+        bt      3f
         mov.l   .Lt_phcr, r1
         mov.w   @r1, r0
         mov.l   .Lt_cfff, r2
         and     r2, r0
         mov.w   r0, @r1
-        mov.l   .Lt_r64cnt, r1
+3:      mov.l   .Lt_r64cnt, r1          /* more than one step of R64CNT */
         mov.b   @r1, r2
         extu.b  r2, r2
-        mov     #4, r3
-1:      mov.b   @r1, r0
+        mov     #1, r3
+4:      mov.b   @r1, r0
         extu.b  r0, r0
         sub     r2, r0
         and     #63, r0
         cmp/gt  r3, r0
-        bf      1b
+        bf      4b
+        /* SR = MD|RB|BL with IMASK = 0 like the OS (0x80020EDE); r0-r7 are bank 1 after it */
         mov.l   .Lt_sr_standby, r0
         ldc     r0, sr
         sleep
@@ -559,7 +594,7 @@ _dbt_standby_stub:
         nop
         .align  2
 .Lt_sdcr:       .long 0xFEC10044
-.Lt_a55a0000:   .long 0xA55A0000
+.Lt_fdff:       .long 0xFFFFFDFF
 .Lt_pllcr:      .long 0xA4150024
 .Lt_pulcrbsc:   .long 0xA40501C3
 .Lt_phcr:       .long 0xA405010E
@@ -718,7 +753,6 @@ _dbt_standby_stub:
 .Ls_pulcrbsc:   .long 0xA40501C3
 .Ls_phcr:       .long 0xA405010E
 .Ls_a507:       .long 0x0000A507
-.Ls_phdr:       .long 0xA405012E
 .Ls_nmifcr:     .long 0xA41400C0
 .Ls_intreq00:   .long 0xA4140024
 .Ls_rcr1:       .long 0xA413FEDC

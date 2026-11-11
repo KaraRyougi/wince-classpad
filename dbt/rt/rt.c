@@ -3127,6 +3127,7 @@ static void diag_stripe(sf_u32 stage, sf_u32 colour)
  *   7 = it ended at once even then (not an INTC-visible source at all). */
 static sf_u32 g_sb_step, g_sb_code, g_sb_last = 0xFFFFu;
 sf_u32 dbt_standby_mstp_or;     /* standby.S: MSTPCR0 bits set for the standby */
+static sf_u32 g_sb_variant, g_sb_first2;     /* which of the OS's memory-standby steps follow the self-refresh (standby.S B2_VAR) */
 static sf_u32 g_sb_resleeps, g_sb_first0, g_sb_first1;  /* the resume stub's loop: what it reported at the last wake-up */
 sf_u32 dbt_boot_mstp0, dbt_boot_mstp2;  /* main.c: MSTPCR0 and MSTPCR2 as Casio's OS left them at the launch */
 static sf_u32 sb_bcd(sf_u32 v) { return (v >> 4) * 10 + (v & 15); }
@@ -3211,6 +3212,16 @@ static sf_u32 dbt_standby(void)
     }
     /* the wake-source search: see the comment above this function */
     sb_t0 = sb_now();
+#ifdef DBT_STANDBY_DIAG
+    /* A new suspend: the next of the OS's steps on top of the self-refresh.
+     * 0 none, 1 CKO off, 3 and the bus pulls, 7 and PH6 released. A step
+     * that costs the SDRAM its contents ends in a reset, and the launcher
+     * starts again from 0; the text of the last good wake-up names the one
+     * that still held. Other builds stay at 0 until the calculator has
+     * answered. */
+    if (g_sb_last != 0xFFFFu && ((sb_t0 + 3600 - g_sb_last) % 3600) > 6 && g_sb_variant < 7) g_sb_variant = g_sb_variant * 2 + 1;
+#endif
+    block[0x94 / 4] = g_sb_variant;
     if (((sb_t0 + 3600 - g_sb_last) % 3600) > 6) { g_sb_step = 0; g_sb_code = 0; }     /* a new suspend: the OAL's loop comes back within 3 s */
     sb_probe = g_sb_step == 3 || g_sb_step == 4;
     sb_step0 = g_sb_step;
@@ -3305,7 +3316,7 @@ static sf_u32 dbt_standby(void)
     *(volatile sf_u32 *)0xA4150020u = block[(0x40 + 0x14) / 4];     /* STBCR */
     if (sb_sv_imr5 & 0x80u) *(volatile sf_u8 *)(0xA4080080u + 4 * 5) = 0x80;
     *(volatile sf_u16 *)0xA4080014u = (sf_u16)sb_sv_iprf;
-    g_sb_resleeps = block[0x80 / 4]; g_sb_first0 = block[0x88 / 4]; g_sb_first1 = block[0x8C / 4];
+    g_sb_resleeps = block[0x80 / 4]; g_sb_first0 = block[0x88 / 4]; g_sb_first1 = block[0x8C / 4]; g_sb_first2 = block[0x90 / 4];
     if (r) sb_secs = (sb_now() + 3600 - sb_t0) % 3600;
     /* the wake-source search: everything it changed back, then the verdict */
     if (sb_step0 >= 2) *(volatile sf_u32 *)0xA4150038u = sb_sv_mstp2;
@@ -3357,12 +3368,12 @@ static sf_u32 dbt_standby(void)
     if (r) { diag_stripe(7, 0x5D1C); g_diag_woke = 1; }    /* 7, steel blue: returning into the IL-memory stubs */
     /* the wake evidence as text over stripe 2, held for 3 s (photograph it):
      *   n <entries> s <step of this entry> c <verdict> dt <core off, 1/128 s>
-     *   EV <RSECCNT R64CNT NMIFCR> <INTREQ00 RCR1 KIUINTREG> STBCR <at the wake>
+     *   EV <RSECCNT R64CNT NMIFCR> <INTREQ00 RCR1 KIUINTREG> <SDCR PLLCR> at the wake
      *   now: ICR0 ICR1 INTREQ00 INTMSK00 NMIFCR RWTCSR
      *   now: IMR5 IMR10 IPRF IPRK MSTPCR0
      *   MSTPCR2 now, MSTPCR0 and MSTPCR2 at the launch (over stripe 3)
-     *   rs <wake-ups the stub answered with SLEEP> sec <seconds since the entry>
-     *   EV0 and EV1 of the first of those
+     *   rs <wake-ups the stub answered with SLEEP> sec <seconds since the entry> v <variant>
+     *   EV0, EV1 and EV2 of the first of those
      *   mem <sum of the guest's RAM before> <after> OK or BAD */
     if (r) {
         char t[48], *q;
@@ -3384,9 +3395,10 @@ static sf_u32 dbt_standby(void)
         diag_text(3, t);
         q = diag_hex(t, *(volatile sf_u32 *)0xA4150038u, 8); q = diag_hex(q, dbt_boot_mstp0, 8); q = diag_hex(q, dbt_boot_mstp2, 8); *q = 0;
         diag_text(4, t);
-        q = diag_str(t, "rs "); q = diag_hex(q, g_sb_resleeps, 8); q = diag_str(q, "sec "); q = diag_hex(q, sb_secs, 4); *q = 0;
+        q = diag_str(t, "rs "); q = diag_hex(q, g_sb_resleeps, 8); q = diag_str(q, "sec "); q = diag_hex(q, sb_secs, 4);
+        q = diag_str(q, "v "); q = diag_hex(q, g_sb_variant, 1); *q = 0;
         diag_text(5, t);
-        q = diag_hex(t, g_sb_first0, 8); q = diag_hex(q, g_sb_first1, 8); *q = 0;
+        q = diag_hex(t, g_sb_first0, 8); q = diag_hex(q, g_sb_first1, 8); q = diag_hex(q, g_sb_first2, 8); *q = 0;
         diag_text(6, t);
         q = diag_str(t, "mem "); q = diag_hex(q, sb_sum0, 8); q = diag_hex(q, sb_sum1, 8);
         q = diag_str(q, sb_sum0 == sb_sum1 ? "OK" : "BAD"); *q = 0;
