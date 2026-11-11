@@ -141,3 +141,14 @@
 ; the display driver (SRC\INC\classpad_bkl.h).
 [HKEY_CURRENT_USER\ControlPanel\BackLight]
     "AdvancedCPL"="classpad_bkl.dll"
+
+; No sound, on purpose. The image has no wave API (waveapi.dll), no audio
+; driver, no ACM codecs, no .wav files and no Sounds control panel, so
+; nothing can play; these values tell GWES and the notification engine not
+; to try either: no key clicks, no screen-tap clicks, every sound category
+; off (Mute: 1 notifications, 2 applications, 4 events), volume 0.
+[HKEY_CURRENT_USER\ControlPanel\Volume]
+    "Key"=dword:0
+    "Screen"=dword:0
+    "Mute"=dword:0
+    "Volume"=dword:0

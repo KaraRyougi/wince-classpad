@@ -1351,3 +1351,18 @@ Changed: `main` now calls `gint_world_switch(GINT_CALL(takeover_from_os))`,
 so every gint driver restores the OS's state and powers off what it had
 powered before `takeover.S` runs, the situation the old launcher started
 from. Builds (438208 bytes, hhkcheck ok); not run.
+
+### No sound (2026-11-10)
+
+Checked on the 19:10 image, because the user wants nothing of the system
+spent on sound. The OS design has no audio component: no waveapi.dll (the
+`CE_MODULES_WAVEAPI`, GSM610 and MSFILTER sections of ce.bib and of the
+registry are empty), no wave driver among the built-in drivers (AFD, SIP,
+notify, TIMESVC, Battery, ClassPadStorage), no .wav file in the image, no
+Sounds control panel (`CPLMAIN_SOUNDS` empty), no `ControlPanel\Volume` key.
+Nothing in bsp/classpad50/SRC calls PlaySound, sndPlaySound, MessageBeep or
+waveOut. So no sound can be produced and no audio thread exists. What was
+left to chance was whether GWES tries a key click or a tap click when the
+Volume key is absent (each try would be a call into an API set nobody
+serves). platform.reg now says it outright: Key 0, Screen 0, Mute 0,
+Volume 0. Needs the next image build.
