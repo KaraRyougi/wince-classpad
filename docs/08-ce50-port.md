@@ -1312,3 +1312,16 @@ upstream 38eb777) adds the 40 columns when `variant != 0x16 || variant !=
 0x52`, which is always. On a 0x16 / 0x52 panel the Luna loader's screens
 would then sit 40 columns to the right, and the boot marquee (which follows
 the OS's rule) would not line up with them. Not verified on a calculator.
+
+### Battery program: icon, debug parts removed (2026-11-10)
+
+classpad_battery.exe has an icon (battery.rc, battery.ico, drawn by
+tools/mkbatteryicon.py; preview docs/design/art/battery-icon-preview.png):
+an upright cell with a lightning bolt, the 16 standard colours, 32x32 and
+16x16 drawn separately, as CE 5.0's own shell icons are. It is the class
+icon, the window's small icon and, being the first icon resource, what the
+shell shows for the Programs shortcut. The window lost what the standby
+work had put into it: the suspend statistics and wake-up snapshot lines,
+the USB reading line and the five suspend option check boxes. The options
+are on by default in the OAL and the touch driver (classpad_pwrstat.h); the
+OAL's statistics and option I/O controls stay, unused. Not built, not run.

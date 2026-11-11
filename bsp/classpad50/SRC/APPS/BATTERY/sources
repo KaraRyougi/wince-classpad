@@ -8,4 +8,5 @@ INCLUDES=$(INCLUDES);$(_TARGETPLATROOT)\src\inc;$(_WINCEROOT)\public\common\sdk\
 TARGETLIBS= \
     $(_PROJECTROOT)\cesysgen\sdk\lib\$(_CPUINDPATH)\coredll.lib
 SOURCES= \
-    battery.cpp
+    battery.cpp \
+    battery.rc

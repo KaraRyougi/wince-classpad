@@ -1,0 +1,5 @@
+// battery.rc - the program's icon: a cell and a lightning bolt, 16 colours,
+// 32x32 and 16x16 (tools/mkbatteryicon.py draws it). The shell shows a
+// program's first icon resource for its shortcut in the Programs menu.
+#include "battery.h"
+IDI_BATTERY ICON DISCARDABLE "battery.ico"

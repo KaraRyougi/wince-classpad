@@ -3,30 +3,18 @@
 // value HKLM\Software\ClassPad\Battery "Type" (SRC\DRIVERS\BATTDRVR), which
 // the driver reads again within 10 seconds. The registry lives in RAM: the
 // choice lasts until CE is started again, platform.reg holds the default.
+// The suspend statistics, wake-up snapshots, USB reading and the five suspend
+// option check boxes this window carried while the standby was being
+// debugged (2026-11-10) are gone; the options are simply on
+// (classpad_pwrstat.h CLASSPAD_SUSPEND_OPT_DEFAULT).
 #include <windows.h>
-#include <winioctl.h>
-#include <pkfuncs.h>
-#include "classpad_pwrstat.h"
+#include "battery.h"
 
 #define BATT_REG_KEY TEXT("Software\\ClassPad\\Battery")
 #define ID_ALKALINE 100
 #define ID_NIMH     101
 #define ID_CLOSE    110
-#define ID_OPT0     120             // five check boxes: the suspend options (classpad_pwrstat.h)
-#define OPT_COUNT   5
-static const struct { DWORD bit; LPCTSTR text; } g_opt[OPT_COUNT] = {
-    { CLASSPAD_SUSPEND_OPT_PINS,  TEXT("Pins") },
-    { CLASSPAD_SUSPEND_OPT_PANEL, TEXT("Panel") },
-    { CLASSPAD_SUSPEND_OPT_ADC,   TEXT("ADC") },
-    { CLASSPAD_SUSPEND_OPT_TOUCH, TEXT("Touch") },
-    { CLASSPAD_SUSPEND_OPT_PROBE, TEXT("Probe") },
-};
-static HWND g_optBox[OPT_COUNT];
-
 static TCHAR g_line[3][96];
-static TCHAR g_susp[4][64];         // what the last suspend did (classpad_pwrstat.h)
-static TCHAR g_usb[64];             // the battery driver's "UsbDiag": cable pin and controller reading
-
 static DWORD GetType(void)
 {
     HKEY key; DWORD v = 0, type, size = sizeof v;
@@ -44,60 +32,6 @@ static void SetType(DWORD v)
         RegCloseKey(key);
     }
 }
-static void SnapLine(LPTSTR out, LPCTSTR tag, const CLASSPAD_WAKE_SNAPSHOT *p)
-{
-    wsprintf(out, TEXT("%s %02X %02X %02X %02X %04X %04X %04X %04X %04X %04X"), tag, p->rcr1, p->rcr2, p->intreq00, p->intmsk00,
-             p->kiuint, p->kiudata0, p->kiustate, p->cmstr, p->cmcsr, p->rwtcsr);
-}
-static void GetSuspendStats(void)
-{
-    CLASSPAD_SUSPEND_STATS st;
-    DWORD n = 0;
-    int i;
-    for (i = 0; i < 4; i++) g_susp[i][0] = 0;
-    memset(&st, 0, sizeof st);
-    if (!KernelIoControl(IOCTL_HAL_CLASSPAD_SUSPEND_STATS, NULL, 0, &st, sizeof st, &n) || n < sizeof st) return;
-    if (st.path == CLASSPAD_SUSPEND_PATH_NONE) {
-        lstrcpy(g_susp[0], TEXT("Suspend: none since the start"));
-        return;
-    }
-    if (st.seconds == 0xFFFFFFFF) wsprintf(g_susp[0], TEXT("Suspend %u: length unknown, woke by %s"), st.suspends, st.wokeByAlarm ? TEXT("alarm") : TEXT("Clear"));
-    else wsprintf(g_susp[0], TEXT("Suspend %u: %u s, woke by %s"), st.suspends, st.seconds, st.wokeByAlarm ? TEXT("alarm") : TEXT("Clear"));
-    if (st.path == CLASSPAD_SUSPEND_PATH_CPUSLEEP) wsprintf(g_susp[1], TEXT("CPU sleep only (standby entries %u)"), st.entries);
-    else wsprintf(g_susp[1], TEXT("Standby x%u, stray wakes %u, steps %02X"), st.entries, st.unexplained, st.hardwareOff);
-    if (st.unexplained) {
-        SnapLine(g_susp[2], TEXT("1:"), &st.first);
-        SnapLine(g_susp[3], TEXT("n:"), &st.last);
-    }
-}
-// The suspend options: the OAL holds the mask in force, the registry copy is
-// for the touch driver. Both are in RAM: after a restart the defaults are back
-// (CLASSPAD_SUSPEND_OPT_DEFAULT: Pins, Panel, ADC and Touch on).
-static DWORD GetOptions(void)
-{
-    DWORD mask = 0, n = 0;
-    KernelIoControl(IOCTL_HAL_CLASSPAD_SUSPEND_OPTIONS, NULL, 0, &mask, sizeof mask, &n);
-    return mask;
-}
-static void SetOptions(DWORD mask)
-{
-    HKEY key; DWORD disp;
-    KernelIoControl(IOCTL_HAL_CLASSPAD_SUSPEND_OPTIONS, &mask, sizeof mask, NULL, 0, NULL);
-    if (RegCreateKeyEx(HKEY_LOCAL_MACHINE, CLASSPAD_SUSPEND_REG_KEY, 0, NULL, 0, 0, NULL, &key, &disp) == ERROR_SUCCESS) {
-        RegSetValueEx(key, CLASSPAD_SUSPEND_REG_VALUE, 0, REG_DWORD, (const BYTE *)&mask, sizeof mask);
-        RegCloseKey(key);
-    }
-}
-static void GetUsbDiag(void)
-{
-    HKEY key; TCHAR text[60]; DWORD type, size = sizeof text;
-    g_usb[0] = 0; text[0] = 0;
-    if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, BATT_REG_KEY, 0, 0, &key) != ERROR_SUCCESS) return;
-    if (RegQueryValueEx(key, TEXT("UsbDiag"), NULL, &type, (LPBYTE)text, &size) != ERROR_SUCCESS || type != REG_SZ) text[0] = 0;
-    RegCloseKey(key);
-    text[59] = 0;
-    if (text[0]) { lstrcpy(g_usb, TEXT("USB ")); lstrcpy(g_usb + 4, text); }
-}
 static void Refresh(HWND w)
 {
     SYSTEM_POWER_STATUS_EX2 s;
@@ -112,8 +46,6 @@ static void Refresh(HWND w)
         lstrcpy(g_line[1], TEXT("No reading from the battery driver"));
         g_line[2][0] = 0;
     }
-    GetSuspendStats();
-    GetUsbDiag();
     InvalidateRect(w, NULL, TRUE);
 }
 static LRESULT CALLBACK WindowProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
@@ -123,15 +55,6 @@ static LRESULT CALLBACK WindowProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         CreateWindow(TEXT("BUTTON"), TEXT("Alkaline batteries"), WS_CHILD | WS_VISIBLE, 48, 110, 220, 36, w, (HMENU)ID_ALKALINE, NULL, NULL);
         CreateWindow(TEXT("BUTTON"), TEXT("Ni-MH batteries"), WS_CHILD | WS_VISIBLE, 48, 152, 220, 36, w, (HMENU)ID_NIMH, NULL, NULL);
         CreateWindow(TEXT("BUTTON"), TEXT("Close"), WS_CHILD | WS_VISIBLE, 48, 204, 220, 32, w, (HMENU)ID_CLOSE, NULL, NULL);
-        {
-            DWORD mask = GetOptions();
-            int i;
-            for (i = 0; i < OPT_COUNT; i++) {
-                g_optBox[i] = CreateWindow(TEXT("BUTTON"), g_opt[i].text, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                           4 + i * 63, 356, 62, 22, w, (HMENU)(ID_OPT0 + i), NULL, NULL);
-                if (g_optBox[i]) SendMessage(g_optBox[i], BM_SETCHECK, (mask & g_opt[i].bit) ? BST_CHECKED : BST_UNCHECKED, 0);
-            }
-        }
         SetTimer(w, 1, 5000, NULL);
         Refresh(w);
         return 0;
@@ -139,13 +62,6 @@ static LRESULT CALLBACK WindowProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     case WM_COMMAND:
         if (LOWORD(wp) == ID_ALKALINE) { SetType(0); Refresh(w); }
         if (LOWORD(wp) == ID_NIMH)     { SetType(1); Refresh(w); }
-        if (LOWORD(wp) >= ID_OPT0 && LOWORD(wp) < ID_OPT0 + OPT_COUNT) {
-            DWORD mask = 0;
-            int i;
-            for (i = 0; i < OPT_COUNT; i++)
-                if (g_optBox[i] && SendMessage(g_optBox[i], BM_GETCHECK, 0, 0) == BST_CHECKED) mask |= g_opt[i].bit;
-            SetOptions(mask);
-        }
         if (LOWORD(wp) == ID_CLOSE) DestroyWindow(w);
         return 0;
     case WM_PAINT: {
@@ -154,9 +70,6 @@ static LRESULT CALLBACK WindowProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         FillRect(dc, &r, (HBRUSH)GetStockObject(WHITE_BRUSH));
         SetBkMode(dc, TRANSPARENT);
         for (i = 0; i < 3; i++) ExtTextOut(dc, 12, 16 + i * 24, 0, NULL, g_line[i], lstrlen(g_line[i]), NULL);
-        for (i = 0; i < 4; i++) ExtTextOut(dc, 8, 246 + i * 17, 0, NULL, g_susp[i], lstrlen(g_susp[i]), NULL);
-        ExtTextOut(dc, 8, 246 + 4 * 17, 0, NULL, g_usb, lstrlen(g_usb), NULL);
-        ExtTextOut(dc, 8, 336, 0, NULL, TEXT("Next suspend also does:"), 23, NULL);
         EndPaint(w, &ps);
         return 0;
     }
@@ -168,10 +81,13 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPTSTR, int)
 {
     WNDCLASS wc; ZeroMemory(&wc, sizeof wc);
     wc.lpfnWndProc = WindowProc; wc.hInstance = inst; wc.lpszClassName = TEXT("ClasspadBattery");
+    wc.hIcon = LoadIcon(inst, MAKEINTRESOURCE(IDI_BATTERY));
     RegisterClass(&wc);
     HWND w = CreateWindow(wc.lpszClassName, TEXT("Battery"), WS_VISIBLE | WS_CAPTION | WS_SYSMENU, 0, 0,
-                          GetSystemMetrics(SM_CXSCREEN), 410, NULL, NULL, inst, NULL);
+                          GetSystemMetrics(SM_CXSCREEN), 276, NULL, NULL, inst, NULL);
     if (!w) return 1;
+    // the task bar's small icon: the 16x16 image of the same resource
+    SendMessage(w, WM_SETICON, FALSE, (LPARAM)LoadImage(inst, MAKEINTRESOURCE(IDI_BATTERY), IMAGE_ICON, 16, 16, 0));
     SetForegroundWindow(w);
     MSG m; while (GetMessage(&m, NULL, 0, 0)) { TranslateMessage(&m); DispatchMessage(&m); }
     return 0;
