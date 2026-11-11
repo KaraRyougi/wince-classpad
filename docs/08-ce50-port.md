@@ -1003,6 +1003,29 @@ SpreadCE（casio-emu，心跳采样每 2M 指令一个，`-DDBT_TRACE_BLOCKS` �
 区间，上下两处同时变（公式栏和状态栏）就整屏推送，是次要项。模拟器的系统时钟
 现在快四倍，推送线程的频率相对指令数也高了四倍，所以 LCD 一项在模拟器里偏高。
 
+**Casio 存储区（`\fls0`）只读挂载（2026-11-09，已暂存到 VM，待重建验证）。** 目标是把
+Casio 的 24 MiB 存储区挂进 CE，并在插上 USB 时只把它导出给电脑；先做只读，最终要可写。
+存储区在芯片 0x1A20000-0x385FFFF，是 Fugue（日志结构转换层）上的一个 FAT16 卷，格式与
+fx-CG100 相同（`~/Dev/cg100-flash-gc` 的资料）：242 个 128 KiB 扇区，每扇区 31 个 4 KiB 页加
+一个元数据页，DATA 记录（kind 0x11）给出逻辑簇号和版本号，同一簇取版本号最小的那份；块设备
+LBA n 是逻辑簇 n/8 的第 n%8 个 512 字节，LBA 0 是 MBR（一个 0E 分区，起始 29，49503 扇区）。
+- `SRC\INC\classpad_fugue.h`：扫描元数据建簇映射、按 LBA 读，只用字节访问；记录要
+  kind、0x0F、"ZZZ"、ECC 全对才采用。ECC 按位计算，`bsp/tests/test_fugue.c` 对真实转储
+  （`FUGUE_NOR`，默认 `~/Downloads/nor-fx-cp400.bin`）里每条记录比对过。
+- `SRC\DRIVERS\FUGUEDSK`（`fuguedsk.dll`，前缀 DSK）：只读块驱动。拒绝写打开（Storage
+  Manager 因此把 store 标成只读），`IOCTL_DISK_DEVICE_INFO` 报 `STORAGE_DEVICE_FLAG_READONLY`
+  （FATFS 只凭这个把卷挂成只读），写请求返回 `ERROR_WRITE_PROTECT`。没有卷时 Init 失败，
+  没有文件夹。
+- `platform.reg`：`Drivers\BuiltIn\ClassPadStorage` 和 profile `ClassPadStorage`，文件夹
+  `\Storage`。`classpad.bat` 设 `SYSGEN_FATFS=1`（带上 fsdmgr、mspart、fatutil、diskcache），
+  **要重新 Sysgen**；这几个模块会占 NK 的空洞，放不下时用 `extmove.txt` 挪到 EXT。
+- 模拟器：`tools/mkfugue.py -o storage.bin 文件...` 生成测试卷（只有读取器需要的记录，
+  **不能烧进真机**），`make -C dbt NKBIN=... EXTBIN=... STORAGE=storage.bin nkshot` 把它
+  （或整片转储里的存储区）放进模拟器的 NOR。
+- USB：CE 5.0 的 `usbmsfn.dll` 按 `DeviceName`（`DSK1:`）导出一个块设备，但缺 SH7305 的
+  function PDD，而且它不报写保护；casio-emu 的 ClassPad 配置没有 USB 主机（`usb.c` 里
+  `plugged()`/`pollUsb()` 对 ClassPad 直接返回）。未开始。
+
 ## 九、还没做的
 
 - 在 VM 里构建（第一次构建会暴露 SDK 的差异：头文件、`WARNISERROR`）。

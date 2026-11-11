@@ -105,6 +105,10 @@ ifeq ($(GUEST),extrom)
 EXTBIN       ?= $(BUILD)/extrom-test.bin
 endif
 EXTBIN       ?=
+# STORAGE=<file> adds Casio's storage memory (chip 0x1A20000, what the CE
+# storage driver mounts) to an emulator run's NOR: a volume from
+# tools/mkfugue.py or a 64 MiB chip dump. Needs NKBIN (an XIP image).
+STORAGE      ?=
 # make DEVICE=1 hhk: a translator without the emulator's debug port (byte
 # stores to 0xFFFFF000, undefined on the real SoC); its prints then go only to
 # the debug ring. Use a private BUILD dir so emulator builds keep their port.
@@ -189,7 +193,7 @@ RUN_SECS ?= 20
 # make DEVALL=1 GUEST=x run: the guest asks for device-aware translation of its whole code (start.S)
 GUEST_CFLAGS += $(if $(filter 1,$(DEVALL)),-DDEVAWARE_ALL,)
 define NK_PAD
-mkdir -p $(BUILD) && python3 ../tools/nkflash.py $(or $(NKBIN),-) $(NK_PADDED) $(NK_FLASH_OFF) $(if $(EXTBIN),--ext $(EXTBIN)) > $(NK_OFF_FILE) && echo "flash offset $$(cat $(NK_OFF_FILE))"
+mkdir -p $(BUILD) && python3 ../tools/nkflash.py $(or $(NKBIN),-) $(NK_PADDED) $(NK_FLASH_OFF) $(if $(EXTBIN),--ext $(EXTBIN)) $(if $(STORAGE),--fugue $(STORAGE)) > $(NK_OFF_FILE) && echo "flash offset $$(cat $(NK_OFF_FILE))"
 endef
 
 .PHONY: all clean run nkrun nkshot screenshot disasm hhk hhk-check hhk-preview hhkrun flashtest

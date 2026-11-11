@@ -1,0 +1,25 @@
+!if 0
+fuguedsk.dll - Casio's storage memory (\fls0) as a read-only block device:
+the Fugue translation layer of the NOR turned into 512-byte sectors
+(SRC\INC\classpad_fugue.h), for the Storage Manager, MSPART and FATFS to
+mount as a folder (platform.reg: profile ClassPadStorage) and, later, for
+the USB mass storage function to hand to a PC. The OS design needs FATFS
+(classpad.bat sets SYSGEN_FATFS, which brings the Storage Manager and MSPART).
+!endif
+
+TARGETNAME=fuguedsk
+TARGETTYPE=DYNLINK
+RELEASETYPE=PLATFORM
+WINCEOEM=1
+SYNCHRONIZE_DRAIN=1
+
+DLLENTRY=_DllMainCRTStartup
+DEFFILE=fuguedsk.def
+
+INCLUDES=$(INCLUDES);$(_TARGETPLATROOT)\src\inc
+
+TARGETLIBS= \
+    $(_COMMONSDKROOT)\lib\$(_CPUINDPATH)\coredll.lib
+
+SOURCES= \
+    fuguedsk.c

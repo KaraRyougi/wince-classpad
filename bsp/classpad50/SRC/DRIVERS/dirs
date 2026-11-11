@@ -1,5 +1,6 @@
 DIRS=\
     battdrvr \
     display \
+    fuguedsk \
     keybd \
     touch

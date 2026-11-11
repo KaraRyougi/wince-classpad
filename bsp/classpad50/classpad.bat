@@ -17,6 +17,10 @@ REM The battery driver (SRC\DRIVERS\BATTDRVR needs the public MDD library and
 REM coredll's battery API; the catalog item is SYSGEN_BATTERY, set here so the
 REM OS design does not have to carry it). Sysgen again after adding this.
 set SYSGEN_BATTERY=1
+REM Casio's storage memory as a folder (SRC\DRIVERS\FUGUEDSK): FATFS, which
+REM brings the Storage Manager (fsdmgr), MSPART, fatutil and diskcache. Sysgen
+REM again after adding this.
+set SYSGEN_FATFS=1
 set IMGNOKITL=1
 set IMGNODEBUGGER=1
 set IMGNOSHAREETH=1

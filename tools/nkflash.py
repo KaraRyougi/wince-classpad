@@ -3,7 +3,7 @@
 and the OAL expect them in the emulated NOR (casio-emu HLE_OSROM=<file>
 HLE_OSROM_PAD=<offset>).
 
-  nkflash.py <NK.bin|-> <out> [default-offset] [--ext EXT.bin]   -> prints the flash offset (hex)
+  nkflash.py <NK.bin|-> <out> [default-offset] [--ext EXT.bin] [--fugue storage.bin]   -> prints the flash offset (hex)
 
 A RAMIMAGE build (image start inside the guest RAM window, 0x8C000000 up) is
 written as is, padded to a multiple of 4 bytes (casio-emu copies flash files
@@ -18,6 +18,10 @@ eActivity area since 2026-11-09, docs/03) to the same flat file: casio-emu takes
 blob, so it then covers both images with erased bytes (0xFF) between them,
 which is harmless for the add-in boot (the emulated NOR is otherwise erased).
 "-" instead of NK.bin flashes only the EXT region (the extrom guest).
+
+--fugue adds Casio's storage memory at chip offset 0x1A20000 (242 sectors of
+128 KiB, what the FUGUEDSK driver mounts): a volume image from
+tools/mkfugue.py, or a 64 MiB chip dump, of which only that area is taken.
 """
 import os, struct, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -25,6 +29,8 @@ import nkbin
 
 NOR_P1 = 0x80000000
 NOR_SIZE = 0x04000000          # the fx-CP400 chip (32 MiB on the fx-CG100: its images stay below)
+FUGUE_OFF = 0x01A20000         # Casio's storage memory (classpad_fugue.h CLASSPAD_FUGUE_PA)
+FUGUE_SIZE = 242 * 0x20000
 
 
 def xip_part(path):
@@ -39,6 +45,9 @@ def main(argv):
     ext = None
     if "--ext" in args:
         i = args.index("--ext"); ext = args[i + 1]; del args[i:i + 2]
+    fugue = None
+    if "--fugue" in args:
+        i = args.index("--fugue"); fugue = args[i + 1]; del args[i:i + 2]
     if len(args) < 2:
         print(__doc__); return 2
     nk, out = args[0], args[1]
@@ -61,6 +70,16 @@ def main(argv):
         off, flat, img = xip_part(ext)
         parts.append((off, flat))
         sys.stderr.write("nkflash: EXT region 0x%08x+0x%x -> flash offset 0x%08x\n" % (img.start, img.length, off))
+    if fugue:
+        vol = open(fugue, "rb").read()
+        if len(vol) >= FUGUE_OFF + FUGUE_SIZE:
+            vol = vol[FUGUE_OFF:FUGUE_OFF + FUGUE_SIZE]
+        if len(vol) != FUGUE_SIZE:
+            sys.exit("nkflash: %s is neither a %d-byte storage volume nor a chip dump" % (fugue, FUGUE_SIZE))
+        if parts and not NOR_P1 <= img.start < NOR_P1 + NOR_SIZE:
+            sys.exit("nkflash: --fugue needs XIP images (a RAM image is copied, not flattened)")
+        parts.append((FUGUE_OFF, vol))
+        sys.stderr.write("nkflash: storage memory -> flash offset 0x%08x\n" % FUGUE_OFF)
     if not parts:
         print(__doc__); return 2
     parts.sort()

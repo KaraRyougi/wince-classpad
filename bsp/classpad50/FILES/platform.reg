@@ -152,3 +152,24 @@
     "Screen"=dword:0
     "Mute"=dword:0
     "Volume"=dword:0
+
+; Casio's storage memory (\fls0) as a folder, read-only (SRC\DRIVERS\FUGUEDSK):
+; the block driver, loaded by the device manager and announced to the Storage
+; Manager through the block driver class; MSPART finds the FAT16 partition in
+; the volume's MBR (type 0E -> FATFS in common.reg's PartitionTable) and FATFS
+; mounts it under the profile's Folder. The driver reports the device
+; read-only, which is what makes FATFS mount the volume read-only. Ioctl 4 =
+; DISK_IOCTL_INITIALIZED after Init. No volume in the flash: Init fails and
+; there is no folder.
+; @CESYSGEN IF CE_MODULES_FATFSD
+[HKEY_LOCAL_MACHINE\Drivers\BuiltIn\ClassPadStorage]
+    "Dll"="fuguedsk.dll"
+    "Prefix"="DSK"
+    "Order"=dword:2
+    "Ioctl"=dword:4
+    "Profile"="ClassPadStorage"
+    "IClass"="{A4E7EDDA-E575-4252-9D6B-4195D48BB865}"
+[HKEY_LOCAL_MACHINE\System\StorageManager\Profiles\ClassPadStorage]
+    "Name"="Casio storage memory"
+    "Folder"="Storage"
+; @CESYSGEN ENDIF CE_MODULES_FATFSD
