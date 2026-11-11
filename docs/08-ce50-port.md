@@ -1174,3 +1174,27 @@ Emulator: suspend 55 s, Clear, "v 0 ... mem OK", resumed. Calculator:
 pending. Open: whether CKE stays low while the core is off; if the mem line
 says BAD or the wake-up resets with v 0, it does not, and R-standby cannot
 keep CE's RAM on this board at all.
+
+Calculator, self-refresh build (diagnostic), first suspend, v 0:
+
+    n 0001 s 0 c 0 dt 06CC
+    023B8000 02080800 0C095000      NMIFCR 8000; INTREQ00 02, RCR1 08, KIUINTREG 0800; SDCR 0C09, PLLCR 5000
+    80C0 12AE 02 FF 8000 0000       ICR0, ICR1, INTREQ00, INTMSK00 (FF: masked), NMIFCR, RWTCSR
+    80 00 D000 0000 00203086        IMR5, IMR10, IPRF, IPRK, MSTPCR0
+    F7FFF78F 00203086 F7FFF78F      MSTPCR2 now; MSTPCR0, MSTPCR2 at the launch (identical: CE runs no extra module)
+    rs 00000000 sec 004C v 0
+    mem F7803B03 F7803B03 OK
+
+76 s off, the RAM intact, SDCR still 0x0C09 at the wake-up (the BSC keeps
+its registers across R-standby, the SDRAM stayed in self-refresh), and no
+stray wake-up at all (rs 0): the stray wake-up of every earlier entry went
+away with the OS's memory-standby steps. IPRK reads 0000: the RTC has no
+priority unless an alarm is armed.
+
+The second suspend of that run (v 1: CKO off added) only dimmed the screen
+instead of blanking it; it woke normally. With the Battery program's Panel
+option the screen went off and stayed black after the wake-up (the known
+fault of that option: the cold panel initialisation does not light the real
+panel). Cause of the dimmed screen not established. The per-suspend
+stepping is removed: v is 0 in every build, `make STANDBY_VAR=n` for
+experiments.

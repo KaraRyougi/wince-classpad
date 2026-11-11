@@ -3212,14 +3212,14 @@ static sf_u32 dbt_standby(void)
     }
     /* the wake-source search: see the comment above this function */
     sb_t0 = sb_now();
-#ifdef DBT_STANDBY_DIAG
-    /* A new suspend: the next of the OS's steps on top of the self-refresh.
-     * 0 none, 1 CKO off, 3 and the bus pulls, 7 and PH6 released. A step
-     * that costs the SDRAM its contents ends in a reset, and the launcher
-     * starts again from 0; the text of the last good wake-up names the one
-     * that still held. Other builds stay at 0 until the calculator has
-     * answered. */
-    if (g_sb_last != 0xFFFFu && ((sb_t0 + 3600 - g_sb_last) % 3600) > 6 && g_sb_variant < 7) g_sb_variant = g_sb_variant * 2 + 1;
+    /* Which of the OS's memory-standby steps follow the self-refresh
+     * (standby.S B2_VAR: 1 CKO off, 2 the bus pulls, 4 PH6 released): none,
+     * unless the build says so (make STANDBY_VAR=n). On the calculator
+     * (2026-11-10) the self-refresh alone kept the RAM for 76 s with SDCR
+     * still 0x0C09 at the wake-up and no stray wake-up at all; the suspend
+     * after it, with CKO off added, did not blank the screen. */
+#ifdef DBT_STANDBY_VAR
+    g_sb_variant = DBT_STANDBY_VAR;
 #endif
     block[0x94 / 4] = g_sb_variant;
     if (((sb_t0 + 3600 - g_sb_last) % 3600) > 6) { g_sb_step = 0; g_sb_code = 0; }     /* a new suspend: the OAL's loop comes back within 3 s */

@@ -122,6 +122,9 @@ HOST_CFLAGS  += $(if $(filter 1,$(STANDBY_DIAG)),-DDBT_STANDBY_DIAG,)
 # make STANDBY_SEARCH=1: no standby loop in the resume stub; every wake-up
 # comes back to rt.c, which steps through the wake-source suspects (rt.c).
 STANDBY_SEARCH ?= 0
+# make STANDBY_VAR=n: steps of the OS's memory standby added after the SDRAM's
+# self-refresh (bit 0 CKO off, bit 1 bus pulls, bit 2 PH6 released; rt.c).
+HOST_CFLAGS  += $(if $(STANDBY_VAR),-DDBT_STANDBY_VAR=$(STANDBY_VAR),)
 HOST_CFLAGS  += $(if $(filter 1,$(STANDBY_SEARCH)),-DDBT_STANDBY_SEARCH,)
 HOST_CFLAGS  += $(if $(filter 1,$(DEVICE)),-DDBT_NO_DEBUG_PORT -DDBT_IRQPIN_GUARD $(if $(filter 1,$(CONSOLE)),-DDBT_LCD_CONSOLE,),)
 # Code cache policy (docs/04 "Metadata on demand, second chance"):
