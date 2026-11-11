@@ -1265,3 +1265,16 @@ thing the debug output of the next image will say ("sensor set-up ...").
 Calculator, image with the sensor start-up: the read-back set-up path works,
 touch answers after a suspend with the Touch option, and so do Pins, Panel
 and ADC together. CLASSPAD_SUSPEND_OPT_DEFAULT is 0x0F from the next image.
+
+### The Luna loader as the front end (2026-11-10)
+
+`claude/winceloader-ui-design-c39f0c` (2723c77) merged: `wince.hh3` is now
+the gint program with the Windows XP Luna screens (dbt/hhk/loader.c, ui.c,
+gfx.c; docs/03, docs/design/loader-luna.html) and carries the flasher, so
+`nkflash.hh3` is gone. One conflict, dbt/Makefile (the standby switches and
+MARQUEE side by side). Its translator-side addition is rt/bootmarquee.c (the
+start screen's marquee kept moving until the display driver signs on).
+Built with this branch's translator: 437436 bytes, hhkcheck passes (the
+payload is the emulator's, at 0x8C900000). Not run: casio-emu has no
+HollyHock path, and the combination with the standby work is untested on
+the calculator.
