@@ -472,6 +472,7 @@ typedef struct {
     int lineFirst;          // first item of the line
     int content, words;     // line has items / words
     int space;              // whitespace seen since the last word
+    int spaceFont, spaceLink;   // style of that whitespace's first character
     int gap;                // vertical space owed before the next line
     int asc, desc;          // line extent around the baseline
     int maxw;               // widest line (from x0)
@@ -528,6 +529,7 @@ static hp_item *Emit(hp_lay *L, int kind, int font, int x, int w, int h, int rel
     it->y = rel;            // relative to the baseline until EndLine
     it->s = s;
     it->n = n;
+    it->lead = 0;
     return it;
 }
 
@@ -576,8 +578,9 @@ static void Block(hp_lay *L, int gap)
         L->gap = gap;
 }
 
-// places a box of width w that wraps like a word; returns its x
-static int Place(hp_lay *L, int font, int w)
+// places a box of width w that wraps like a word; returns its x and in *sp
+// the width of the space put before it on the same line (0 = none)
+static int Place(hp_lay *L, int font, int w, int *sp)
 {
     int sw = 0;
     if (L->space && L->words) {
@@ -593,21 +596,30 @@ static int Place(hp_lay *L, int font, int w)
     L->space = 0;
     L->words++;
     L->x += w;
+    if (sp)
+        *sp = sw;
     return L->x - w;
 }
 
 static void Word(hp_lay *L, int s, int n)
 {
-    int font = CurFont(L), h, a, w, x, shift = 0;
+    int font = CurFont(L), h, a, w, x, sw, shift = 0;
+    // the space before the word is underlined as the whitespace was (inside
+    // the same <a> or <u>), so a link's underline runs on between its words
+    int under = L->space && (L->spaceFont & HP_FONT_UNDERLINE) &&
+                (font & HP_FONT_UNDERLINE) && L->spaceLink == L->link;
+    hp_item *it;
     FontMetrics(L, font, &h, &a);
     w = L->m->width(L->m->ctx, font, L->d->pool + s, n);
-    x = Place(L, font, w);
+    x = Place(L, font, w, &sw);
     if (L->script > 0)
         shift = -(a * 2 / 3);
     else if (L->script < 0)
         shift = a / 4;
     Extent(L, a - shift, h - a + shift);
-    Emit(L, HP_TEXT, font, x, w, h, -a + shift, s, n);
+    it = Emit(L, HP_TEXT, font, x, w, h, -a + shift, s, n);
+    if (it && under)
+        it->lead = sw;
 }
 
 static void Text(hp_lay *L, int s, int n)
@@ -619,6 +631,10 @@ static void Text(hp_lay *L, int s, int n)
     while (i < end) {
         int j;
         if (IsWs(p[i])) {
+            if (!L->space) {
+                L->spaceFont = CurFont(L);
+                L->spaceLink = L->link;
+            }
             L->space = 1;
             i++;
             continue;
@@ -647,7 +663,7 @@ static void Image(hp_lay *L, const hp_tok *t)
         if (h < 0)
             h = ih;
     }
-    x = Place(L, CurFont(L), w);
+    x = Place(L, CurFont(L), w, NULL);
     Extent(L, h, 0);
     Emit(L, HP_IMAGE, 0, x, w, h, -h, vs, vn);
 }
@@ -1174,7 +1190,7 @@ int hp_hit(const hp_doc *d, int x, int y)
     int i;
     for (i = 0; i < d->nitem; i++) {
         const hp_item *it = &d->item[i];
-        if (it->link >= 0 && x >= it->x - 3 && x < it->x + it->w + 3 && y >= it->y - 1 && y < it->y + it->h + 1)
+        if (it->link >= 0 && x >= it->x - it->lead - 3 && x < it->x + it->w + 3 && y >= it->y - 1 && y < it->y + it->h + 1)
             return it->link;
     }
     return -1;

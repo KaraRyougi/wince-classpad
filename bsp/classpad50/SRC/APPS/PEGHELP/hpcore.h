@@ -30,6 +30,8 @@ typedef struct {
     int link;           // token index of the <a href>, -1 = not a link
     int x, y, w, h;     // document coordinates
     int s, n;           // text (HP_TEXT, HP_BULLET) or image source (HP_IMAGE)
+    int lead;           // HP_TEXT: width of the underlined space before the
+                        // word (x - lead .. x), drawn as a space in its font
 } hp_item;
 
 typedef struct {

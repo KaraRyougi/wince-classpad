@@ -232,6 +232,26 @@ static void Builtin(void)
         CHECK(t && n == 9 && t[6] == 'S', "href");
     }
     CHECK(hp_hit(d, 1, h - 1) == -1, "no link at the bottom");
+    b = FindText(d, "there");
+    CHECK(a && b && b->lead == b->x - (a->x + a->w) && b->lead > 0, "a link's underline runs over the space between its words");
+    CHECK(a && a->lead == 0, "no underline before a link");
+    if (b)
+        CHECK(hp_hit(d, b->x - 1, b->y + 1) == b->link, "the space inside a link hits it");
+    hp_free(d);
+
+    // only whitespace inside the link (or <u>) is underlined
+    d = ParseStr("x <a href=a.htm>one</a> <a href=b.htm>two</a> y <u>p q</u> <a href=c.htm>m </a>n");
+    hp_layout(d, &g_m, 320);
+    a = FindText(d, "one");
+    CHECK(a && a->lead == 0, "space before a link");
+    a = FindText(d, "two");
+    CHECK(a && a->lead == 0, "space between two links");
+    a = FindText(d, "y");
+    CHECK(a && a->lead == 0, "space after a link");
+    a = FindText(d, "q");
+    CHECK(a && a->lead > 0, "space inside <u>");
+    a = FindText(d, "n");
+    CHECK(a && a->lead == 0, "trailing link space before plain text");
     hp_free(d);
 
     // lists: bullets left of the text, nesting indents, ordered numbers
