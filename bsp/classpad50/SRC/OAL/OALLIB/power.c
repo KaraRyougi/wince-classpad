@@ -35,7 +35,7 @@ extern UINT32 ClasspadRtcSuspendSeconds(void);
 // What the last suspend did, for the Battery program (classpad_pwrstat.h)
 static CLASSPAD_SUSPEND_STATS g_stats;
 
-static DWORD g_suspendOptions;           // CLASSPAD_SUSPEND_OPT_*: nothing by default
+static DWORD g_suspendOptions = CLASSPAD_SUSPEND_OPT_DEFAULT;   // CLASSPAD_SUSPEND_OPT_*
 
 // The registers the suspend path reads anyway, always; the others (never
 // read by CE before) only with the PROBE option.

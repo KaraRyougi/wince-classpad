@@ -38,7 +38,10 @@ static void TouchBusReleaseWait(void)
     MMIO_W8(IIC0_ICSR, MMIO_R8(IIC0_ICSR) & ~ICSR_WAIT);
 }
 
-static int TouchBusRead(unsigned char *pkt, int n)
+/* Read n bytes starting at a register (or after a command byte): start,
+ * address + W, the register, repeated start, address + R, the bytes. The
+ * OS's 0x8008A77E; its one-byte form is 0x8008A6E4. */
+static int TouchBusReadReg(unsigned char reg, unsigned char *pkt, int n)
 {
     int i;
     if (!pkt || n < 1) return 0;
@@ -48,7 +51,7 @@ static int TouchBusRead(unsigned char *pkt, int n)
     if (!TouchBusWait(ICSR_DTE, ICSR_DTE, 2)) goto fail;
     MMIO_W8(IIC0_ICDR, TOUCH_IIC_ADDRESS << 1);
     if (!TouchBusWait(ICSR_WAIT, ICSR_WAIT, 3)) goto fail;
-    MMIO_W8(IIC0_ICDR, TOUCH_CMD_SNAPSHOT);
+    MMIO_W8(IIC0_ICDR, reg);
     TouchBusReleaseWait();
     if (!TouchBusWait(ICSR_WAIT, ICSR_WAIT, 4)) goto fail;
     MMIO_W8(IIC0_ICCR, ICCR_ICE | ICCR_TRS | ICCR_BBSY);
@@ -70,6 +73,37 @@ static int TouchBusRead(unsigned char *pkt, int n)
     return 1;
 fail:
     MMIO_W8(IIC0_ICCR, 0);                /* next sample starts from a known state */
+    return 0;
+}
+
+static int TouchBusRead(unsigned char *pkt, int n)
+{
+    return TouchBusReadReg(TOUCH_CMD_SNAPSHOT, pkt, n);
+}
+
+/* One register write: start, address + W, the register, the value, stop
+ * (the OS's 0x8008A690). */
+static int TouchBusWriteReg(unsigned char reg, unsigned char value)
+{
+    TouchBusReset();
+    if (!TouchBusWait(ICSR_BUSY, 0, 21)) goto fail;
+    MMIO_W8(IIC0_ICCR, ICCR_ICE | ICCR_TRS | ICCR_BBSY);
+    if (!TouchBusWait(ICSR_DTE, ICSR_DTE, 22)) goto fail;
+    MMIO_W8(IIC0_ICDR, TOUCH_IIC_ADDRESS << 1);
+    if (!TouchBusWait(ICSR_WAIT, ICSR_WAIT, 23)) goto fail;
+    MMIO_W8(IIC0_ICDR, reg);
+    TouchBusReleaseWait();
+    if (!TouchBusWait(ICSR_WAIT, ICSR_WAIT, 24)) goto fail;
+    MMIO_W8(IIC0_ICDR, value);
+    TouchBusReleaseWait();
+    if (!TouchBusWait(ICSR_WAIT, ICSR_WAIT, 25)) goto fail;
+    MMIO_W8(IIC0_ICCR, ICCR_ICE | ICCR_TRS);
+    TouchBusReleaseWait();
+    if (!TouchBusWait(ICSR_BUSY, 0, 26)) goto fail;
+    MMIO_W8(IIC0_ICCR, 0);
+    return 1;
+fail:
+    MMIO_W8(IIC0_ICCR, 0);
     return 0;
 }
 

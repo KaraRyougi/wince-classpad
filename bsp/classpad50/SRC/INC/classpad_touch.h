@@ -78,6 +78,36 @@
 #define TOUCH_CMD_START         0x02
 #define TOUCH_POWER_UP_MS       20
 
+// What the OS's touch start-up (0x8008AB30) does after that power-up, and
+// the sensor needs before it reports anything: seven or eight one-byte
+// registers written (0x8008A690: start, address, register, value, stop),
+// then the status register polled until bit 0 is clear, the command 0xA8,
+// the status polled until bit 1 is set (10 ms a poll, 20 polls, 40 on the
+// hardware variant below), the whole pass a second time from the power-down,
+// and at the end the command 0x80 (0x8008A9DC). The values: a table at
+// 0x808161E8 (bytes 0, 1, 2, 11, 12) for registers 0x00, 0x08, 0x10, 0x58,
+// 0x60; two words of the OS's RAM (0x8C1BE978, 0x8C1BE97C) for 0x18 and
+// 0x20, which CE cannot know: the driver reads all of them back from the
+// sensor while it still has the OS's set-up (classpad_touch.cpp) and
+// writes back what it read. Register 0x34 = 1 only on the hardware variant
+// that reads Port Q bit 0 low (0x800640DE).
+#define TOUCH_REG_STATUS        0x68
+#define TOUCH_STATUS_BUSY       0x01
+#define TOUCH_STATUS_DONE       0x02
+#define TOUCH_CMD_CALIBRATE     0xA8
+#define TOUCH_CMD_RUN           0x80
+#define TOUCH_CFG_REGS          { 0x00, 0x08, 0x10, 0x34, 0x18, 0x20, 0x58, 0x60 }
+#define TOUCH_CFG_OS_VALUES     { 0x20, 0xA6, 0x5A, 0x01, 0x00, 0x00, 0x52, 0x77 }   // 0x18 and 0x20: not in the ROM
+#define TOUCH_CFG_OS_KNOWN      0xC7    // bit n: entry n of the two lists is the ROM's (not 0x34, 0x18, 0x20)
+#define TOUCH_CFG_N             8
+#define TOUCH_CFG_IDX_X34       3
+#define TOUCH_CFG_IDX_X18       4
+#define TOUCH_CFG_IDX_X20       5
+#define TOUCH_VARIANT_PORT      0xA405013A      // bit 0 low: the variant with register 0x34 and the longer polls
+#define TOUCH_POLL_MS           10
+#define TOUCH_POLLS             20
+#define TOUCH_POLLS_VARIANT     40
+
 // casio-emu's stylus to raw mapping (classpadSetTouch) for the registry
 // calibration data and the hello window's annotation
 #define TOUCH_RAW_X0            0x20B

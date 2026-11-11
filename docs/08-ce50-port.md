@@ -1229,3 +1229,35 @@ blanks the panel itself before the sleep (level 0, DISPOFF, SLPIN, both
 panel kinds), so an image older than (2) is covered as well. Emulator: the
 second sequence appears after the driver's, wake-up as before. (2) and (3)
 need the next image build; (1) and (4) are in the hh3.
+
+### Suspend options on the calculator; the touch sensor's start-up (2026-11-10)
+
+With the image built from b6790c9 (panel operations through the translator)
+the calculator suspends, blanks and resumes every time. The suspend options,
+ticked one at a time: Panel resumes (the cold initialisation now lights the
+panel: its failure had been the unordered bus writes), ADC resumes, Pins
+resumes, Touch resumes with the touch panel dead. Pins, Panel and ADC are
+therefore on by default from the next image (CLASSPAD_SUSPEND_OPT_DEFAULT);
+Touch stays off until the following is confirmed.
+
+What the OS does to the sensor after powering it (touch start-up 0x8008AB30),
+and the driver did not: after PH4 low, 20 ms, command 0x02, 0xA405019E bit 5
+it writes one-byte registers (0x8008A690: start, address 0x40, register,
+value, stop):
+
+    0x00 = 0x20, 0x08 = 0xA6, 0x10 = 0x5A     table 0x808161E8, bytes 0..2
+    0x34 = 0x01                                only when Port Q bit 0 reads 0 (0x800640DE: hardware variant)
+    0x18, 0x20                                 low bytes of 0x8C1BE978 and 0x8C1BE97C in the OS's RAM
+    0x58 = 0x52, 0x60 = 0x77                   table bytes 11, 12
+
+then polls register 0x68 (0x8008A6E4) every 10 ms until bit 0 is clear,
+sends command 0xA8, polls until bit 1 is set (20 polls, 40 on the variant),
+runs the whole pass a second time starting with a power-down, and finally
+sends command 0x80 (0x8008A9DC). The driver's SensorPowerUp now does all of
+it. The two RAM values cannot be known under CE, so DdsiTouchPanelEnable
+reads the eight registers back from the sensor while it still has the OS's
+set-up and writes those values; if the read-back does not show the ROM's
+five known values the table is used and 0x18 / 0x20 are left alone.
+classpad_touch_bus.h gained TouchBusReadReg and TouchBusWriteReg. Not built,
+not run: whether the sensor allows its set-up to be read back is the first
+thing the debug output of the next image will say ("sensor set-up ...").

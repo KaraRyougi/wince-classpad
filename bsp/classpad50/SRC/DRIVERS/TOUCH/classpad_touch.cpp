@@ -17,6 +17,7 @@
 #include "intr_cfg.h"
 #include "classpad_mmio.h"
 #include "classpad_touch.h"
+#include "classpad_pwrstat.h"
 
 #define TOUCH_REG_KEY               TEXT("HARDWARE\\DEVICEMAP\\TOUCH")
 #define TOUCH_SAMPLE_RATE_LOW       50
@@ -125,18 +126,81 @@ static BOOL TouchReadPacket(UINT8 *pkt, int n)
     return FALSE;
 }
 
-// The sensor back on after a suspend, the way the OS's power-up does it
-// (classpad_touch.h): PH4 low, 20 ms, command 0x02, 0xA405019E bit 5.
+// The sensor's set-up, read back once while it still has what Casio's OS
+// wrote (DdsiTouchPanelEnable), for SensorPowerUp to write again.
+static const UINT8 g_cfgReg[TOUCH_CFG_N] = TOUCH_CFG_REGS;
+static const UINT8 g_cfgOs[TOUCH_CFG_N]  = TOUCH_CFG_OS_VALUES;
+static UINT8 g_cfg[TOUCH_CFG_N];
+static BOOL  g_cfgRead;                         // the read-back agreed with the ROM's table: g_cfg is the sensor's own
+
+static void SensorConfigCapture(void)
+{
+    UINT8 v[TOUCH_CFG_N];
+    int i;
+    BOOL ok = TRUE;
+    for (i = 0; i < TOUCH_CFG_N; i++) {
+        v[i] = 0;
+        if (!TouchBusReadReg(g_cfgReg[i], &v[i], 1)) ok = FALSE;
+    }
+    for (i = 0; i < TOUCH_CFG_N; i++)
+        if ((TOUCH_CFG_OS_KNOWN & (1 << i)) && v[i] != g_cfgOs[i]) ok = FALSE;
+    g_cfgRead = ok;
+    for (i = 0; i < TOUCH_CFG_N; i++) g_cfg[i] = ok ? v[i] : g_cfgOs[i];
+    TouchBusReset();
+    RETAILMSG(1, (TEXT("CLASSPAD TOUCH: sensor set-up %02x %02x %02x %02x %02x %02x %02x %02x (%s)\r\n"),
+                  v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7],
+                  ok ? TEXT("as the OS wrote it") : TEXT("not readable: the ROM's table is used, 0x18 and 0x20 are left alone")));
+}
+
+static BOOL SensorPollStatus(UINT8 mask, UINT8 want, int polls)
+{
+    UINT8 st = (UINT8)(want ^ mask);            // as the OS starts: not there yet
+    int i;
+    for (i = 0; i < polls; i++) {
+        if ((st & mask) == want) return TRUE;
+        if (!TouchBusReadReg(TOUCH_REG_STATUS, &st, 1)) st = (UINT8)(want ^ mask);
+        Sleep(TOUCH_POLL_MS);
+    }
+    return (st & mask) == want;
+}
+
+// The sensor back on after a suspend, the way the OS's touch start-up does
+// it (0x8008AB30, classpad_touch.h): power down, power up (PH4 low, 20 ms,
+// command 0x02, 0xA405019E bit 5), the set-up registers, status bit 0 clear,
+// command 0xA8, status bit 1 set; two such passes, then command 0x80. Until
+// 2026-11-10 this sent the 0x02 alone and the sensor came back deaf.
 static void SensorPowerUp(void)
 {
-    int tries;
+    BOOL variant = (MMIO_R8(TOUCH_VARIANT_PORT) & 1) == 0;
+    int polls = variant ? TOUCH_POLLS_VARIANT : TOUCH_POLLS;
+    int pass = 0, attempt, i;
     BOOL ok = FALSE;
-    MMIO_W8(TOUCH_PHDR, MMIO_R8(TOUCH_PHDR) & ~TOUCH_PHDR_OFF);
-    Sleep(TOUCH_POWER_UP_MS);
-    for (tries = 0; tries < 3 && !ok; tries++) ok = TouchBusCommand(TOUCH_CMD_START);
-    MMIO_W8(TOUCH_X19E, MMIO_R8(TOUCH_X19E) | TOUCH_X19E_ON);
+    for (attempt = 0; attempt < 5 && pass < 2; attempt++) {
+        TouchBusReset();
+        Sleep(TOUCH_POLL_MS);
+        MMIO_W8(TOUCH_X19E, MMIO_R8(TOUCH_X19E) & ~TOUCH_X19E_ON);
+        MMIO_W8(TOUCH_PHDR, MMIO_R8(TOUCH_PHDR) | TOUCH_PHDR_OFF);
+        Sleep(TOUCH_POLL_MS);
+        MMIO_W8(TOUCH_PHDR, MMIO_R8(TOUCH_PHDR) & ~TOUCH_PHDR_OFF);
+        Sleep(TOUCH_POWER_UP_MS);
+        ok = TouchBusCommand(TOUCH_CMD_START);
+        MMIO_W8(TOUCH_X19E, MMIO_R8(TOUCH_X19E) | TOUCH_X19E_ON);
+        for (i = 0; i < TOUCH_CFG_N; i++) {
+            if (i == TOUCH_CFG_IDX_X34 && !variant) continue;
+            if ((i == TOUCH_CFG_IDX_X18 || i == TOUCH_CFG_IDX_X20) && !g_cfgRead) continue;
+            if (!TouchBusWriteReg(g_cfgReg[i], g_cfg[i])) ok = FALSE;
+        }
+        if (!SensorPollStatus(TOUCH_STATUS_BUSY, 0, polls)) { ok = FALSE; continue; }
+        if (!TouchBusCommand(TOUCH_CMD_CALIBRATE)) ok = FALSE;
+        if (!SensorPollStatus(TOUCH_STATUS_DONE, TOUCH_STATUS_DONE, polls)) { ok = FALSE; continue; }
+        Sleep(TOUCH_POLL_MS);
+        pass++;
+    }
+    if (!TouchBusCommand(TOUCH_CMD_RUN)) ok = FALSE;
+    Sleep(TOUCH_POLL_MS);
     TouchBusReset();
-    RETAILMSG(1, (TEXT("CLASSPAD TOUCH: sensor powered up, start command %s\r\n"), ok ? TEXT("sent") : TEXT("not acknowledged")));
+    RETAILMSG(1, (TEXT("CLASSPAD TOUCH: sensor powered up, %d of 2 passes in %d attempts, %s\r\n"),
+                  pass, attempt, ok ? TEXT("every step acknowledged") : TEXT("not every step acknowledged")));
 }
 
 static BOOL PenDown(void)
@@ -158,10 +222,10 @@ static DWORD WINAPI SampleThread(LPVOID)
         if ((++optionPoll & 63) == 0) {         // the suspend options (classpad_pwrstat.h), every 64 polls
             HKEY key; DWORD v = 0, type, size = sizeof v;
             if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, TEXT("Software\\ClassPad\\Suspend"), 0, 0, &key) == ERROR_SUCCESS) {
-                if (RegQueryValueEx(key, TEXT("Options"), NULL, &type, (LPBYTE)&v, &size) != ERROR_SUCCESS || type != REG_DWORD) v = 0;
+                if (RegQueryValueEx(key, TEXT("Options"), NULL, &type, (LPBYTE)&v, &size) != ERROR_SUCCESS || type != REG_DWORD) v = CLASSPAD_SUSPEND_OPT_DEFAULT;
                 RegCloseKey(key);
-            }
-            g_powerSwitch = (v & 0x08) != 0;    // CLASSPAD_SUSPEND_OPT_TOUCH
+            } else v = CLASSPAD_SUSPEND_OPT_DEFAULT;
+            g_powerSwitch = (v & CLASSPAD_SUSPEND_OPT_TOUCH) != 0;
         }
         if (g_wakePending) {                    // resumed: nobody else uses the bus while g_suspended is set
             SensorPowerUp();
@@ -273,6 +337,7 @@ BOOL DdsiTouchPanelEnable(void)
         MMIO_W16(TOUCH_PRCR, (MMIO_R16(TOUCH_PRCR) & ~0x0C00) | 0x0C00); // PR5 input
         MMIO_W8(INTC_IMR(7), 0xF0);                 // IIC IRQs masked; status is polled
         TouchBusReset();
+        SensorConfigCapture();
         if (!g_hSampler) {
             g_quit = FALSE;
             g_hevSample = CreateEvent(NULL, TRUE, FALSE, NULL);
