@@ -67,7 +67,7 @@ Two XIP regions (config.bib, docs/03 "The EXT region")
   NK   83860000, 7.625 MiB, the eActivity area: kernel, shell, drivers,
        mfcce300.dll (SH3, as an XIP module realigned to 4 KiB sections by
        stage.py, tools/pe4k.py) and DocList.dll. Casio's OS
-       reformats the area after a Casio session, so wince.hhk writes NK.bin
+       reformats the area after a Casio session, so wince.hh3 writes NK.bin
        again then.
   EXT  80EE0000, 5 MiB, the erased hole inside Casio's OS image: Math Xpander's
        23 SH3 DLLs and MathXpander.exe as XIP modules (flag P: no CPU type
@@ -75,7 +75,7 @@ Two XIP regions (config.bib, docs/03 "The EXT region")
        its relocations are rebuilt), its help pages, keypad bitmaps and
        Start menu link as files. Casio's boots leave
        it alone (emulator: a cold boot neither checks the OS checksum that
-       covers it nor writes it), so wince.hhk writes EXT.bin once and finds it
+       covers it nor writes it), so wince.hh3 writes EXT.bin once and finds it
        identical afterwards; an OS update erases it.
   The OAL chains EXT to the kernel in OEMInit (classpad_extrom.h), so its
   modules run in place and its files appear in \Windows; without a valid

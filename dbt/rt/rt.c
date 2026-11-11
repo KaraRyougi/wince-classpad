@@ -500,6 +500,9 @@ void dbt_putc(int c)
 #ifdef DBT_LCD_CONSOLE
     lcdcon_putc(c);                 /* the panel console of DEVICE=1 builds (rt/lcdcon.c) */
 #endif
+#ifdef DBT_BOOT_MARQUEE
+    bootmarquee_putc(c);            /* the display driver's sign-on ends the start screen's marquee */
+#endif
 #ifdef DBT_TRACE_EXEC
     watch_char(c);
 #endif
@@ -514,6 +517,9 @@ void dbt_puthex(sf_u32 v)
 void dbt_halt(const char *why)
 {
     sf_u32 sr;
+#ifdef DBT_BOOT_MARQUEE
+    bootmarquee_stop();
+#endif
 #ifdef DBT_LCD_CONSOLE
     lcdcon_halt(why);                    /* take the panel back, show the last lines and the exception context */
 #endif
@@ -4530,6 +4536,9 @@ deliver:
 #endif
 #ifndef DBT_NO_TICK_SAMPLING
         sample_tick(guest_pc, where);
+#endif
+#ifdef DBT_BOOT_MARQUEE
+        bootmarquee_tick();         /* the start screen's blocks keep moving until CE draws (rt/bootmarquee.c) */
 #endif
     }
 #ifdef DBT_IRQ_ENTRY_CACHE

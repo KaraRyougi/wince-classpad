@@ -21,8 +21,8 @@ Where the image comes from (`dbt/rt/main.c`):
 1. **Flash**, at `NK_FLASH` (default P1 `0x81000000`, NOR offset 16 MiB).
    This is the layout the real device uses (the fx-CP400 chip is 64 MiB;
    offset 16 MiB is inside the erased hole of Casio's 21 MiB OS image and the
-   window runs to offset 0x13E0000, docs/03; `nkflash.hhk` programs it from
-   Casio's OS, `wince.hhk` starts the translator: `dbt/hhk`). In casio-emu
+   window runs to offset 0x13E0000, docs/03; `wince.hh3` programs it from
+   Casio's OS and starts the translator: `dbt/hhk`). In casio-emu
    the add-in window is only 2 MiB, so a CE image cannot travel inside the
    `.g3a`; instead `HLE_OSROM=<file> HLE_OSROM_PAD=<offset>` places a file
    into the emulated NOR, and `tools/nkflash.py` (run by the Makefile for

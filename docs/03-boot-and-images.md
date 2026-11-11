@@ -17,7 +17,7 @@ the equivalent flat memory image (what a loader must place at `image start`).
   `config.bib` points into the NOR at 0x81000000 (chip offset 16 MiB); code
   executes from flash, RAM holds data and the object store. casio-emu places
   the flat image with `HLE_OSROM` (`tools/nkflash.py`); on the device
-  `nkflash.hhk` programs it (below). The window is 0x81000000-0x813DFFFF,
+  `wince.hh3` programs it (below). The window is 0x81000000-0x813DFFFF,
   3.875 MiB (`NK_FLASH`/`NK_FLASH_MAX` in `dbt/Makefile`, `ROMSIZE` in
   `config.bib`); the next section says why.
 
@@ -45,7 +45,7 @@ it, so `NK_FLASH` stays 0x81000000 and the usable window ends at 0x13E0000:
 - an OS update rewrites the whole 21 MiB image and erases the window: flash
   NK again afterwards. HollyHock's patches sit below 0x920000 and in the
   last sector of the image, never in the window;
-- another OS version may lay its image out differently. `nkflash.hhk`
+- another OS version may lay its image out differently. The flasher
   therefore erases a sector only when it reads blank (all 0xFF) or the window
   already holds a CE image (ROMHDR `ECEC` at +0x40 or a `B000FF` header), and
   stops before the first erase otherwise;
@@ -64,30 +64,43 @@ it, so `NK_FLASH` stays 0x81000000 and the usable window ends at 0x13E0000:
   hhkrun` runs the device stub below the same way, and `make -C dbt
   flashtest` runs the NOR programming code against the emulator's chip model
   (`HLE_FLASH_CMD=1`).
-- **Device, HollyHock 3** (`dbt/hhk/`, `make -C dbt hhk`): two HollyHock
-  programs, plain big-endian SH ELF files the launcher copies to their
-  addresses and calls as a subroutine (HollyHock 2 copies every ALLOC section,
-  HollyHock 3's programs are linked the same way, at 0x8CFF0000):
-  - `wince.hhk` (also copied as `wince.hh3`): the stub (`hhk/launcher.c`,
-    `start.S`) in HollyHock's program window 0x8CFF0000-0x8D000000 and the
-    translator image `dbt-<guest>.bin` as a second loadable region at its own
-    link address 0x8CC80000, so the launcher's copy puts it where `loader.S`
-    would (since 2026-11-06 the region is at `HHK_PAYLOAD`, 0x8C900000, an
-    address already loaded on the board, and `takeover.S` moves it to
-    `IMAGE_BASE` 0x8C800000 once the OS is shut out). The stub checks the copy against the byte sum recorded at build
-    time, then (since 2026-11-05 the flasher is built in) looks for
-    `\fls0\NK.bin`: when the file is there it is compared with the window
-    record by record and, if it differs, erased and programmed after the
-    one EXE the stub asks for; without the file the stub boots what the
-    window holds. It says what it found (translator size, window state, CE
-    image kind) and waits for that EXE (Clear returns to HollyHock); then
+- **Device, HollyHock 3** (`dbt/hhk/`, `make -C dbt hhk`): one HollyHock 3
+  program, `wince.hh3`, a big-endian SH ELF file whose ALLOC sections the
+  launcher copies to their addresses before calling the entry. Since
+  2026-11-10 it is a gint program (gint's `libgint-cp` and `fxcp_hh3.ld` from the fxSDK sysroot): the
+  code sits in the VRAM backup area at 0x8C052800, gint drives the display,
+  keyboard and clock and reads the storage memory through POSIX calls, and
+  nothing in our code names an OS address:
+  - `wince.hh3`: the loader (`hhk/loader.c`,
+    screens in `hhk/ui.c` after `docs/design/loader-luna.html`) and the
+    translator image `dbt-<guest>.bin` as a second loadable section pinned
+    at `HHK_PAYLOAD` 0x8C900000 (`--section-start`), outside gint's regions;
+    `takeover.S` moves it to `IMAGE_BASE` 0x8C800000 once interrupts are
+    shut out. The loader checks the payload against the byte sum recorded
+    at build time, looks for `\fls0\NK.bin` and `\fls0\EXT.bin`, and offers
+    four actions in a Windows XP Luna-style menu: Flash CE Core OS (NK into
+    the hole, persistent), Flash Additional Applications (EXT into the
+    eActivity area, cleared by Casio's OS at its next start), both, or boot
+    what the flash holds. Actions whose file is missing or rejected are
+    greyed out with the reason; the status box says whether each file
+    already matches its window (compared while the menu is up), and a file
+    that matches is not written again. Flashing shows the steps (check,
+    erase N sectors, write N records, verify by comparing again), a bar for
+    the step and one for the whole job, and the time left; a failure stops
+    on an error screen that says what was and was not written. EXE (or a tap
+    on Start) runs the action, Clear (or Cancel, or the close box) returns to
+    HollyHock; a tap on an action selects it. The menu answers at once: the
+    files are compared 64 KiB at a time between reads of the keys and the
+    touch screen, Cancel and Boot stop the comparison. The start screen fades
+    in from black, and a `DEVICE=1` translator keeps its marquee moving
+    (`rt/bootmarquee.c`, on the system tick, timed by the RTC) until the
+    display driver's "CLASSPAD DDI:" line (`MARQUEE=0` leaves it still). Then
     `hhk/takeover.S` masks interrupts (IMASK=15, RB=0),
     quiets the OS's interrupt sources (TMU stopped, all INTC priorities 0 and
     sources masked, IRQ pins masked, RTC interrupts off), turns the MMU off
     with the TLB flushed, syncs the caches over the image and jumps to it.
     From there the path is the emulator's: `crt0.S`, `dbt_main` finds the
-    XIP image at `NK_FLASH`, the kernel starts. Without OS routines (below)
-    the stub boots at once, silently. A `DEVICE=1` translator also writes
+    XIP image at `NK_FLASH`, the kernel starts. A `DEVICE=1` translator also writes
     its log on the panel (`rt/lcdcon.c`: the top 96 rows, 40 columns of a
     4x8 font drawn 2x, scrolling; the DCS commands the display driver uses)
     from the takeover until the driver's "CLASSPAD DDI:" sign-on, and
@@ -98,8 +111,7 @@ it, so `NK_FLASH` stays 0x81000000 and the usable window ends at 0x13E0000:
     driver signs on with "console kept", never pushes the top 96 rows and
     pushes atomically (`HC_LCD_PUSH`), so the log stays visible beside the
     running desktop: the way to read driver messages on the device.
-  - `nkflash.hhk`: the same flasher as a tool of its own (flash without
-    booting). It writes `\fls0\NK.bin` (Platform Builder's output, copied
+  - The flasher (`hhk/nkflash.c`) writes `\fls0\NK.bin` (Platform Builder's output, copied
     to the calculator's USB storage) into the window: an XIP build has each
     record programmed at its own address (P1 address - 0x80000000), a RAM
     image goes as is to `NK_FLASH`; the same decision `tools/nkflash.py`
@@ -109,14 +121,15 @@ it, so `NK_FLASH` stays 0x81000000 and the usable window ends at 0x13E0000:
     through P2 (unlock at 0xAAA/0x554, sector erase, 32-word write buffer,
     data polling, read-back verify: `hhk/norflash.c`), with interrupts masked
     around every operation since the OS's handlers live in the chip.
-  - OS routines (`hhk/os.c`): the text output and file access come from
-    Casio's OS. HollyHock 3 programs receive a symbol table from the launcher
-    (`HHK_SYMBOL_TABLE=<hex>` in the environment, a table that starts with
-    the OS build date at 0x814FFFE0); the stub takes it when present and
-    otherwise uses the built-in addresses of OS 02.01.7002.0001 (the version
-    HollyHock 3 supports), only after the OS identifies itself as that
-    version at 0x80020028. Key input is read from the KEYSC registers
-    directly, as HollyHock's `getKey()` does.
+  - The loader's pictures and fonts are generated and committed:
+    `hhk/font_data.c` (`tools/mkbitmapfont.py c`: Tahoma and Trebuchet MS
+    hinted to 1 bit, the way XP draws them without ClearType) and
+    `hhk/art_data.c` (`tools/mkloaderart.py`: the mockup's icons, the XP
+    flag and the CE 5.0 lettering, `docs/design/art/`). `make -C dbt
+    hhk-preview` renders every screen on the host into `<build>/ui-*.ppm`.
+  - `hhk/os.c` (the OS's text output, files and KEYSC through HollyHock's
+    symbol table or the OS 02.01.7002 addresses) is left only for the
+    `lcdprobe.hh3` diagnostic.
 - **Strapped device** (route B, not pursued): a little-endian bootloader at
   physical 0 after flipping the endian strap; `docs/00-plan.md`.
 
@@ -129,14 +142,13 @@ it, so `NK_FLASH` stays 0x81000000 and the usable window ends at 0x13E0000:
    leaves the emulator-only debug port out of the translator; `hhk-check`
    confirms the `.hhk` carries the same translator bytes as the `.g3a` of
    that build and loads inside the HollyHock window). Copy
-   `dbt/build-dev/wince.hhk`, `dbt/build-dev/nkflash.hhk` and `NK.bin` to the
+   `dbt/build-dev/wince.hh3`, `NK.bin` and `EXT.bin` to the
    root of the calculator's storage (`\fls0\`). If the launcher lists only
    `.hh3` files, use the `.hh3` copies.
-3. Run `wince.hhk` from the HollyHock launcher: it reports the window, the
-   image in `NK.bin` and whether the flash already holds it, then on EXE
-   erases and programs if needed (about a minute for 2.5 MiB, "ROMHDR
-   marker: ECEC found") and hands the machine over. `nkflash.hhk` does the
-   flashing alone when that is wanted.
+3. Run `wince.hh3` from the HollyHock launcher: it shows the four actions
+   with the status of `NK.bin` and `EXT.bin`; choose one with the arrows and
+   EXE. Flashing takes about a minute for 2.5 MiB, then the start screen
+   stays until the CE display driver runs.
 4. Nothing is visible until the display driver
    starts (minutes under the translator: the Release GWES image takes about
    15 s of emulated time, so expect several real minutes); a RESET (back of
@@ -150,7 +162,7 @@ memory instead: `hhk/os.c` already has both); `hhk_takeover` leaving a
 peripheral the kernel does not expect (USB, SCIF, DMAC are left alone); the
 translator's assumptions about SH7305 registers that casio-emu models
 loosely (`docs/04` "Limits"); the window not being free on that OS version
-(`nkflash.hhk` refuses).
+(the flasher refuses).
 
 ## SH4 OAL startup checklist
 
@@ -176,9 +188,10 @@ goes into the hole: `config.bib` `NK 80EE0000 00500000`, `ext.bib.hdr`
 the images built before). EXT holds Math Xpander and mfcce300 only; Plotter-Z,
 PegHelp, the rotation programs, SH3CRT and DocList are NK modules now, so
 `NK.bin` alone is a complete system and a wiped eActivity area costs only
-Xpander. `wince.hhk` flashes NK once (found identical afterwards) and offers
-to rewrite EXT whenever `\fls0\EXT.bin` differs from the area; the Keyboard
-key at its prompt boots at once without rewriting EXT. The flasher's rule
+Xpander. `wince.hh3` flashes NK once (found identical afterwards); after a
+Casio boot has wiped the area, Flash Additional Applications (the menu's
+default when only EXT differs) rewrites EXT, and Boot Windows CE Directly
+starts without it. The flasher's rule
 "erase only blank sectors, our own image, or the eActivity volume" now applies
 the eActivity clause to the EXT window (`EXT_WINDOW_EACT`). The OAL's check
 of the region is unchanged: after Casio's format the first sector holds a
@@ -218,7 +231,7 @@ window) and sets `g_pOemGlobal->pROMChain`; `KernelFindMemory` (after
 `OEMInit` on SH, `mdsh3.c`) appends the NK region, and the loader and the ROM
 file system walk the chain, so EXT's modules run in place and its files
 appear in `\Windows`. Without a valid region the OAL says so and CE boots
-without them. `wince.hhk` / `nkflash.hhk` (NK_WINDOW=eact) flash
+without them. `wince.hh3` (NK_WINDOW=eact) flashes
 `\fls0\EXT.bin` there next to `NK.bin` (window table in `hhk/nkflash.c`),
 only when it differs; the translator keeps EXT's blocks over whole-cache
 flushes like NK's (`rom2_lo/hi`). In the emulator `EXTBIN=` adds a region to
@@ -308,7 +321,7 @@ hand-over note). Results:
    a one-word change.
 4. **Translator side** (done, default unchanged): `make -C dbt
    NK_WINDOW=eact ...` sets `NK_FLASH` 0x83860000 and `NK_FLASH_MAX`
-   0x7A0000 for the translator, `wince.hhk`, `nkflash.hhk` and the `nkxip`
+   0x7A0000 for the translator, `wince.hh3` and the `nkxip`
    test guest (which passes at that address: `make NK_WINDOW=eact
    GUEST=nkxip nkrun`); `tools/nkflash.py` accepts P1 addresses up to the
    64 MiB chip. `config.bib` carries the alternative `ROMSTART=83860000
@@ -346,12 +359,12 @@ OS boots:
 
 1. keep `NK.bin` as a file in `\fls0\` (the 24 MiB storage volume);
 2. `make -C dbt NK_WINDOW=eact DEVICE=1 BUILD=build-eact hhk` builds
-   `wince.hhk` and `nkflash.hhk` for `NK_FLASH` 0x83860000 (image built with
+   `wince.hh3` for `NK_FLASH` 0x83860000 (image built with
    `ROMSTART=83860000 ROMSIZE=007A0000`); with `NK_WINDOW=eact` the flasher
    also treats a Fugue volume in the window (the `Fugue FAT File System`
    header at +0x2020) as erasable, so it works on a freshly reformatted
    area;
-3. from HollyHock: `wince.hhk` (it flashes `NK.bin` first, about a minute
+3. from HollyHock: `wince.hh3` (it flashes `NK.bin` first, about a minute
    for 7 MB: 56 sector erases plus programming, then boots);
 4. after a RESET, Casio's OS finds the volume invalid, erases the 61 sectors
    and formats it again: the image is gone, the eActivity application works

@@ -7,7 +7,7 @@
 //  g_pOemGlobal->pROMChain, so its modules run in place from the NOR and its
 //  files appear in \Windows like the NK region's. Casio's OS reformats the
 //  area at every boot that finds it holding something else, so the region
-//  is often gone when CE starts (wince.hhk reflashes it unless told not to),
+//  is often gone when CE starts (wince.hh3 reflashes it unless told not to),
 //  and then CE boots without it. Until 2026-11-09 the regions were the other
 //  way round (NK in the eActivity area, EXT in the hole of Casio's OS image).
 //

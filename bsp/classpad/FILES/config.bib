@@ -3,12 +3,12 @@
 ;   NK  83860000, 7.625 MiB: the eActivity area (chip 0x3860000-0x3FFFFFF),
 ;       where the translator boots it (dbt/Makefile NK_WINDOW=eact, NK_FLASH).
 ;       Casio's OS reformats that area at every boot that finds it holding
-;       something else, so wince.hhk writes \fls0\NK.bin again after each
+;       something else, so wince.hh3 writes \fls0\NK.bin again after each
 ;       Casio session (docs/03).
 ;   EXT 80EE0000, 5 MiB: the erased hole inside Casio's 21 MiB OS image (chip
 ;       0x0EE0000-0x13E0000), which the OS never writes after an update: Math
 ;       Xpander and anything else that does not change with the BSP. The OAL
-;       chains it to the kernel (OEMInit, classpad_extrom.h); wince.hhk writes
+;       chains it to the kernel (OEMInit, classpad_extrom.h); wince.hh3 writes
 ;       \fls0\EXT.bin there only when it differs (docs/03 "The EXT region").
 ; makeimg writes one .bin per region: NK.bin and EXT.bin. The translator, the
 ; flashers and the OAL hold the same addresses (dbt/Makefile NK_FLASH and

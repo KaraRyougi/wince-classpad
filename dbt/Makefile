@@ -56,7 +56,7 @@ HOST_CFLAGS  := -mb -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-sta
 GUEST_CFLAGS := -ml -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables -Wall \
                 -DGUEST_RAM_LO=$(GUEST_RAM_LO)u -DGUEST_RAM_HI=$(GUEST_RAM_HI)u -DGUEST_LINK=$(GUEST_LINK)u -DMAX_BLOCKS=$(BLOCKS)
 
-RT_SRC := rt/crt0.S rt/stubs.S rt/standby.S rt/main.c rt/rt.c rt/kdev.c rt/lcdcon.c rt/irqpins.c rt/nkbin.c rt/bench.c bench/loops.S src/sh4dec.c src/sh4emit.c src/translate.c \
+RT_SRC := rt/crt0.S rt/stubs.S rt/standby.S rt/main.c rt/rt.c rt/kdev.c rt/lcdcon.c rt/bootmarquee.c rt/irqpins.c rt/nkbin.c rt/bench.c bench/loops.S src/sh4dec.c src/sh4emit.c src/translate.c \
           ../fpuemu/src/fpuemu.c ../fpuemu/src/softfloat.c
 
 # A Windows CE .bin to run instead of the embedded guest, placed in the emulated
@@ -78,7 +78,7 @@ NKBIN       ?=
 # before that date, NK in the eActivity area and EXT in the hole. NK_FLASH is
 # the NK offset as a P1 address; NK_FLASH_OFF/NK_FLASH_MAX can also be given
 # directly (an emulator run of a 7 MiB image linked at 0x81000000:
-# NK_FLASH_OFF=0x01000000 NK_FLASH_MAX=0x00800000). wince.hhk/nkflash.hhk
+# NK_FLASH_OFF=0x01000000 NK_FLASH_MAX=0x00800000). wince.hh3
 # flash \fls0\NK.bin and \fls0\EXT.bin into the two windows; the *_WINDOW_EACT
 # define tells them which window is the eActivity volume (theirs to erase).
 # EXTBIN=<EXT.bin> adds the EXT region to an emulator run's NOR; the
@@ -126,7 +126,10 @@ STANDBY_SEARCH ?= 0
 # self-refresh (bit 0 CKO off, bit 1 bus pulls, bit 2 PH6 released; rt.c).
 HOST_CFLAGS  += $(if $(STANDBY_VAR),-DDBT_STANDBY_VAR=$(STANDBY_VAR),)
 HOST_CFLAGS  += $(if $(filter 1,$(STANDBY_SEARCH)),-DDBT_STANDBY_SEARCH,)
-HOST_CFLAGS  += $(if $(filter 1,$(DEVICE)),-DDBT_NO_DEBUG_PORT -DDBT_IRQPIN_GUARD $(if $(filter 1,$(CONSOLE)),-DDBT_LCD_CONSOLE,),)
+# DEVICE=1 also keeps the loader's start-screen marquee moving until the CE
+# display driver signs on (rt/bootmarquee.c); MARQUEE=0 leaves it still.
+MARQUEE ?= 1
+HOST_CFLAGS  += $(if $(filter 1,$(DEVICE)),-DDBT_NO_DEBUG_PORT -DDBT_IRQPIN_GUARD $(if $(filter 1,$(MARQUEE)),-DDBT_BOOT_MARQUEE,) $(if $(filter 1,$(CONSOLE)),-DDBT_LCD_CONSOLE,),)
 # Code cache policy (docs/04 "Metadata on demand, second chance"):
 # LAZY_META=1 keeps no recovery metadata for ROM blocks until an exception
 # lands in one (the block is translated again to rebuild it); SECOND_CHANCE=1
@@ -189,7 +192,7 @@ define NK_PAD
 mkdir -p $(BUILD) && python3 ../tools/nkflash.py $(or $(NKBIN),-) $(NK_PADDED) $(NK_FLASH_OFF) $(if $(EXTBIN),--ext $(EXTBIN)) > $(NK_OFF_FILE) && echo "flash offset $$(cat $(NK_OFF_FILE))"
 endef
 
-.PHONY: all clean run nkrun nkshot screenshot disasm hhk hhk-check hhkrun flashtest
+.PHONY: all clean run nkrun nkshot screenshot disasm hhk hhk-check hhk-preview hhkrun flashtest
 
 IMG := $(BUILD)/dbt-$(GUEST)
 
@@ -225,7 +228,7 @@ DEVALL_STAMP := $(BUILD)/.devall-$(if $(filter 1,$(DEVALL)),1,0)
 $(DEVALL_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.devall-*
 	touch $@
-LAYOUT_STAMP := $(BUILD)/.layout-$(GUEST_RAM_LO)-$(HHK_PAYLOAD)-$(GUEST_RAM_HI)-$(IMAGE_BASE)-$(CACHE_BASE)-$(CACHE_SIZE)-$(BLOCKS)-$(ARENA_KB)-$(NK_FLASH)-$(NK_FLASH_MAX)-$(EXT_FLASH)-$(DEVICE)-$(CONSOLE)-$(IRQPINS)-$(LAZY_META)$(SECOND_CHANCE)$(KDEV)$(HASH_TAG)$(TLB_REFILL)$(FAST_HELPERS)-$(HASH_ENTRIES)
+LAYOUT_STAMP := $(BUILD)/.layout-$(GUEST_RAM_LO)-$(HHK_PAYLOAD)-$(GUEST_RAM_HI)-$(IMAGE_BASE)-$(CACHE_BASE)-$(CACHE_SIZE)-$(BLOCKS)-$(ARENA_KB)-$(NK_FLASH)-$(NK_FLASH_MAX)-$(EXT_FLASH)-$(DEVICE)-$(CONSOLE)-$(MARQUEE)-$(IRQPINS)-$(LAZY_META)$(SECOND_CHANCE)$(KDEV)$(HASH_TAG)$(TLB_REFILL)$(FAST_HELPERS)-$(HASH_ENTRIES)
 $(LAYOUT_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.layout-*
 	touch $@
@@ -252,7 +255,7 @@ $(BUILD)/extrom-test.bin: guest/extrom.txt guest/extrom-data.txt ../tools/mkextr
 
 # --- translator image (big-endian) ---
 # image files are named after the guest so that switching GUEST= relinks
-$(IMG).elf: $(RT_SRC) $(wildcard src/*.h) rt/guest_blob.S rt/image.ld rt/rt.h rt/nkbin.h rt/kdev.h rt/kernel_dev.h rt/kernel_dev50.h rt/ctx_offsets.h rt/lcdcon.h rt/lcdfont.h $(BUILD)/$(GUEST).bin $(LAYOUT_STAMP)
+$(IMG).elf: $(RT_SRC) $(wildcard src/*.h) rt/guest_blob.S rt/image.ld rt/rt.h rt/nkbin.h rt/kdev.h rt/kernel_dev.h rt/kernel_dev50.h rt/ctx_offsets.h rt/lcdcon.h rt/lcdfont.h rt/bootmarquee.h $(BUILD)/$(GUEST).bin $(LAYOUT_STAMP)
 	$(CC) $(HOST_CFLAGS) $(LAYOUT_LD) -DGUEST='"$(BUILD)/$(GUEST).bin"' -T rt/image.ld -o $@ $(RT_SRC) rt/guest_blob.S -lgcc
 
 $(IMG).bin: $(IMG).elf
@@ -270,12 +273,11 @@ $(IMG).g3a: $(IMG)-loader.bin
 	( dd if=/dev/zero bs=28672 count=1 2>/dev/null; cat $< ) > $@
 
 # --- HollyHock program for the real fx-CP400 (dbt/hhk, docs/03, loader/README.md) ---
-# wince.hhk: the stub (hhk/launcher.c, loaded by HollyHock at 0x8CFF0000) with
-# the translator image $(IMG).bin as a second loadable region at IMAGE_BASE;
-# the stub quiets the OS's interrupt sources and jumps into it the way the
-# .g3a launcher does (hhk/takeover.S). nkflash.hhk writes \fls0\NK.bin and
-# \fls0\EXT.bin into the NOR windows at NK_FLASH and EXT_FLASH. Both are plain
-# ELF files (also copied as .hh3).
+# wince.hh3: the calculator's loader (hhk/loader.c, a gint program that
+# HollyHock 3 starts from Casio's OS) with the translator image as a second
+# loadable section; it flashes \fls0\NK.bin and \fls0\EXT.bin into the NOR
+# windows at NK_FLASH and EXT_FLASH when asked, then hands the machine to the
+# translator (hhk/takeover.S). The only program the calculator needs.
 HHK_BASE   := 0x8CFF0000
 HHK_LIMIT  := 0x8D000000
 # Where HollyHock's own copy puts the translator payload (~64 KiB) while
@@ -299,29 +301,44 @@ $(BUILD)/lcdprobe.hh3: $(HHK_COMMON) hhk/lcdprobe.c rt/lcd_io.h hhk/hhk.ld | $(B
 	$(CC) $(HHK_CFLAGS) -DHHK_APP_NAME='"LCD takeover probe"' -DHHK_APP_DESC='"Step through display handoff without booting CE or flashing"' $(HHK_LD) -o $@ $(HHK_COMMON) hhk/lcdprobe.c -lgcc
 	python3 ../tools/hhkcheck.py $@
 PAYLOAD_H  := $(BUILD)/dbt-$(GUEST)-payload.h
-WINCE_HHK  := $(BUILD)/wince.hhk
-NKFLASH_HHK := $(BUILD)/nkflash.hhk
+WINCE_HHK  := $(BUILD)/wince.hh3
 
 $(PAYLOAD_H): $(IMG).bin ../tools/hhkpayload.py
 	python3 ../tools/hhkpayload.py $< > $@
 
-# wince.hhk carries the flasher too: NK.bin on the calculator is written to
-# the window when it differs from what is there, then CE boots
-HHK_FLASH := hhk/nkflash.c hhk/norflash.c
-$(WINCE_HHK): $(HHK_COMMON) $(HHK_FLASH) hhk/launcher.c hhk/takeover.S hhk/payload.S hhk/hhk.ld hhk/util.h hhk/os.h hhk/nkflash.h hhk/norflash.h $(IMG).bin $(PAYLOAD_H) $(LAYOUT_STAMP)
-	$(CC) $(HHK_CFLAGS) -include $(PAYLOAD_H) -DIMAGE='"$(IMG).bin"' $(HHK_LD) -o $@ $(HHK_COMMON) $(HHK_FLASH) hhk/launcher.c hhk/takeover.S hhk/payload.S -lgcc
-	cp $@ $(@:.hhk=.hh3)
+# wince.hh3 is a gint program for the fx-CP400 (gint's
+# libgint-cp and its HollyHock 3 linker script fxcp_hh3.ld, from the fxSDK
+# sysroot: giteapc install Lephenixnoir/gint, or fxsdk build-cp install in
+# its checkout). gint owns the display, keyboard, clock and the storage
+# memory's files; no OS addresses in our code. The program sits in the VRAM
+# backup area at 0x8C052800 (gint's layout); the translator payload is pinned
+# at HHK_PAYLOAD as before, outside gint's regions.
+GINT_LIB   := $(shell fxsdk path lib 2>/dev/null)
+GINT_CFLAGS := $(HHK_CFLAGS) -DFXCP -fstrict-volatile-bitfields -Wa,--dsp
+GINT_LD    := -T $(GINT_LIB)/fxcp_hh3.ld -L$(GINT_LIB) -Wl,--section-start=.wince.payload=$(HHK_PAYLOAD) -Wl,--no-warn-rwx-segments \
+              -Wl,--start-group -lgint-cp -lc -lopenlibm -lgcc -Wl,--end-group
+# wince.hh3 carries the flasher: NK.bin and EXT.bin on the calculator are
+# written to their windows when the chosen action asks for it, then CE boots
+HHK_FLASH := hhk/nkflash.c hhk/norflash.c hhk/util.c
+# the Luna loader's screens (hhk/ui.c, docs/design/loader-luna.html): drawing,
+# fonts and pictures; font_data.c and art_data.c are generated and committed
+# (tools/mkbitmapfont.py c, tools/mkloaderart.py; both need Pillow/freetype-py)
+HHK_UI := hhk/ui.c hhk/gfx.c hhk/font_data.c hhk/art_data.c
+$(WINCE_HHK): $(HHK_FLASH) $(HHK_UI) hhk/loader.c hhk/takeover.S hhk/payload.S hhk/util.h hhk/nkflash.h hhk/norflash.h hhk/ui.h hhk/gfx.h $(IMG).bin $(PAYLOAD_H) $(LAYOUT_STAMP)
+	$(CC) $(GINT_CFLAGS) -include $(PAYLOAD_H) -DIMAGE='"$(IMG).bin"' -o $@ hhk/loader.c $(HHK_FLASH) $(HHK_UI) hhk/takeover.S hhk/payload.S $(GINT_LD)
 
-$(NKFLASH_HHK): $(HHK_COMMON) $(HHK_FLASH) hhk/hhk.ld hhk/util.h hhk/os.h hhk/nkflash.h hhk/norflash.h $(LAYOUT_STAMP)
-	$(CC) $(HHK_CFLAGS) -DNKFLASH_STANDALONE -DHHK_APP_NAME='"CE image flasher"' -DHHK_APP_DESC='"writes fls0/NK.bin (and EXT.bin) into the NOR for Windows CE"' $(HHK_LD) -o $@ $(HHK_COMMON) $(HHK_FLASH) -lgcc
-	cp $@ $(@:.hhk=.hh3)
+hhk: $(WINCE_HHK) hhk-check
 
-hhk: $(WINCE_HHK) $(NKFLASH_HHK) hhk-check
+# the loader's screens rendered on the host with sample data: <build>/ui-*.ppm
+HOSTCC ?= cc
+$(BUILD)/uipreview: $(HHK_UI) hhk/uipreview.c hhk/util.c hhk/ui.h hhk/gfx.h hhk/util.h | $(BUILD)
+	$(HOSTCC) -DHHK_HOST -O1 -Wall -Wextra -Wno-unused-parameter -I hhk -I rt -o $@ hhk/uipreview.c $(HHK_UI) hhk/util.c
+hhk-preview: $(BUILD)/uipreview
+	$< $(BUILD)
 
 # the .hhk carries the very bytes the emulator runs (and loads where the layout says)
-hhk-check: $(WINCE_HHK) $(NKFLASH_HHK) $(IMG).g3a ../tools/hhkcheck.py
+hhk-check: $(WINCE_HHK) $(IMG).g3a ../tools/hhkcheck.py
 	python3 ../tools/hhkcheck.py $(WINCE_HHK) $(IMG).bin $(IMG).g3a $(HHK_PAYLOAD)
-	python3 ../tools/hhkcheck.py $(NKFLASH_HHK)
 
 # the same stub as a casio-emu payload: hhk_takeover (quiesce, copy, cache sync,
 # jump) runs the current guest in the emulator. make GUEST=hello hhkrun
