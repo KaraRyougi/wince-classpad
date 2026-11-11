@@ -40,7 +40,7 @@
 #define CLASSPAD_SUSPEND_OPT_PANEL      0x02    // panel deep standby, its supply and dot clock off; cold power-on after the wake-up
 #define CLASSPAD_SUSPEND_OPT_ADC        0x04    // the A/D converter's power-off set-up
 #define CLASSPAD_SUSPEND_OPT_TOUCH      0x08    // touch sensor powered down (the touch driver's part)
-#define CLASSPAD_SUSPEND_OPT_DEFAULT    0x07    // on unless set otherwise: the three the calculator came back from (2026-11-10)
+#define CLASSPAD_SUSPEND_OPT_DEFAULT    0x0F    // on unless set otherwise: all four work on the calculator (2026-11-10)
 #define CLASSPAD_SUSPEND_OPT_PROBE      0x10    // at an unexplained wake-up also read INTREQ00, INTMSK00, CMT and RWDT
 #define CLASSPAD_SUSPEND_REG_KEY        TEXT("Software\\ClassPad\\Suspend")
 #define CLASSPAD_SUSPEND_REG_VALUE      TEXT("Options")

@@ -72,7 +72,7 @@ static void GetSuspendStats(void)
 }
 // The suspend options: the OAL holds the mask in force, the registry copy is
 // for the touch driver. Both are in RAM: after a restart the defaults are back
-// (CLASSPAD_SUSPEND_OPT_DEFAULT: Pins, Panel and ADC on).
+// (CLASSPAD_SUSPEND_OPT_DEFAULT: Pins, Panel, ADC and Touch on).
 static DWORD GetOptions(void)
 {
     DWORD mask = 0, n = 0;

@@ -1261,3 +1261,7 @@ five known values the table is used and 0x18 / 0x20 are left alone.
 classpad_touch_bus.h gained TouchBusReadReg and TouchBusWriteReg. Not built,
 not run: whether the sensor allows its set-up to be read back is the first
 thing the debug output of the next image will say ("sensor set-up ...").
+
+Calculator, image with the sensor start-up: the read-back set-up path works,
+touch answers after a suspend with the Touch option, and so do Pins, Panel
+and ADC together. CLASSPAD_SUSPEND_OPT_DEFAULT is 0x0F from the next image.
