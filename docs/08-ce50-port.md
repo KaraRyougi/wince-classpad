@@ -1325,3 +1325,29 @@ work had put into it: the suspend statistics and wake-up snapshot lines,
 the USB reading line and the five suspend option check boxes. The options
 are on by default in the OAL and the touch driver (classpad_pwrstat.h); the
 OAL's statistics and option I/O controls stay, unused. Not built, not run.
+
+### Luna loader: hand-over from the OS's world (2026-11-10)
+
+Calculator, Luna `wince.hh3` (c41027f) with the 19:10 image (all four suspend
+options on by default, Battery without its debug parts): after a suspend the
+screen cannot be lit again. The same translator and the previous image
+resumed every time when started by the old HollyHock launcher. No source in
+the VM tree changed besides this branch's files, and the image differs from
+the good one only in the default mask (which the good run had set by hand)
+and the Battery program. That leaves the loader.
+
+The Luna loader called `hhk_takeover` from gint's world. gint's drivers
+change, relative to what the OS has when a HollyHock program starts: TMU
+and the six extra timers stopped and reset, RTC interrupts and priority,
+INTC, CPG state saved, PASCR.UBC = 1 (control-register writes synchronous),
+CPUOPM.INTMU = 1, SR.DSP, VBR, the DMA and I2C modules powered, the touch
+sensor configured its own way. Of these the core registers (PASCR, CPUOPM)
+return to their reset values at the first R-standby, so CE runs with one
+set before a suspend and another after it; the touch sensor's set-up, which
+the driver reads back at start to write again after a power-up, is gint's
+and not the OS's. Which of them breaks the resume is not established.
+
+Changed: `main` now calls `gint_world_switch(GINT_CALL(takeover_from_os))`,
+so every gint driver restores the OS's state and powers off what it had
+powered before `takeover.S` runs, the situation the old launcher started
+from. Builds (438208 bytes, hhkcheck ok); not run.

@@ -18,6 +18,7 @@
  * The payload is checked against the sum the build recorded (PAYLOAD_SUM/
  * PAYLOAD_SIZE from <build>/...-payload.h) so a truncated copy never runs.
  * The emulator's variant without OS or flashing is hhk/launcher.c. */
+#include <gint/gint.h>
 #include <gint/display.h>
 #include <gint/keyboard.h>
 #include <gint/rtc.h>
@@ -522,6 +523,12 @@ static int loader(void)
     return -1;                                    /* boot */
 }
 
+static u32 payload_len;
+static int takeover_from_os(void)
+{
+    hhk_takeover(payload_start, (void *)IMAGE_BASE, payload_len, IMAGE_BASE);
+}
+
 int main(void)
 {
     u32 len = (u32)(payload_end - payload_start);
@@ -534,5 +541,17 @@ int main(void)
     }
     r = loader();
     if (r >= 0) return r;
-    hhk_takeover(payload_start, (void *)IMAGE_BASE, len, IMAGE_BASE);
+    /* Hand over with the hardware as Casio's OS had it, not as gint has it:
+     * gint_world_switch puts every driver's state back (timers and the
+     * extra timers, RTC, INTC, CPG, PASCR/IRMCR, CPUOPM.INTMU, the DMA and
+     * I2C modules it powered, the touch sensor's set-up) before it calls
+     * out. The translator, the OAL's standby and the drivers that read a
+     * device's set-up back (touch, backlight) were all brought up from the
+     * OS's state, the state a HollyHock program is started in. Started
+     * straight from gint's world (until 2026-11-10) CE ran, but the first
+     * build to do so did not come back from a suspend on the calculator.
+     * The call never returns: takeover.S masks interrupts first thing. */
+    payload_len = len;
+    gint_world_switch(GINT_CALL(takeover_from_os));
+    for (;;) ;
 }
