@@ -62,6 +62,13 @@ MODULES
 FILES
     battery.lnk         $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\battery.lnk      NK   S
 
+; Casio's storage memory as a read-only folder (SRC\DRIVERS\FUGUEDSK): needs
+; FATFS in the OS design (classpad.bat SYSGEN_FATFS)
+; @CESYSGEN IF CE_MODULES_FATFSD
+MODULES
+    fuguedsk.dll        $(_FLATRELEASEDIR)\fuguedsk.dll        NK  SH
+; @CESYSGEN ENDIF CE_MODULES_FATFSD
+
 MODULES
     classpad_rotatekey.exe $(_FLATRELEASEDIR)\classpad_rotatekey.exe NK  S
 
