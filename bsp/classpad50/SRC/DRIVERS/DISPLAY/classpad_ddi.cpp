@@ -629,13 +629,12 @@ VOID ClasspadGPE::PowerHandler(BOOL bOff)
 {
     if (m_panel != LCD_PANEL_DCS) return;
     if (bOff) {
-        UCHAR level;
         m_suspended = TRUE;
         m_resumePending = FALSE;
-        level = LcdGetBacklight(m_panelNew);
-        // 0 is what the emulator reads (no RDDISBV there); anything below the
-        // OS's lowest value was not a level: come back at the OS's level 7
-        m_brightness = level >= LCD_BRIGHTNESS_USABLE ? level : LCD_BRIGHTNESS_DEFAULT;
+        // m_brightness is what the wake-up puts back: the level read once at
+        // start-up or the last one the backlight applet set. It used to be
+        // read from the panel here; on the calculator that read came back
+        // 0xFF and every wake-up ended at full brightness (2026-11-10).
         // The OS's timing (ROM 0x80038acc): the backlight dims over a few
         // frames, so DISPOFF only once it is dark (60 ms; DISPOFF right after
         // 0x51 = 0 showed the white panel for a moment), then SLPIN 60 ms

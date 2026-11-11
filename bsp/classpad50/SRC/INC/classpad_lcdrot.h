@@ -36,6 +36,17 @@
 #define CLASSPAD_ROT_PUSH_TAG   0xA5000000u
 #define CLASSPAD_ROT_PUSH_MASK  0xFF000000u
 
+// HC_LCD_PUSH, one bus operation of the panel done by the translator: r7 =
+// this tag | operation, r4 = the value. The RS pin is on the peripheral bus
+// and the data port on the external bus; the translator completes each write
+// (SYNCO) before the next, which translated guest code cannot (classpad_lcd.h).
+// A translator that knows these sets bit 1 of HC_GETSTAT index 62.
+#define CLASSPAD_LCD_OP_TAG     0xA6000000u
+#define CLASSPAD_LCD_OP_CMD     0           // RS low, r4 written, RS high
+#define CLASSPAD_LCD_OP_PARAM   1           // r4 written with RS high
+#define CLASSPAD_LCD_OP_READ    2           // one read with RS high -> r0
+#define CLASSPAD_LCD_OP_FEATURE 2           // HC_GETSTAT(62) bit
+
 CLASSPAD_ROT_INLINE unsigned ClasspadRotLogicalWidth(unsigned rot, unsigned wp, unsigned hp)
 {
     return (rot == CLASSPAD_ROT_90 || rot == CLASSPAD_ROT_270) ? hp : wp;

@@ -3154,6 +3154,37 @@ static sf_u32 dbt_standby(void)
     g_standbys++;
     dbt_puts("[dbt] R-standby\n");
     dbt_dbgring_drain();
+    /* The panel off, here as well as in the display driver's power handler.
+     * The driver's commands are translated guest stores to two buses with
+     * nothing ordering them on the pins (bsp classpad_lcd.h): on the
+     * calculator they blanked the panel on the first suspend after a start
+     * and not, or only half, on every later one (2026-11-10), and the image
+     * on the calculator may be older than the driver that sends them through
+     * HC_LCD_PUSH. Backlight level 0 (0x51 on the newer panel, the second
+     * parameter of 0xB9 on the older one, which the OS reads back and
+     * rewrites), 8 steps of R64CNT, DISPOFF, 8 steps, SLPIN: the driver's
+     * sequence, the OS's timing. Repeating it on a panel that is already
+     * asleep does nothing. The wake-up is the driver's (SLPOUT, level, DISPON). */
+    {
+        volatile sf_u8 *prdr = (volatile sf_u8 *)0xA405013Cu, *r64 = (volatile sf_u8 *)0xA413FEC0u;
+        volatile sf_u16 *port = (volatile sf_u16 *)0xB4000000u;
+        sf_u32 k, p1, p3, p4;
+        if (dbt_lcd_col0(prdr, port) == 0) {
+            dbt_lcd_select(prdr, port, 0x51); dbt_lcd_param(port, 0);
+        } else {
+            dbt_lcd_select(prdr, port, 0xB9);
+            dbt_lcd_sync(); (void)*port; dbt_lcd_sync();
+            p1 = *port; dbt_lcd_sync(); (void)*port; dbt_lcd_sync();
+            p3 = *port; dbt_lcd_sync(); p4 = *port; dbt_lcd_sync();
+            dbt_lcd_select(prdr, port, 0xB9);
+            dbt_lcd_param(port, p1 & 0xFF); dbt_lcd_param(port, 0); dbt_lcd_param(port, p3 & 0xFF); dbt_lcd_param(port, p4 & 0xFF);
+        }
+        for (k = 0; k < 2; k++) {
+            sf_u32 last = *r64 & 0x7Fu, now, el = 0, guard;
+            for (guard = 0; el < 8 && guard < 4000000u; guard++) { now = *r64 & 0x7Fu; el += (now - last) & 0x7Fu; last = now; }
+            dbt_lcd_select(prdr, port, k ? 0x10 : 0x28);
+        }
+    }
     /* The CMT is one of R-standby's wake-up sources (NMI, IRQ, CMT, KEYSC,
      * RTC). Casio's delay routine (OS 02.01.7003 0x800412F0, reached through
      * 0x80070020) is a CMT one-shot: CMCSR = 5, CMCOR, start, poll CMF, stop,
@@ -3470,7 +3501,20 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
         volatile sf_u16 *port = (volatile sf_u16 *)0xB4000000u;
         volatile sf_u8 *prdr = (volatile sf_u8 *)0xA405013Cu;
         sf_u32 top = ctx->r[5], rows = ctx->r[6], width = ctx->r[7], x1 = width - 1, y1 = top + rows - 1;
-        sf_u32 col0 = dbt_lcd_col0(prdr, port);         /* 40 on the older fx-CP400 panel (lcd_io.h) */
+        sf_u32 col0;
+        if ((ctx->r[7] & CLASSPAD_ROT_PUSH_MASK) == CLASSPAD_LCD_OP_TAG) {
+            /* One bus operation of the panel for the driver (classpad_lcd.h):
+             * the RS pin and the data port are on two buses, and only SYNCO
+             * orders the writes on the pins. */
+            switch (ctx->r[7] & 0xFFu) {
+            case CLASSPAD_LCD_OP_CMD:   dbt_lcd_select(prdr, port, ctx->r[4] & 0xFFFFu); break;
+            case CLASSPAD_LCD_OP_PARAM: dbt_lcd_param(port, ctx->r[4] & 0xFFFFu); break;
+            case CLASSPAD_LCD_OP_READ:  dbt_lcd_sync(); ctx->r[0] = *port; dbt_lcd_sync(); break;
+            default: break;
+            }
+            return RT_ACT_RESUME;
+        }
+        col0 = dbt_lcd_col0(prdr, port);                /* 40 on the older fx-CP400 panel (lcd_io.h) */
 #define DCS_CMD(c) dbt_lcd_select(prdr, port, (c))
 #define DCS_PARAM(v) dbt_lcd_param(port, (v))
         if ((ctx->r[7] & CLASSPAD_ROT_PUSH_MASK) == CLASSPAD_ROT_PUSH_TAG) {
@@ -3627,10 +3671,11 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
         case 434: v = dbt_stat.tlb_revals; break;
 #endif
         case 61: v = 1; break;         /* statistics ABI version */
-        case 62:
+        case 62:                       /* features: bit 0 tick sampling, bit 1 HC_LCD_PUSH panel operations */
 #ifndef DBT_NO_TICK_SAMPLING
             v = 1u;
 #endif
+            v |= CLASSPAD_LCD_OP_FEATURE;
             break;
 
         default: v = ctx->r[4] >= 64 ? sample_stat(ctx->r[4]) : 0u; break;

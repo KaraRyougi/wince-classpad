@@ -1198,3 +1198,34 @@ fault of that option: the cold panel initialisation does not light the real
 panel). Cause of the dimmed screen not established. The per-suspend
 stepping is removed: v is 0 in every build, `make STANDBY_VAR=n` for
 experiments.
+
+### The panel stays lit from the second suspend on: bus ordering (2026-11-10)
+
+Calculator, `wince.hh3` with self-refresh only: the first suspend after a
+start blanks the panel; the second and third leave it lit (once dimmed,
+once bright, once at the level set in the applet) while the machine is in
+fact asleep and Clear wakes it; every wake-up comes back at full
+brightness. Emulator, three suspends in one run: the driver sends RDDISBV,
+0x51 = 0, DISPOFF, SLPIN every time and SLPOUT, 0x51, DISPON at every
+wake-up. So not the driver's logic.
+
+`LcdSelect` in classpad_lcd.h is three guest stores: RS low (Port R, on the
+peripheral bus), the command (the data port, on the external bus), RS high.
+Nothing orders them on the pins: RS can be back up before the external
+write cycle has latched the command, which then arrives as data. Casio's OS
+and the translator's own LCD code put SYNCO between the steps. Translated
+for the first time the three stores are far apart; from the code cache they
+are not, which is the first-suspend-works pattern. The same explains the
+0xFF read back from RDDISBV (the wake-up level) and, most likely, the Panel
+option whose cold initialisation never lit the real panel (a table of
+commands played from a hot loop).
+
+Changes: (1) translator: HC_LCD_PUSH with r7 = CLASSPAD_LCD_OP_TAG | op
+does one command, parameter or read natively with SYNCO; HC_GETSTAT 62
+bit 1 announces it. (2) classpad_lcd.h: LcdSelect, LcdParam, LcdReadParam
+use it when the translator has it; pixels stay direct. (3) the driver's
+power-off no longer reads the level from the panel. (4) `dbt_standby()`
+blanks the panel itself before the sleep (level 0, DISPOFF, SLPIN, both
+panel kinds), so an image older than (2) is covered as well. Emulator: the
+second sequence appears after the driver's, wake-up as before. (2) and (3)
+need the next image build; (1) and (4) are in the hh3.

@@ -46,6 +46,9 @@
 #ifndef __CLASSPAD_LCD_H
 #define __CLASSPAD_LCD_H
 
+#include "classpad_hc.h"
+#include "classpad_lcdrot.h"
+
 #define LCD_PANEL_R61524    0               // fx-CG100 (registry "Panel" value)
 #define LCD_PANEL_DCS       1               // fx-CP400
 
@@ -89,10 +92,36 @@
 
 static __inline USHORT LcdSwap16(USHORT v) { return (USHORT)((v >> 8) | (v << 8)); }
 
+// Commands, parameters and reads go through the translator when it offers
+// the operation (classpad_lcdrot.h CLASSPAD_LCD_OP_*). Three stores from
+// here (RS low on the peripheral bus, the command on the external bus, RS
+// high) are not ordered on the pins: nothing waits for the external write
+// cycle before RS goes back up. Freshly translated code is slow enough for
+// it to work; once the blocks are cached it is not. On the calculator
+// (2026-11-10) the first suspend after a start blanked the panel and every
+// later one left it lit (0x51 = 0, DISPOFF and SLPIN arrived as data, or
+// some of them: "only dims"), and RDDISBV read back 0xFF. Casio's OS and
+// the translator's own pushes put SYNCO between the steps. Pixels stay
+// direct stores: consecutive external writes queue up in the bus controller.
+// Without the translator, or where a trapa is not allowed (SR.BL), the
+// stores below are all there is.
+static __inline BOOL LcdNative(void)
+{
+    static int s_native;                        // 0 not asked, 1 no, 2 yes
+    if (!ClasspadCanTrap()) return FALSE;
+    if (!s_native) s_native = (ClasspadHcGetStat(62) & CLASSPAD_LCD_OP_FEATURE) ? 2 : 1;
+    return s_native == 2;
+}
+static __inline DWORD LcdNativeOp(DWORD op, DWORD value)
+{
+    return __asm1("trapa #254", value, (DWORD)0, (DWORD)0, (DWORD)(CLASSPAD_LCD_OP_TAG | op));
+}
+
 // RS low, one 16-bit write (a register index or a command byte), RS high
 static __inline void LcdSelect(USHORT reg)
 {
     volatile UCHAR *prdr = (volatile UCHAR *)LCD_PRDR;
+    if (LcdNative()) { LcdNativeOp(CLASSPAD_LCD_OP_CMD, reg); return; }
     *prdr = (UCHAR)(*prdr & ~0x10);
     *(volatile USHORT *)LCD_DATA_PORT = LcdSwap16(reg);
     *prdr = (UCHAR)(*prdr | 0x10);
@@ -109,11 +138,16 @@ static __inline void LcdWriteReg(USHORT reg, USHORT v)
 }
 // DCS: command, then parameter bytes (one per 16-bit write)
 static __inline void LcdCommand(UCHAR cmd) { LcdSelect(cmd); }
-static __inline void LcdParam(UCHAR v)     { LcdWriteData(v); }
+static __inline void LcdParam(UCHAR v)
+{
+    if (LcdNative()) { LcdNativeOp(CLASSPAD_LCD_OP_PARAM, v); return; }
+    LcdWriteData(v);
+}
 // DCS read: after the command one dummy read, then the parameter bytes
 // (the stock OS's panel ID read, 0x8006407a)
 static __inline UCHAR LcdReadParam(void)
 {
+    if (LcdNative()) return (UCHAR)LcdNativeOp(CLASSPAD_LCD_OP_READ, 0);
     return (UCHAR)LcdSwap16(*(volatile USHORT *)LCD_DATA_PORT);
 }
 
@@ -126,8 +160,8 @@ static __inline UCHAR LcdReadParam(void)
 static __inline USHORT LcdReadId(void)
 {
     LcdCommand(LCD_DCS_RDID);
-    (void)LcdSwap16(*(volatile USHORT *)LCD_DATA_PORT);            // dummy
-    return LcdSwap16(*(volatile USHORT *)LCD_DATA_PORT);
+    (void)LcdReadParam();                                          // dummy
+    return LcdReadParam();
 }
 static __inline BOOL LcdIdIsNew(USHORT id) { return id == LCD_ID_NEW_A || id == LCD_ID_NEW_B; }
 
