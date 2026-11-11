@@ -1278,3 +1278,37 @@ Built with this branch's translator: 437436 bytes, hhkcheck passes (the
 payload is the emulator's, at 0x8C900000). Not run: casio-emu has no
 HollyHock path, and the combination with the standby work is untested on
 the calculator.
+
+### Rotation on both panel kinds: code review (2026-11-10)
+
+No emulator run (the user's choice); read through instead.
+
+The panel kind enters in exactly one way: the column window. Rows, the pixel
+stream and the 320x528 visible size are the same on both. Every place that
+writes CASET:
+
+    classpad_ddi.cpp SetWindow            + m_col0 (portrait and rotated, the paths without the translator)
+    rt.c HC_LCD_PUSH, plain form          + col0
+    rt.c HC_LCD_PUSH, rotated form        + col0 on both ends of the physical column window
+    rt/lcdcon.c window                    + col0
+    rt.c diag_stripe, diag_text           + col0
+    rt/bootmarquee.c draw                 was without it: fixed here
+    rt/standby.S .Ls_stripe (STANDBY_DIAG) without it: the stub's four stripes sit 40 columns left on the older panel; diagnostic build only, left
+
+Rotation itself is below GPE and knows nothing of the panel: RotateDisplay
+re-lays the frame out as an unrotated surface of the turned size, PushRows
+maps logical rows to a physical window (ClasspadRotWindow) and reads the
+buffer transposed (ClasspadRotOffset), by the translator's rotated
+HC_LCD_PUSH or, without it, through SetWindow. Both add the column offset
+after the mapping, so 90, 180 and 270 are right on the older panel whenever
+0 is. `bsp/tests/test_lcdrot` (mapping and windows, exhaustive): 0 failures.
+The resume repaints the whole logical screen (Dirty(0, m_nScreenHeight)), so
+a suspend while rotated comes back rotated, also after the Panel option's
+cold initialisation. The strip icon toggles 0 and 90; classpad_rotate.exe
+offers all four.
+
+Outside this repository: gint's fx-CP400 display driver (src/r61523/r61523.c,
+upstream 38eb777) adds the 40 columns when `variant != 0x16 || variant !=
+0x52`, which is always. On a 0x16 / 0x52 panel the Luna loader's screens
+would then sit 40 columns to the right, and the boot marquee (which follows
+the OS's rule) would not line up with them. Not verified on a calculator.

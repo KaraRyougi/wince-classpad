@@ -35,8 +35,11 @@ static void draw(int pos)
 {
     static const unsigned rows[BM_CHUNK_H] = BM_BLUE_ROWS;
     const unsigned x0 = BM_X + 2, x1 = BM_X + BM_W - 3, y0 = BM_Y0, y1 = BM_Y0 + BM_CHUNK_H - 1;
+    /* the older fx-CP400 panel shows GRAM columns 40..359 (lcd_io.h); the
+     * window is the only place the panel kind matters */
+    const unsigned c0 = dbt_lcd_col0(&PRDR, &PORT), wx0 = x0 + c0, wx1 = x1 + c0;
     unsigned x, r;
-    cmd(0x2A); dat(x0 >> 8); dat(x0 & 0xFF); dat(x1 >> 8); dat(x1 & 0xFF);     /* CASET */
+    cmd(0x2A); dat(wx0 >> 8); dat(wx0 & 0xFF); dat(wx1 >> 8); dat(wx1 & 0xFF); /* CASET */
     cmd(0x2B); dat(y0 >> 8); dat(y0 & 0xFF); dat(y1 >> 8); dat(y1 & 0xFF);     /* PASET */
     cmd(0x2C);                                                                 /* RAMWR */
     for (r = 0; r < BM_CHUNK_H; r++) {
