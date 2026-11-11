@@ -28,6 +28,6 @@ static const struct { sf_u16 w[4]; sf_u32 len, crc, hint; } kdev_funcs50[KDEV_FU
     { { 0x2f86, 0x2f96, 0x2fa6, 0x2fb6 }, 0xf8, 0xda2d844cu, 0x80ee5404u },   /* _DumpFrame: literal ff000008, literal ff000010, literal ff00001c */
     { { 0x2f86, 0x2f96, 0x2fa6, 0x2fb6 }, 0x134, 0xe64ba245u, 0x80eec874u },   /* _SC_CreateThread: literal fffefffb */
     { { 0x2f86, 0x2f96, 0x2fa6, 0x2fb6 }, 0x12c, 0xf0252b3fu, 0x80f10f54u },   /* _OEMCacheRangeFlush: literal ff000010 */
-    { { 0x4f22, 0x7fcc, 0x016a, 0xe204 }, 0x108, 0x22dd3a7eu, 0x80f15408u },   /* __stod: literal ff000000 */
-    { { 0x2f86, 0x2f96, 0x2fa6, 0x2fb6 }, 0x3d8, 0xf96d9807u, 0x80f15c4cu },   /* ___SH3Raise: literal fffe003f, literal fffe005f, literal fffe007f, literal fffe009f, literal fffe00ff, literal fffe011f, literal fffe013f */
+    { { 0x4f22, 0x7fcc, 0x016a, 0xe204 }, 0x108, 0x22dd3a7eu, 0x80f15490u },   /* __stod: literal ff000000 */
+    { { 0x2f86, 0x2f96, 0x2fa6, 0x2fb6 }, 0x3d8, 0xf96d9807u, 0x80f15cd4u },   /* ___SH3Raise: literal fffe003f, literal fffe005f, literal fffe007f, literal fffe009f, literal fffe00ff, literal fffe011f, literal fffe013f */
 };
