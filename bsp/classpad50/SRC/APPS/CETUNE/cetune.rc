@@ -1,0 +1,6 @@
+// cetune.rc - the program's icon: Ptune's (Xtune's fx-CG add-in icon, MIT,
+// copyright Xtune contributors). tools/mkcetuneicon.py cuts the dial out of
+// the 92x64 badge and sets it on a square of the badge's colour, 32x32 and
+// 16x16, 256 colours. The shell shows a program's first icon resource for
+// its shortcut in the Programs menu. 101 = IDI_CETUNE in cetune.c.
+101 ICON DISCARDABLE "cetune.ico"

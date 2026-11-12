@@ -615,13 +615,11 @@ ICCL/ICCH 写死 Casio/gint 的 0x29/0x22，每个阶段读 64 次 ICSR 后 `Sle
   的 `BusHz` 可改目标速率，0 = 原样使用 0x29/0x22。注意：按 bsp_cfg.h 记录的
   真机 Pphi（约为标称的 1.67 倍），Casio 的常数在 fx-CP400 上给出的是约
   650 kHz，所以默认设置下真机的 SCL 会比以前慢；若要与 Casio 一致设 BusHz=0。
-  Pphi 会在 CE 运行中改变（另一分支的超频工具 cetune 通过 OAL 的 IOCTL 改时钟并
-  重设 TMU0）：`IOCTL_HAL_CLASSPAD_PPHI` 报的是 `g_oalTimer.countsPerMSec` x4000，
-  也就是 tick 当前实际使用的计数率，开机时是 RTC 实测值，之后谁重设 TMU0 谁就
-  得更新它，这里自动跟随，不需要通知。触摸驱动在每次落笔和每次事务失败后重新
-  取 Pphi 并重算 ICCL/ICCH（每笔一次 IOCTL，不是每个采样一次）。超频工具移植到
-  classpad50 时注意：timer.c 的 `g_countsPerMSec`（恢复后 InitClock 用它）也要
-  一并更新，否则休眠恢复会退回开机时的计数率。
+  Pphi 会在 CE 运行中改变（cetune 通过 `IOCTL_HAL_CLASSPAD_CLOCK_SET` 改时钟，
+  `OALTimerRetune` 按新旧标称值之比换算实测的 TMU0 计数率）：
+  `IOCTL_HAL_CLASSPAD_PPHI` 报的是 `OALClockPphiHz()`，即当前 TMU0 计数率 x4，
+  自动跟随，不需要通知。触摸驱动在每次落笔和每次事务失败后重新取 Pphi 并重算
+  ICCL/ICCH（每笔一次 IOCTL，不是每个采样一次）。
 - 轮询：整个事务在调用线程里连续读 ICSR，不再 Sleep（16 字节的包在 393 kHz 下
   约 0.5 ms）。64 次读在快的 CPU 上不到一个字节的时间，旧写法 CPU 越快落进
   `Sleep(1)` 的阶段越多。时限改成实际时间：每 1024 次读问一次 `GetTickCount`
@@ -1559,3 +1557,46 @@ left to chance was whether GWES tries a key click or a tap click when the
 Volume key is absent (each try would be a call into an API set nobody
 serves). platform.reg now says it outright: Key 0, Screen 0, Mute 0,
 Volume 0. Needs the next image build.
+
+### CEtune: a clock tuner after Xtune (2026-11-12)
+
+`SRC\APPS\CETUNE` (Start > Programs > CEtune, `\Windows\cetune.exe`) is the
+CE counterpart of Xtune/CPtune4: FLL and PLL multipliers, the four dividers
+(Iphi, Sphi, Bphi, Pphi), Xtune's fx-CP400 limits, red zones and wait tables,
+five presets (F1 = what the loader left, F2-F5 stored by holding the button,
+`Save` writes them to `\Storage\cetune.sav` or `\cetune.sav`), a small bench
+and a pattern test of a 256 KiB block. The rules are in
+`INC\classpad_clock.h`, a plain C header without floating point shared with
+the OAL and tested on the host (`bsp/tests/test_clock.c`).
+
+The program writes no register. `IOCTL_HAL_CLASSPAD_CLOCK_GET` returns the
+current and the boot setting and Pphi as the OAL keeps time by it;
+`IOCTL_HAL_CLASSPAD_CLOCK_SET` takes FLLFRQ, FRQCR, CS0WCR.WR and CS3WCR.TRC
+(nothing else of those registers), and with interrupts off sets the slowest
+waits, switches (KICK, LSTATS), sets the requested waits and calls
+`OALTimerRetune`. Pphi changes by an exact ratio of integers, so the TMU0
+rate measured against the RTC at boot is scaled by it rather than measured
+again (125 ms with the timer stopped): the open period is closed at the old
+rate, `curCounts` and the idle total are rescaled, the tick restarts with a
+1 ms period. `InitClock` now also asks `OALClockChanged()`: a resume that
+comes back with other multipliers or dividers than the OAL last saw is
+measured again like a boot. Drivers that derive a rate from Pphi (the IIC
+bus of the touch sensor) read `OALClockPphiHz()` (timer.c), `IOCTL_HAL_CLASSPAD_PPHI` or the GET IOCTL.
+
+Unlike Xtune a step only edits a target (the dial shows the applied setting
+as a dashed needle); `Apply` writes it and the previous setting returns
+unless `Keep` is pressed within ten seconds. The window is drawn for the
+320 x 528 portrait screen with fills, lines and one 11 px font; in the
+rotated (landscape) mode the lower bands do not fit.
+
+The icon is Ptune's (Xtune's `assets-cg/icon-uns.png`, MIT): an add-in icon
+is a wide badge, so `tools/mkcetuneicon.py` cuts the dial out and sets it on
+a square of the badge's colour, 32x32 and 16x16 with 256 colours
+(`cetune.ico`, `cetune.rc`). The source PNG is not in the repository.
+
+Not adjusted: CS5A (the panel's bus waits), CS0BCR/CS3BCR idle cycles, spread
+spectrum. The wait tables use a 5 % margin (Xtune's default was not found in
+its source). State: host tests pass (`test_clock`, the retune and resume
+cases in `test_timer50`), `cetune.c` passes a syntax check against a stub
+`windows.h`; not built with Platform Builder, not run in the emulator or on
+the calculator.

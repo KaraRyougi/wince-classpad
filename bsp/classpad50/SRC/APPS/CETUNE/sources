@@ -1,0 +1,17 @@
+!if 0
+cetune.exe - CEtune, the clock tuner (after Xtune): computes a clock setting
+and hands it to the OAL (IOCTL_HAL_CLASSPAD_CLOCK_GET/SET, OAL\OALLIB\ioctl.c).
+Start menu: Programs > CEtune.
+!endif
+!INCLUDE $(_TARGETPLATROOT)\sources.cmn
+TARGETNAME=cetune
+TARGETTYPE=PROGRAM
+RELEASETYPE=PLATFORM
+WINCEOEM=1
+EXEENTRY=WinMainCRTStartup
+INCLUDES=$(INCLUDES);$(_TARGETPLATROOT)\src\inc;$(_WINCEROOT)\public\common\sdk\inc;$(_WINCEROOT)\public\common\oak\inc
+TARGETLIBS= \
+    $(_PROJECTROOT)\cesysgen\sdk\lib\$(_CPUINDPATH)\coredll.lib
+SOURCES= \
+    cetune.c \
+    cetune.rc

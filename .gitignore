@@ -35,6 +35,7 @@ dbt/tests/test_translate_icrefill
 bsp/tests/test_lcdrot
 bsp/tests/test_battery
 bsp/tests/test_touch_bus50
+bsp/tests/test_clock
 # SpreadCE (shareware, Bye Design): prepared by tools/sh3prep.py into the VM tree, not committed
 bsp/classpad50/FILES/spreadce/*
 !bsp/classpad50/FILES/spreadce/README.md

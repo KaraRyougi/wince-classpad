@@ -54,10 +54,17 @@ BOOL OALIoCtlHalClasspadSuspendStats(UINT32, VOID*, UINT32, VOID*, UINT32, UINT3
 BOOL OALIoCtlHalClasspadPanel(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);
 BOOL OALIoCtlHalClasspadSuspendOptions(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);
 BOOL OALIoCtlHalClasspadPphi(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);
-UINT32 OALClockPphiHz(void);                           // timer.c: the measured peripheral clock
+UINT32 OALClockPphiHz(void);                           // timer.c: the peripheral clock now (measured at boot, scaled by OALTimerRetune)
 BOOL OALIoCtlHalPostInit(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);
 BOOL OALIoCtlHalInitRTC(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);
 BOOL OALIoCtlHalGetCacheInfo(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);
+
+// Clock control (ioctl.c, timer.c; register layout in classpad_clock.h)
+BOOL   OALClockChanged(void);
+VOID   OALTimerRetune(UINT32 mul, UINT32 div);
+UINT32 OALTimerCountHz(void);
+BOOL OALIoCtlHalClasspadClockGet(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);
+BOOL OALIoCtlHalClasspadClockSet(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);
 
 #ifdef __cplusplus
 }

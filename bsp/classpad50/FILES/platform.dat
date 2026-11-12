@@ -13,6 +13,8 @@ Directory("\Windows\Programs"):-File("Plotter-Z.lnk", "\Windows\plotterz.lnk")
 
 ; Battery status and type (SRC\APPS\BATTERY, in NK)
 Directory("\Windows\Programs"):-File("Battery.lnk", "\Windows\battery.lnk")
+; CEtune, the clock tuner (SRC\APPS\CETUNE, in NK)
+Directory("\Windows\Programs"):-File("CEtune.lnk", "\Windows\cetune.lnk")
 ; PPP over the USB serial port (SRC\APPS\USBNET, in NK)
 Directory("\Windows\Programs"):-File("USB Network.lnk", "\Windows\usbnet.lnk")
 

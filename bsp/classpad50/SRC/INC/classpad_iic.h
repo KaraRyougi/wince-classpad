@@ -10,15 +10,14 @@
 //  family; the fx-CP400 runs a faster Pphi (bsp_cfg.h) and an overclocking
 //  tool raises it further, and the same two bytes then clock the sensor
 //  that much faster. The OAL knows the Pphi of the moment (timer.c: measured
-//  against the RTC at boot, and whatever TMU0 is retuned to when a tool
-//  changes the clock while CE runs) and hands it out through
-//  IOCTL_HAL_CLASSPAD_PPHI; ClasspadIicCounts scales the counts to keep SCL
-//  at or below a wanted rate, never below Casio's counts. A wanted rate of 0
-//  asks for Casio's counts as they are. Pphi can change at any time, so the
-//  touch driver asks again at every pen-down and after a failed transaction.
-//  (The overclocking tool's own IOCTLs, CLOCK_GET/SET in classpad_clock.h of
-//  its branch, also report a Pphi, computed from the clock registers; this
-//  one is the rate the tick really runs at.)
+//  against the RTC at boot, scaled by OALTimerRetune when cetune changes the
+//  clock while CE runs) and hands it out through IOCTL_HAL_CLASSPAD_PPHI;
+//  ClasspadIicCounts scales the counts to keep SCL at or below a wanted
+//  rate, never below Casio's counts. A wanted rate of 0 asks for Casio's
+//  counts as they are. Pphi can change at any time, so the touch driver asks
+//  again at every pen-down and after a failed transaction. (cetune's
+//  IOCTL_HAL_CLASSPAD_CLOCK_GET, classpad_clock.h, reports the same value
+//  with the clock registers.)
 //------------------------------------------------------------------------------
 #ifndef __CLASSPAD_IIC_H
 #define __CLASSPAD_IIC_H
@@ -55,7 +54,7 @@
 
 typedef struct {
     UINT32 pphiHz;                      // the peripheral clock now
-    UINT32 measured;                    // 1: the boot value was measured against the RTC; 0: it was the nominal 29.4912 MHz
+    UINT32 measured;                    // 0: the nominal 29.4912 MHz is in use (the boot measurement failed and nothing retuned since)
 } CLASSPAD_PPHI;
 
 // ICCL/ICCH for SCL <= sclHz at this Pphi, in Casio's low:high proportion
