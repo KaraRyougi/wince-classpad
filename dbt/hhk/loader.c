@@ -8,7 +8,8 @@
  *   - both, NK first;
  *   - boot what is in the flash.
  * Files come from the storage memory through gint's file system (POSIX
- * open/read on /NK.bin, /EXT.bin: hhk/nkflash.c); a file identical to its
+ * open/read on /NK.bin, /EXT.bin: hhk/nkflash.c), as Platform Builder wrote
+ * them or packed by tools/cepack.py (hhk/cez.c); a file identical to its
  * window is not written again (compared while the menu is up). Keys, the
  * display (gint's VRAM, drawn by hhk/gfx.c) and the clock are gint's; there
  * are no OS addresses in here. Then the fx-CP400 goes to the translator
@@ -23,6 +24,8 @@
 #include <gint/keyboard.h>
 #include <gint/rtc.h>
 #include <gint/clock.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include "bootmarquee.h"
 #include "util.h"
 #include "nkflash.h"
@@ -154,6 +157,11 @@ static int error_screen(const char *title, const char *headline, const char *det
 
 /* first pass: which files are there and sane; second: do they differ from
  * their window (the menu says "checking..." meanwhile) */
+/* what writing each file will do, from the scan: the plan is drawn from this
+ * without opening the files again (an open walks every record of the file,
+ * seconds on Casio's file system, with the menu still on the screen) */
+static nkinfo finfo[2];
+
 static void scan_files(void)
 {
     ui_file *f[2] = { &scan.nk, &scan.ext };
@@ -171,6 +179,7 @@ static void scan_files(void)
         if (r == NKF_BAD) { f[i]->state = UF_BAD; memcpy(f[i]->why, reason(), sizeof f[i]->why); continue; }
         if (r == NKF_NOFILE) continue;
         nkflash_info(&info);
+        finfo[i] = info;
         f[i]->size = info.size;
         f[i]->state = UF_DIFF;
         nkflash_close();
@@ -222,18 +231,34 @@ static int menu_input(int k)
     return was != UI_HIT_NONE ? 2 : 0;
 }
 
-/* called back by nkflash_compare every 64 KiB: the menu stays live. Cancel
+/* called back by nkflash_compare every 32 KiB: the menu stays live. Cancel
  * stops the comparison at once, so does Boot (it needs no comparison);
- * the other actions wait for it to finish */
+ * the other actions wait for it to finish, with the Start button held down
+ * so that the tap is seen to have been taken */
 static void compare_poll(int what, u32 done, u32 total, u32 addr)
 {
     int k, r, redraw_menu = 0;
     (void)what; (void)done; (void)total; (void)addr;
     while ((k = read_input(0)) != K_NONE) {
+        if (asked > 0) {
+            /* Start has been taken and waits for the comparison: its button
+             * stays down, the selection is fixed, only Cancel still counts */
+            if (k == K_CLEAR) r = -1;
+            else if (k == K_TAP) {
+                r = ui_menu_hit(tap_x, tap_y);
+                r = (r == ui_menu_hit(down_x, down_y) && (r == UI_HIT_CANCEL || r == UI_HIT_CLOSE)) ? -1 : 0;
+            } else r = 0;
+            if (r < 0) { asked = -1; nk_abort = 1; }
+            continue;
+        }
         r = menu_input(k);
         if (r == 2) redraw_menu = 1;
         if (r < 0) { asked = -1; nk_abort = 1; }
-        else if (r == 1) { asked = sel + 1; if (sel == UA_BOOT) nk_abort = 1; }
+        else if (r == 1) {
+            asked = sel + 1;
+            if (sel == UA_BOOT) nk_abort = 1;
+            else { ui_pressed = UI_HIT_START; redraw_menu = 1; }   /* seen to be taken until the comparison is over */
+        }
     }
     if (redraw_menu && !nk_abort) draw_menu();
 }
@@ -273,7 +298,6 @@ static struct {
     int phase, record, nrecords;
     u32 units_done, units_total;    /* the whole job, for the second bar, in KiB-equivalents */
     u32 phase_units, phase_total;   /* units of the phase running */
-    u32 t0;
     u32 shown_step, shown_all;      /* what the bars show: never back, within a step */
     int full;                       /* redraw everything next time */
 } J;
@@ -302,12 +326,6 @@ static void mb(char *out, unsigned cap, u32 bytes)
 }
 
 #define DAY_TICKS (86400u * 128u)            /* rtc_ticks() counts 1/128 s from midnight */
-static int seconds_left(u32 pm)
-{
-    u32 now = rtc_ticks(), el = (now + DAY_TICKS - J.t0) % DAY_TICKS;
-    if (pm < 30 || el < 2 * 128) return -1;
-    return (int)(((el / 128u) * (1000u - pm) + pm - 1) / pm);
-}
 
 static void redraw(const char *detail, u32 phase_done, u32 phase_total)
 {
@@ -317,7 +335,7 @@ static void redraw(const char *detail, u32 phase_done, u32 phase_total)
     if (step < J.shown_step) step = J.shown_step;
     if (all < J.shown_all) all = J.shown_all;
     J.shown_step = step; J.shown_all = all;
-    ui_flash(&J.job, J.full, detail, (int)step, (int)all, seconds_left(all));
+    ui_flash(&J.job, J.full, detail, (int)step, (int)all);
     J.full = 0;
     show();
 }
@@ -368,7 +386,7 @@ static int add_step(const char *label, int st)
 
 static const char *const file_name[2] = { "NK.bin", "EXT.bin" };
 
-/* the steps for each file the action writes; -1 when a file went away */
+/* the steps for each file the action writes */
 static int plan(int action)
 {
     ui_file *f[2] = { &scan.nk, &scan.ext };
@@ -385,9 +403,7 @@ static int plan(int action)
             add_step(l, UI_DONE);
             continue;
         }
-        if (nkflash_open(&nk_windows[win_of[i]]) != NKF_READY) return -1;
-        nkflash_info(&info);
-        nkflash_close();
+        info = finfo[i];                    /* a file that changed since is caught when it is opened to be written */
         hhk_format(l, sizeof l, "Check %s", file_name[i]);                 add_step(l, UI_DONE);
         hhk_format(l, sizeof l, "Erase %u flash sectors", info.sectors);   J.step[i][0] = add_step(l, UI_TODO);
         if (info.records) hhk_format(l, sizeof l, "Write %u records", info.records);
@@ -407,11 +423,13 @@ static int write_file(int i)
     int r;
     if (J.step[i][0] < 0) return 0;               /* already in flash */
     J.file = i; J.phase = PH_ERASE; J.record = J.nrecords = 0;
-    if (nkflash_open(&nk_windows[win_of[i]]) != NKF_READY) { set_state(J.step[i][0], UI_FAILED); return PH_ERASE + 1; }
-    nkflash_info(&info);
-    J.phase_total = info.sectors * ERASE_UNITS; J.phase_units = 0;
+    /* the screen first: opening the file walks its records, which takes a while */
+    J.phase_total = finfo[i].sectors * ERASE_UNITS; J.phase_units = 0;
     set_state(J.step[i][0], UI_NOW); J.full = 1;
     redraw("Preparing" GFX_ELLIP, 0, 1);
+    if (nkflash_open(&nk_windows[win_of[i]]) != NKF_READY) { set_state(J.step[i][0], UI_FAILED); J.full = 1; redraw(reason(), 0, 1); return PH_ERASE + 1; }
+    nkflash_info(&info);
+    J.phase_total = info.sectors * ERASE_UNITS;
     r = nkflash_write();
     nkflash_close();
     if (r) { set_state(J.step[i][J.phase == PH_ERASE ? 0 : 1], UI_FAILED); J.full = 1; redraw(reason(), 0, 1); return J.phase + 1; }
@@ -419,6 +437,7 @@ static int write_file(int i)
     set_state(J.step[i][2], UI_NOW);
     J.units_done += KIB(info.bytes); J.phase = PH_VERIFY; J.phase_units = 0; J.phase_total = KIB(info.bytes) / VERIFY_DIV; J.full = 1;
     J.nrecords = 0;
+    redraw("Preparing" GFX_ELLIP, 0, 1);
     if (nkflash_open(&nk_windows[win_of[i]]) != NKF_READY) r = -1;
     else { r = nkflash_compare(); nkflash_close(); }
     if (r != 1) { set_state(J.step[i][2], UI_FAILED); J.full = 1; redraw("What was written does not match the file", 0, 1); return PH_VERIFY + 1; }
@@ -508,7 +527,6 @@ static int loader(void)
             return error_screen("Flashing stopped", "A file changed after the check.", reason(), todo, 2);
         }
         nk_progress = on_progress;
-        J.t0 = rtc_ticks();
         J.full = 1;
         for (i = 0; i < 2; i++) {
             r = write_file(i);
@@ -521,6 +539,52 @@ static int loader(void)
     }
     boot_screen();
     return -1;                                    /* boot */
+}
+
+/* What the last CE session logged, for a boot that never reached the
+ * desktop: a translator built with FLASHLOG=1 writes the boot's debug output
+ * (the OAL's and the drivers' lines, its own) as text into the last sector
+ * of the NK window (rt/nor.c "boot log"). When there is text there, it goes
+ * to \fls0\WINCE.LOG, unless the file already has that length (the same
+ * log, saved by an earlier start). */
+#define LOG_TEXT    ((const u8 *)(NK_FLASH + NK_FLASH_MAX - 0x20000u))
+#define LOG_MAX     0x1F000u
+static void save_last_log(void)
+{
+    u32 n, i;
+    int fd;
+    for (n = 0; n < LOG_MAX && LOG_TEXT[n] != 0xFF; n++) ;
+    {   /* a note the translator left behind the text (after up to 63 blank bytes) */
+        u32 m = (n + 63u) & ~63u, e;
+        if (m > n && m < 0x1F000u && LOG_TEXT[m] != 0xFF) {
+            for (e = m; e < 0x1F000u && LOG_TEXT[e] != 0xFF; e++) ;
+            n = e;
+        }
+    }
+    if (n < 16) return;
+    for (i = 0; i < 16; i++)                    /* text, not the tail of an image */
+        if ((LOG_TEXT[i] < 0x20 || LOG_TEXT[i] > 0x7E) && LOG_TEXT[i] != '\r' && LOG_TEXT[i] != '\n') return;
+    /* never over a file that is there (truncating one is not something
+     * the file system here is known to do): WINCE.LOG, then WINCE2.LOG ..
+     * WINCE9.LOG; nothing when the newest of them has this length already */
+    {
+        char name[16];
+        u32 k;
+        off_t have = -1;
+        for (k = 1; k <= 9; k++) {
+            if (k == 1) hhk_format(name, sizeof name, "/WINCE.LOG");
+            else hhk_format(name, sizeof name, "/WINCE%u.LOG", k);
+            fd = open(name, O_RDONLY);
+            if (fd < 0) break;
+            have = lseek(fd, 0, SEEK_END);
+            close(fd);
+        }
+        if (k > 9 || have == (off_t)n) return;
+        fd = open(name, O_WRONLY | O_CREAT);
+        if (fd < 0) return;
+        write(fd, LOG_TEXT, n);
+        close(fd);
+    }
 }
 
 static u32 payload_len;
@@ -539,6 +603,7 @@ int main(void)
         return error_screen("Loader damaged", "wince.hh3 is incomplete.",
                             "The translator inside it does not match the sum the build recorded, so it is not started.", todo, 2);
     }
+    save_last_log();
     r = loader();
     if (r >= 0) return r;
     /* Hand over with the hardware as Casio's OS had it, not as gint has it:

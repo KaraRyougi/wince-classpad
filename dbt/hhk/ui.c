@@ -258,7 +258,7 @@ static void progress(int x, int y, int w, int permille)
 
 static int steps_bottom(const ui_job *j) { return 104 + j->n * 21; }
 
-void ui_flash(const ui_job *j, int full, const char *detail, int step_permille, int all_permille, int secs_left)
+void ui_flash(const ui_job *j, int full, const char *detail, int step_permille, int all_permille)
 {
     static const gfx_image *const icons[4] = { &art_step_todo, &art_step_now, &art_step_done, &art_step_fail };
     char buf[32];
@@ -269,7 +269,7 @@ void ui_flash(const ui_job *j, int full, const char *detail, int step_permille, 
         gfx_fill(0, 0, W, H, RGB(C_FACE));
         title_bar("Windows CE Loader");
         header(j->title, "Keep the calculator powered. Do not press RESET until Windows CE starts.", &art_warn);
-        group_box(8, by, W - 16, 134, "Progress");
+        group_box(8, by, W - 16, 122, "Progress");
         footer_line();
         button(W - 86, H - 40, 76, "Cancel", 0, 1, 0);
     }
@@ -280,7 +280,7 @@ void ui_flash(const ui_job *j, int full, const char *detail, int step_permille, 
         gfx_image_draw(16, y - 9, icons[st], 0);
         gfx_text(st == UI_NOW ? &font_t11b : &font_t11, 36, y, j->label[i], RGB(st == UI_TODO ? 0x7A7868 : C_INK));
     }
-    gfx_fill(10, by + 8, W - 20, 124, RGB(C_FACE));
+    gfx_fill(10, by + 8, W - 20, 112, RGB(C_FACE));
     gfx_text(&font_t11b, 18, by + 24, j->label[cur], RGB(C_INK));
     gfx_text(&font_t11, 18, by + 40, detail, RGB(C_TEXT2));
     progress(18, by + 48, BAR_W(30), step_permille);
@@ -290,10 +290,6 @@ void ui_flash(const ui_job *j, int full, const char *detail, int step_permille, 
     progress(18, by + 98, BAR_W(30), all_permille);
     hhk_format(buf, sizeof buf, "%u%%", (u32)(all_permille < 0 ? 0 : all_permille) / 10);
     gfx_text_align(&font_t11, W - 20, by + 109, buf, RGB(C_INK), GFX_RIGHT);
-    if (secs_left >= 0) {
-        hhk_format(buf, sizeof buf, "About %u s left", (u32)secs_left);
-        gfx_text(&font_t10, 18, by + 128, buf, RGB(C_TEXT2));
-    }
 }
 
 /* --- start and error --- */

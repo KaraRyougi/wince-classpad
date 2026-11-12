@@ -56,7 +56,7 @@ HOST_CFLAGS  := -mb -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-sta
 GUEST_CFLAGS := -ml -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables -Wall \
                 -DGUEST_RAM_LO=$(GUEST_RAM_LO)u -DGUEST_RAM_HI=$(GUEST_RAM_HI)u -DGUEST_LINK=$(GUEST_LINK)u -DMAX_BLOCKS=$(BLOCKS)
 
-RT_SRC := rt/crt0.S rt/stubs.S rt/standby.S rt/main.c rt/rt.c rt/kdev.c rt/lcdcon.c rt/bootmarquee.c rt/irqpins.c rt/nkbin.c rt/bench.c bench/loops.S src/sh4dec.c src/sh4emit.c src/translate.c \
+RT_SRC := rt/crt0.S rt/stubs.S rt/standby.S rt/main.c rt/rt.c rt/kdev.c rt/lcdcon.c rt/bootmarquee.c rt/irqpins.c rt/nor.c rt/nkbin.c rt/bench.c bench/loops.S src/sh4dec.c src/sh4emit.c src/translate.c \
           ../fpuemu/src/fpuemu.c ../fpuemu/src/softfloat.c
 
 # A Windows CE .bin to run instead of the embedded guest, placed in the emulated
@@ -107,7 +107,16 @@ endif
 EXTBIN       ?=
 # STORAGE=<file> adds Casio's storage memory (chip 0x1A20000, what the CE
 # storage driver mounts) to an emulator run's NOR: a volume from
-# tools/mkfugue.py or a 64 MiB chip dump. Needs NKBIN (an XIP image).
+# tools/mkfugue.py or a 64 MiB chip dump. With an image it needs an XIP one.
+# The run then has the emulator decode NOR commands (HLE_FLASH_CMD=1), which
+# the translator's programming service (rt/nor.c) needs.
+# make GUEST=fugue run: the writer and that service on a volume made here.
+# make GUEST=usbfn run: the CE USB function driver's register sequences as a
+# mass storage device on that volume, against casio-emu's USB host (needs
+# emu-patch/add_classpad_usbhost.py applied to the emulator).
+ifneq ($(filter fugue fuguebench usbfn,$(GUEST)),)
+STORAGE      ?= $(BUILD)/fugue-test.bin
+endif
 STORAGE      ?=
 # make DEVICE=1 hhk: a translator without the emulator's debug port (byte
 # stores to 0xFFFFF000, undefined on the real SoC); its prints then go only to
@@ -119,6 +128,10 @@ DEVICE ?= 0
 # is not known (the emulator shows no difference). The IRQ-pin guard
 # (rt/irqpins.c) is in every DEVICE=1 build: it only masks a storming pin.
 CONSOLE ?= 0
+# FLASHLOG=1 (with DEVICE=1): the boot's debug output goes into the last sector
+# of the NK window (rt/nor.c "boot log"), and the loader of the next start
+# writes it to \fls0\WINCE.LOG. For a boot that hangs on the calculator.
+FLASHLOG ?= 0
 # make STANDBY_DIAG=1: the R-standby resume path paints one coloured stripe per
 # stage on the panel (rt/standby.S, rt.c; docs/06 section 8). Diagnostic only.
 STANDBY_DIAG ?= 0
@@ -133,7 +146,7 @@ HOST_CFLAGS  += $(if $(filter 1,$(STANDBY_SEARCH)),-DDBT_STANDBY_SEARCH,)
 # DEVICE=1 also keeps the loader's start-screen marquee moving until the CE
 # display driver signs on (rt/bootmarquee.c); MARQUEE=0 leaves it still.
 MARQUEE ?= 1
-HOST_CFLAGS  += $(if $(filter 1,$(DEVICE)),-DDBT_NO_DEBUG_PORT -DDBT_IRQPIN_GUARD $(if $(filter 1,$(MARQUEE)),-DDBT_BOOT_MARQUEE,) $(if $(filter 1,$(CONSOLE)),-DDBT_LCD_CONSOLE,),)
+HOST_CFLAGS  += $(if $(filter 1,$(DEVICE)),-DDBT_NO_DEBUG_PORT -DDBT_IRQPIN_GUARD $(if $(filter 1,$(MARQUEE)),-DDBT_BOOT_MARQUEE,) $(if $(filter 1,$(CONSOLE)),-DDBT_LCD_CONSOLE,) $(if $(filter 1,$(FLASHLOG)),-DDBT_FLASH_LOG,),)
 # Code cache policy (docs/04 "Metadata on demand, second chance"):
 # LAZY_META=1 keeps no recovery metadata for ROM blocks until an exception
 # lands in one (the block is translated again to rebuild it); SECOND_CHANCE=1
@@ -180,7 +193,7 @@ HOST_CFLAGS  += $(if $(filter 1,$(FAST_HELPERS)),-DDBT_INLINE_DEVICE_READ -DDBT_
 HOST_CFLAGS  += $(if $(filter 1,$(HASH_TAG)),-DDBT_HASH_ASID_TAG -DDBT_HASH_ASID_MIX -DDBT_USER_IC_HASH_HIT $(if $(filter 1,$(USER_IC_REFILL)),-DDBT_USER_IC_REFILL,),) -DDBT_HASH_ENTRIES=$(HASH_ENTRIES)
 NK_PADDED = $(BUILD)/nk-flash.bin
 NK_OFF_FILE = $(BUILD)/nk-flash.off
-NK_ENV = $(if $(NKBIN)$(EXTBIN),HLE_OSROM=$(abspath $(NK_PADDED)) HLE_OSROM_PAD=$$(cat $(NK_OFF_FILE)),)   # recursive: nkrun sets NKBIN per target
+NK_ENV = $(if $(NKBIN)$(EXTBIN)$(STORAGE),HLE_OSROM=$(abspath $(NK_PADDED)) HLE_OSROM_PAD=$$(cat $(NK_OFF_FILE)),) $(if $(STORAGE),HLE_FLASH_CMD=1,)   # recursive: nkrun sets NKBIN per target
 # casio-emu remembers the last machine profile (model.txt), so pin it. The
 # ClassPad profile (fx-cp400: 320x528 panel, IIC0 touch sensor, INTC
 # priorities) is the target and the default since 2026-11-05; it needs
@@ -232,12 +245,12 @@ DEVALL_STAMP := $(BUILD)/.devall-$(if $(filter 1,$(DEVALL)),1,0)
 $(DEVALL_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.devall-*
 	touch $@
-LAYOUT_STAMP := $(BUILD)/.layout-$(GUEST_RAM_LO)-$(HHK_PAYLOAD)-$(GUEST_RAM_HI)-$(IMAGE_BASE)-$(CACHE_BASE)-$(CACHE_SIZE)-$(BLOCKS)-$(ARENA_KB)-$(NK_FLASH)-$(NK_FLASH_MAX)-$(EXT_FLASH)-$(DEVICE)-$(CONSOLE)-$(MARQUEE)-$(IRQPINS)-$(LAZY_META)$(SECOND_CHANCE)$(KDEV)$(HASH_TAG)$(TLB_REFILL)$(FAST_HELPERS)-$(HASH_ENTRIES)
+LAYOUT_STAMP := $(BUILD)/.layout-$(GUEST_RAM_LO)-$(HHK_PAYLOAD)-$(GUEST_RAM_HI)-$(IMAGE_BASE)-$(CACHE_BASE)-$(CACHE_SIZE)-$(BLOCKS)-$(ARENA_KB)-$(NK_FLASH)-$(NK_FLASH_MAX)-$(EXT_FLASH)-$(DEVICE)-$(CONSOLE)$(FLASHLOG)-$(MARQUEE)-$(IRQPINS)-$(LAZY_META)$(SECOND_CHANCE)$(KDEV)$(HASH_TAG)$(TLB_REFILL)$(FAST_HELPERS)-$(HASH_ENTRIES)
 $(LAYOUT_STAMP): | $(BUILD)
 	rm -f $(BUILD)/.layout-*
 	touch $@
 
-$(BUILD)/$(GUEST).elf: $(GUEST_START) guest/$(GUEST).c $(GUEST_EXTRA) guest/hyper.h guest/mmio.h ../bsp/classpad/SRC/INC/classpad_extrom.h ../bsp/classpad/SRC/INC/classpad_power.h ../bsp/classpad/SRC/INC/classpad_keysc.h ../bsp/classpad/SRC/INC/bsp_base_regs.h ../bsp/classpad/SRC/INC/classpad_touch_bus.h ../bsp/classpad/SRC/INC/classpad_touch.h $(GUEST_LD) $(DEVALL_STAMP) $(LAYOUT_STAMP) | $(BUILD)
+$(BUILD)/$(GUEST).elf: $(GUEST_START) guest/$(GUEST).c $(GUEST_EXTRA) guest/hyper.h guest/mmio.h ../bsp/classpad/SRC/INC/classpad_extrom.h ../bsp/classpad/SRC/INC/classpad_power.h ../bsp/classpad/SRC/INC/classpad_keysc.h ../bsp/classpad/SRC/INC/bsp_base_regs.h ../bsp/classpad/SRC/INC/classpad_touch_bus.h ../bsp/classpad/SRC/INC/classpad_touch.h ../bsp/classpad50/SRC/INC/classpad_fugue.h ../bsp/classpad50/SRC/INC/classpad_fuguewr.h ../bsp/classpad50/SRC/INC/classpad_usbreg.h $(GUEST_LD) $(DEVALL_STAMP) $(LAYOUT_STAMP) | $(BUILD)
 	$(CC) $(GUEST_CFLAGS) -T $(GUEST_LD) -o $@ $(GUEST_START) guest/$(GUEST).c $(GUEST_EXTRA)
 
 # the guest wrapped as a CE .bin (records + ROMHDR pointer) for the loader test;
@@ -323,15 +336,23 @@ GINT_LD    := -T $(GINT_LIB)/fxcp_hh3.ld -L$(GINT_LIB) -Wl,--section-start=.winc
               -Wl,--start-group -lgint-cp -lc -lopenlibm -lgcc -Wl,--end-group
 # wince.hh3 carries the flasher: NK.bin and EXT.bin on the calculator are
 # written to their windows when the chosen action asks for it, then CE boots
-HHK_FLASH := hhk/nkflash.c hhk/norflash.c hhk/util.c
+HHK_FLASH := hhk/nkflash.c hhk/cez.c hhk/norflash.c hhk/util.c
 # the Luna loader's screens (hhk/ui.c, docs/design/loader-luna.html): drawing,
 # fonts and pictures; font_data.c and art_data.c are generated and committed
 # (tools/mkbitmapfont.py c, tools/mkloaderart.py; both need Pillow/freetype-py)
 HHK_UI := hhk/ui.c hhk/gfx.c hhk/font_data.c hhk/art_data.c
-$(WINCE_HHK): $(HHK_FLASH) $(HHK_UI) hhk/loader.c hhk/takeover.S hhk/payload.S hhk/util.h hhk/nkflash.h hhk/norflash.h hhk/ui.h hhk/gfx.h $(IMG).bin $(PAYLOAD_H) $(LAYOUT_STAMP)
+$(WINCE_HHK): $(HHK_FLASH) $(HHK_UI) hhk/loader.c hhk/takeover.S hhk/payload.S hhk/util.h hhk/nkflash.h hhk/cez.h hhk/norflash.h hhk/ui.h hhk/gfx.h $(IMG).bin $(PAYLOAD_H) $(LAYOUT_STAMP)
 	$(CC) $(GINT_CFLAGS) -include $(PAYLOAD_H) -DIMAGE='"$(IMG).bin"' -o $@ hhk/loader.c $(HHK_FLASH) $(HHK_UI) hhk/takeover.S hhk/payload.S $(GINT_LD)
 
 hhk: $(WINCE_HHK) hhk-check
+
+# the loader's reader of packed images (hhk/cez.c, tools/cepack.py) on the host:
+# make cez-test NKBIN=.../NK.bin
+$(BUILD)/ceztest: hhk/ceztest.c hhk/cez.c hhk/cez.h hhk/util.c | $(BUILD)
+	$(HOSTCC) -DHHK_HOST -O1 -Wall -Wextra -I hhk -o $@ hhk/ceztest.c hhk/cez.c hhk/util.c
+cez-test: $(BUILD)/ceztest
+	python3 ../tools/cepack.py $(NKBIN) -o $(BUILD)/cez
+	$(BUILD)/ceztest $(NKBIN) $(BUILD)/cez/$(notdir $(NKBIN))
 
 # the loader's screens rendered on the host with sample data: <build>/ui-*.ppm
 HOSTCC ?= cc
@@ -355,7 +376,7 @@ $(BUILD)/dbt-$(GUEST)-hhk.g3a: $(BUILD)/dbt-$(GUEST)-hhk.elf
 	( dd if=/dev/zero bs=28672 count=1 2>/dev/null; cat $(<:.elf=.bin) ) > $@
 
 hhkrun: $(BUILD)/dbt-$(GUEST)-hhk.g3a
-	$(if $(NKBIN)$(EXTBIN),$(NK_PAD))
+	$(if $(NKBIN)$(EXTBIN)$(STORAGE),$(NK_PAD))
 	-$(EMU_ENV) $(NK_ENV) $(EMU)/run-headless.sh $(abspath $<) $(RUN_SECS)
 
 # norflash.c against the emulator's NOR command decoder (HLE_FLASH_CMD=1)
@@ -372,9 +393,13 @@ flashtest: $(BUILD)/flashtest.g3a
 # per-guest emulator environment: the standby guest needs an injected Clear
 # press (chord 20, held) while it sleeps in R-standby (ticks = 1/32768 s)
 RUN_ENV_standby := HLE_CB_CHORD=20 HLE_CB_CHORD_AT=250000 HLE_CB_CHORD_HOLD=100000
+RUN_ENV_usbfn := HLE_USB=1 HLE_USB_PLUG=1 HLE_USB_CE=1 HLE_USB_BOT=1 HLE_USB_BOT_LBA=0 HLE_USB_BOT_BLOCKS=1 HLE_USB_PUT_FILE=$(abspath ../tools/mkfugue.py) HLE_USB_PUT_LBA=4000
 RUN_ENV ?= $(RUN_ENV_$(GUEST))
-run: $(IMG).g3a $(if $(filter extrom,$(GUEST)),$(BUILD)/extrom-test.bin)
-	$(if $(NKBIN)$(EXTBIN),$(NK_PAD))
+$(BUILD)/fugue-test.bin: ../tools/mkfugue.py | $(BUILD)
+	python3 ../tools/mkfugue.py -o $@ ../tools/mkfugue.py
+
+run: $(IMG).g3a $(if $(filter extrom,$(GUEST)),$(BUILD)/extrom-test.bin) $(if $(filter fugue fuguebench usbfn,$(GUEST)),$(BUILD)/fugue-test.bin)
+	$(if $(NKBIN)$(EXTBIN)$(STORAGE),$(NK_PAD))
 	-$(EMU_ENV) $(RUN_ENV) $(NK_ENV) $(EMU)/run-headless.sh $(abspath $(IMG).g3a) $(RUN_SECS)
 
 # run the current guest through the .bin loader (image in emulated flash)
@@ -387,7 +412,7 @@ nkrun: $(IMG).g3a $(BUILD)/$(GUEST).nk.bin
 # last one to $(IMG).png; HLE_FORCE_R61524 presents the LCD controller's pixels
 # nkshot: the same for a CE image (NKBIN=..., RUN_SECS=n) -> build/nk.png
 nkshot: $(IMG).g3a
-	$(if $(NKBIN)$(EXTBIN),$(NK_PAD))
+	$(if $(NKBIN)$(EXTBIN)$(STORAGE),$(NK_PAD))
 	-$(EMU_ENV) $(NK_ENV) HLE_FBDUMP=$(abspath $(BUILD)/nk.ppm) HLE_FORCE_R61524=1 $(EMU)/run-headless.sh $(abspath $(IMG).g3a) $(RUN_SECS)
 	python3 ../tools/ppm2png.py $(BUILD)/nk.ppm $(BUILD)/nk.png
 

@@ -264,12 +264,34 @@ static BOOL UsbSample(void)
     return on;
 }
 
+// The USB function driver (SRC\DRIVERS\USBFN) powers the same controller
+// while a cable is in and holds this mutex for as long as it does. With the
+// mutex taken there the controller is running and is only read; otherwise
+// the sample above runs with the mutex held, so the driver does not start
+// its own power-up in the middle of it.
+#define USB_POWER_MUTEX TEXT("ClassPadUsbPower")
+static HANDLE g_usbMutex;
+
+static BOOL UsbSampleShared(void)
+{
+    UINT16 raw;
+    BOOL on;
+    if (!g_usbMutex) g_usbMutex = CreateMutex(NULL, FALSE, USB_POWER_MUTEX);
+    if (g_usbMutex && WaitForSingleObject(g_usbMutex, 0) == WAIT_TIMEOUT) return UsbVbus(&raw);
+    __try {
+        on = UsbSample();
+    } __finally {
+        if (g_usbMutex) ReleaseMutex(g_usbMutex);
+    }
+    return on;
+}
+
 static DWORD WINAPI UsbThread(LPVOID unused)
 {
     UNREFERENCED_PARAMETER(unused);
     for (;;) {
         __try {
-            g_usbOn = UsbSample();
+            g_usbOn = UsbSampleShared();
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             g_usbOn = FALSE;
             RETAILMSG(1, (TEXT("CLASSPAD BATTERY: no USB controller to read, AC line reported offline\r\n")));

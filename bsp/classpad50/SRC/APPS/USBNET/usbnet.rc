@@ -1,0 +1,6 @@
+// usbnet.rc - the program's icon, for its shortcut in the Programs menu: the
+// one "Network and Dial-up Connections" has in the Control Panel, taken from
+// the Platform Builder tree where the build finds it (connpnl's
+// remotenw_new.ico; PLATFORM and PUBLIC sit side by side under _WINCEROOT).
+#define IDI_USBNET 100
+IDI_USBNET ICON DISCARDABLE "..\\..\\..\\..\\..\\PUBLIC\\wceshellfe\\oak\\ctlpnl\\connpnl\\remotenw_new.ico"

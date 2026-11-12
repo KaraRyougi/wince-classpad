@@ -1,0 +1,12 @@
+LIBRARY     CLASSPAD_USBFN
+
+EXPORTS
+    UFN_Init
+    UFN_PreDeinit
+    UFN_Deinit
+    UFN_Open
+    UFN_PreClose
+    UFN_Close
+    UFN_PowerDown
+    UFN_PowerUp
+    UFN_IOControl

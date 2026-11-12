@@ -43,7 +43,7 @@ typedef struct {
     int state[UI_MAX_STEPS];        /* UI_TODO .. UI_FAIL */
 } ui_job;
 enum { UI_TODO, UI_NOW, UI_DONE, UI_FAILED };
-void ui_flash(const ui_job *j, int full, const char *detail, int step_permille, int all_permille, int secs_left);
+void ui_flash(const ui_job *j, int full, const char *detail, int step_permille, int all_permille);
 
 /* the start screen with the marquee at position pos (rt/bootmarquee.h) */
 void ui_boot(int pos);

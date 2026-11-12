@@ -8,10 +8,11 @@ rem     one findstr regex per line, matched against the start of a ce.bib
 rem     entry [no comments in that file: every line is a pattern]. The
 rem     unfiltered bib is kept as ce.bib.unfiltered.
 rem     What is dropped [2026-11-06, docs/05-ce-image-and-oal.md "Image size"]:
-rem      - the network stack [tcpstk, ndis, afd, dhcp, netbios, cxport, ws2k,
-rem        ws2serv, ws2instl, winsock, wspm, nspm, uiproxy, serial]: the
-rem        Standard Shell's catalog item pulls it in, but no shell module
-rem        imports it; servicesd.exe imports ws2.dll, which stays.
+rem      - netbios.dll [only the redirector uses it] and serial.dll [the
+rem        16550 driver: no such port]. Until 2026-11-11 the whole Winsock
+rem        scaffolding the Standard Shell pulls in was dropped here; it
+rem        stays now that the image has TCP/IP and PPP [classpad.bat], and
+rem        extmove.txt sends the network modules to the EXT region.
 rem      - the standard .wav files: the Control Panel item forces them in and
 rem        the image has no audio driver.
 rem     To keep everything: delete romexclude.txt from the release directory.

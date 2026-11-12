@@ -6,4 +6,7 @@ DIRS=\
     SH3CRT \
     doclist \
     PLOTTERZ \
-    PEGHELP
+    PEGHELP \
+    USBCPL \
+    USBNET \
+    STORCPL

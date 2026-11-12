@@ -138,6 +138,9 @@ void dbt_main(void)
     }
 #endif
     cfg.rom_lo = info.physfirst & 0x1FFFFFFFu; cfg.rom_hi = info.physlast & 0x1FFFFFFFu;
+#ifdef DBT_FLASH_LOG
+    if (info.xip) dbt_flashlog_init(info.physlast);
+#endif
 #ifdef EXT_FLASH
     /* config.bib's second XIP region (EXT, docs/03): its modules run in place
      * too, so their blocks survive whole-cache flushes like NK's. The OAL

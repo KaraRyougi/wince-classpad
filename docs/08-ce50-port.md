@@ -1026,6 +1026,126 @@ LBA n 是逻辑簇 n/8 的第 n%8 个 512 字节，LBA 0 是 MBR（一个 0E 分
   function PDD，而且它不报写保护；casio-emu 的 ClassPad 配置没有 USB 主机（`usb.c` 里
   `plugged()`/`pollUsb()` 对 ClassPad 直接返回）。未开始。
 
+**存储区可写、USB 设备端（2026-11-11，未上真机）。** 四块：Fugue 写入、
+SH7305 USB 设备控制器的 PDD、大容量存储、CDC ACM 串口。CE 侧的源码只在 Mac 上用 clang 对着
+PB 的头文件做过语法检查；能在这边跑的部分（Fugue 写入器、翻译器的 NOR 服务、PDD 的寄存器
+时序）都有测试。
+
+- **Fugue 写入**（`SRC\INC\classpad_fuguewr.h`）。fx-CP400 的记录格式和 fx-CG100 的资料
+  不一样：记录 +8 是 4 KiB 负载的 CRC-16/CCITT-FALSE，+10..+33 是八个 512 字节分片的 3 字节
+  ECC（CG100 那里是常数）。写入器生成的 64 字节记录和转储里 Casio OS 写的 102 条逐字节一致
+  （`bsp/tests/test_fuguewr.c`）。规则：重写一个簇 = 在唯一的"头扇区"下一个空槽追加一条
+  版本号减一的记录，旧记录不动；开新扇区写 FINFO（字 = 全卷最小值减一）；回收 = 把牺牲扇区
+  里还活着的记录搬到头扇区（版本减一），写一条 DETAIL（kind 0x88，牺牲扇区号、擦除计数加一），
+  再擦除。写的顺序是负载、记录的 2..63 字节、最后 0..1 字节，所以掉电后一条记录要么完整要么
+  不存在。主机测试：整盘写满两遍、随机改写、400 次随机掉电后重新扫描比对。
+  **没有确认的**：CP400 的 OS 是否校验 CRC/分片 ECC、怎样对待写了一半的槽、它的回收是否和
+  CG100 一样（转储里那个卷从没擦除过）。上真机之前应当在 casio-emu 里用 Casio 的 OS 冷启动
+  一个被写过的卷，看它是否原样接受；被拒绝的卷 OS 会整个重建，等于丢数据。
+- **翻译器的 NOR 服务**（`dbt/rt/nor.c`）。CE 从同一片 NOR 执行，不能自己发编程命令，所以
+  编程和擦除是超级调用：`trapa #0xFF`，r4 = `0x4E4F5200 | op`（0 探测，1 编程，2 擦除扇区），
+  只接受存储区 0x01A20000-0x0385FFFF，源数据必须是 RAM 的 P1/P2 地址，做完后 `ocbi` 掉 P1
+  别名的缓存行。`HC_GETSTAT 62` 的 bit 2 表示有这个服务（旧翻译器会把这个陷阱当成休眠请求，
+  所以驱动先查这一位）。擦一个扇区约半秒，期间中断屏蔽，CE 的时钟会少走这段时间。
+  `make -C dbt GUEST=fugue run` 在模拟器里验证（模拟器要 `HLE_FLASH_CMD=1`，给了 `STORAGE=`
+  就自动带上）。
+- **块驱动**（`SRC\DRIVERS\FUGUEDSK\fuguedsk.c`）。8 个簇的写回缓存（FATFS 是按 512 字节
+  扇区写 FAT 和目录的，直接写的话每个扇区一条 4 KiB 记录），最后一次写之后 700 ms 落盘，
+  `IOCTL_DISK_FLUSH_CACHE`、关闭设备、缓存淘汰时也落盘；内容没变的簇不写。以下情况保持只读：
+  翻译器没有 NOR 服务、卷里没有 DETAIL 记录、注册表 `Writable`=0；编程或擦除失败后本次启动
+  内转为只读。CE 里格式化一律拒绝。
+- **USB PDD**（`SRC\DRIVERS\USBFN\sh7305_usbfn.cpp`，和公共 MDD `ufnmdd.lib` 链成
+  `classpad_usbfn.dll`）。控制器是瑞萨 USBHS 系列，寄存器和时序照 gint 的驱动。端点 0 走
+  CFIFO，批量 OUT 走 D0FIFO、IN 走 D1FIFO，每次一个包；SET_ADDRESS 由控制器自己应答，用
+  `UFN_MSG_SET_ADDRESS` 通知 MDD。中断 INTEVT 0xA20（IMR9 bit 1，IPRF 7:4），OAL 里是逻辑
+  IRQ 50（`intr_cfg.h`、`intr.c`，**nk.exe 要重建，KDEV 表要重新生成**）。供电：只在插着线时
+  给控制器上电（每 500 ms 看 Port U bit 1，Casio 的顺序上电），拔线后全部关掉；和电池驱动
+  共用具名互斥量 `ClassPadUsbPower`（`battif.c` 相应改了）。注册表 `CablePin`=0 改成一直
+  上电、只看 VBUS（万一那个引脚在某些机器上不跟线）。
+  `make -C dbt GUEST=usbfn run` 用驱动自己的寄存器定义和 FIFO 例程（`classpad_usbreg.h`）
+  在翻译器里扮演一个大容量存储设备：枚举（67 字节的配置描述符，正好一个满包加 3 字节的尾巴）、
+  INQUIRY、READ CAPACITY、READ(10)，主机 WRITE(10) 的 19 个扇区经 Fugue 写入器进闪存。
+  这验证的是寄存器时序和经过翻译器之后的字节序，不是 PDD 和 MDD 之间的交互。
+- **大容量存储**用 CE 自带的 `usbmsfn.dll`（`SYSGEN_USBFN_STORAGE`），`DeviceName`=`DSK1:`。
+  它在 ATTACH 时 `OpenStore` + `DismountStore`，DETACH 时关闭并重新挂载，所以主机拿着盘的时候
+  CE 自己的 `\Storage` 是卸载的，不会两边同时写。
+- **CDC ACM**（`SRC\DRIVERS\USBACM\usbacm.cpp` → `classpad_usbacm.dll`）。CE 自带的串口
+  function（`serialusbfn`）是厂商自定义接口，macOS 和 Linux 没有驱动。这个 DLL `#include`
+  PB 树里微软的 `usbfndrv.cpp`（不复制进仓库），在注册之前把描述符改成 CDC ACM（设备类 02，
+  接口 0 通信类带四个功能描述符和中断端点，接口 1 数据类带两个批量端点），并加上
+  SET/GET_LINE_CODING。主机上是 `/dev/cu.usbmodem*`，CE 里是一个 COM 口。
+  联网组件（2026-11-11 加，未构建）：原来的镜像里只有 Standard Shell 带进来的 Winsock 外壳
+  （afd、cxport、winsock、ws2 等），`tcpstk.dll` 从没 sysgen 过，`romexclude.txt` 删掉的只是
+  那层外壳。现在 `classpad.bat` 设 `SYSGEN_MODEM`（Unimodem、AsyncMac，经 winceos.bat 带出
+  TAPI、PPP、TCP/IP、NDIS、iphlpapi）、`SYSGEN_CONNMC`（拨号连接文件夹：connmc、rnaapp、
+  netui）、`SYSGEN_NETUTILS`（ping、ipconfig 等）；`romexclude.txt` 只再排除 netbios 和
+  serial；`extmove.txt` 把这些网络模块和 `classpad_usbacm.dll` 挪到 EXT。
+- **切换**：Control Panel > USB Connection（`SRC\APPS\USBCPL`，`classpad_usb.cpl`，对话框里选 USB Mode）用 MDD 的
+  `IOCTL_UFN_CHANGE_CURRENT_CLIENT` / `IOCTL_UFN_CHANGE_DEFAULT_CLIENT` 在两个 function 之间
+  换，主机看到的是拔线再插线。默认是大容量存储。VID/PID 用的是 pid.codes 的测试号
+  （1209:0001/0002），只能自用。
+- **模拟器**：`dbt/emu-patch/add_classpad_usbhost.py`（**还没有打到 `~/Dev/casio-emu` 上**，
+  只在一份副本上打过、编译过、跑过上面的 guest）。`HLE_USB_CE=1` 时在 ClassPad 配置上打开
+  USB 主机、把中断改成 0xA20、补上几处芯片的行为；CDC ACM 设备的批量管道桥到一个 pty。
+  模拟器没有带 OUT 数据阶段的控制传输，所以 SET_LINE_CODING 在模拟器里走不到。
+- **VM 构建后的模拟器验证（2026-11-11，NK.bin 4.69 MB，EXT.bin 7.42 MB，一次编过）。**
+  打了 usbhost 补丁的模拟器副本上：`CLASSPAD STORAGE: ... writable, 241 erased sectors`；
+  `CLASSPAD USB: started, SYSINTR 16`；主机枚举到 1209:0001、08/06/50，INQUIRY、TEST UNIT
+  READY、READ CAPACITY（最大 LBA 49535）、READ(10) 都是状态 0，LBA 0 读回的是 MBR；
+  `HLE_USB_PUT_FILE` 在 LBA 4000 写 19 个扇区，退出时导出的 NOR（`HLE_NORSAVE_AT_EXIT`）里
+  簇 500-502 和源文件逐字节一致（19 个扇区合成 3 条记录），导出的卷通过 test_fugue 和
+  test_fuguewr。不接 USB 启动：桌面正常，My Device 里有 Storage。命令行：
+  `HLE_USB=1 HLE_USB_PLUG=1 HLE_USB_CE=1 HLE_USB_BOT=1 make -C dbt NKBIN=… EXTBIN=…
+  STORAGE=… EMU=<打过补丁的模拟器> RUN_SECS=420 nkshot`。
+  在 CE 里写：`HLE_CB_TOUCHSEQ="35,40,700000,1200;35,40,702400,1200;37,135,950000,1200;
+  37,135,952400,1200;19,9,1150000,1500;47,51,1250000,3000"`（打开 My Device、Storage、File
+  菜单、New Folder；菜单项要按住 3000 个 tick，1500 不算数）加 `HLE_EXIT_AT=1450000`：导出的
+  NOR 里根目录多了 `NEWFOL~1`（带长文件名项），改动是 4 条记录（两份 FAT、根目录、新目录的簇）。
+  INQUIRY 的厂商/产品串（`SRC\DRIVERS\USBMS`，`classpad_usbms.dll`）和控制面板里的
+  USB Connection（`SRC\APPS\USBCPL`，`classpad_usb.cpl`）是之后加的，还没构建。
+  CDC ACM（同日稍后的镜像）：Control Panel > USB Connection 点 Yes 之后驱动以 CDC_ACM 重新
+  启动，主机重新枚举到 1209:0002、设备类 02、67 字节的配置描述符（通信接口 02/02/01 带四个
+  功能描述符和中断端点 83，数据接口 0A 带批量端点 81/02），SET_CONTROL_LINE_STATE 完成，
+  pty 桥打开。切换程序要通过总线命名空间打开驱动（`SRC\INC\classpad_ufn.h`：
+  `FindFirstDevice` 取 `$bus\...` 名，`DEVACCESS_BUSNAMESPACE`），用 `UFN1:` 打开的句柄上
+  那几个 IOCTL 会落到 PDD 而失败。模拟触笔：短按（1500 tick）和双击都不可靠，图标用 3000
+  tick 的长按选中，再 File > Open。Casio 的 OS 接受 CE 写过的卷和整理（optimize）过的卷
+  （用户在模拟器里验证，2026-11-11）。之后加的、还没构建：Control Panel > Storage Memory
+  （`SRC\APPS\STORCPL`，`classpad_storage.cpl`：卷的状态和 Optimize 按钮，走驱动的
+  `IOCTL_CLASSPAD_FUGUE_STATUS` / `_OPTIMIZE`；外壳的属性页没有扩展接口，靠常驻程序轮询往里
+  塞按钮的做法用户否决了，太耗资源）、XP 风格的 USB 图标（`tools/mkusbicon.py`）。
+  Storage Memory 在 CE 里跑过一次（同日，真机卷加一个 CE 建的文件夹）：对话框显示 238/242
+  空闲、3 个含旧副本的扇区；Optimize 确认后导出的 NOR 里扇区 0、1、2 已擦除，只剩扇区 3，
+  DETAIL 的擦除计数 0、1、2 各为 1，15 个簇内容不变，卷通过 test_fugue 和 test_fuguewr。
+  这是回收和擦除第一次走完整的 CE 驱动路径。它的图标改为运行时取 `ceshell.dll` 的
+  IDI_STORAGECARD（0x1503），这一改动还没构建。
+  界面定稿后的镜像（同日）：Control Panel 里 Fugue File System（系统的存储图标）和 USB
+  Connection（XP 风格图标）；Fugue File System 逐扇区整理 3 步，NOR 核对同上；USB Connection
+  的 USB Mode 对话框选 Serial Port (CDC ACM) 点 OK，主机重新枚举成 CDC ACM。对话框模板里
+  GROUPBOX 要放在最后，否则 CE 的分组框会盖住写在它后面的控件。设备版翻译器
+  `make -C dbt DEVICE=1 KDEV=1 TLB_REFILL=1 BUILD=build-dev50h hhk` 能构建并带 NOR 服务，
+  没上过真机；旧的 hh3 下存储区只读。
+  **Trim（2026-11-11）。** Fugue 不知道文件被删：FAT 里已释放的簇在 Fugue 里仍是"有效记录"，每次回收都
+  原样搬走，用过一阵的卷几乎没有余量，真机上表现为空闲扇区用光后每次写入都要等一次回收（打开文件夹
+  都卡）。`classpad_fuguetrim.h` 按字节走一遍 FAT16（MBR → 第一分区 → BPB；逻辑簇 8 个 LBA，
+  和 FAT 簇不一定对齐，所以它碰到的每个 FAT 簇、每份 FAT 都得是 0），把文件系统不用的逻辑簇报给
+  写入器的 `ClasspadFugueTrim`：只改内存里的映射（该簇从此读成 0xFF，它的记录算作死记录，所在扇区
+  回收时不再搬运），不写 flash。代价是不变式变了——没有有效记录的簇在 flash 里仍可能有旧记录，下次
+  挂载会把旧内容带回来（对没人用的簇无所谓），而之后重写该簇必须用比这些残留记录都低的版本号，否则
+  下次扫描旧记录会赢：写入器因此留着扫描得到的 `ver[]`（每簇的版本下限，`ClasspadFugueTrimInit`）。
+  驱动（`fuguedsk.c` 的 `TrimNow`）在将要回收时（空闲扇区 < 8）、以及 Fugue File System 的状态和
+  Optimize 请求前走 FAT（经过自己的缓存）；**驱动启动以来写过的簇不 trim**（文件系统可能先写数据、
+  后写认领它的 FAT 项，大容量存储模式下的电脑也一样），这些簇要到下次启动之后才会被丢弃。
+  host 测试：合成 FAT16 六种布局对照逐 LBA 的暴力算法；trim 两千多个簇后整理、重写、重新挂载，
+  内容全对；guest 测试在翻译器下走同一段。CE 驱动这条路径还没构建，没上过真机。
+  还没验证的：串口上的数据收发和 PPP（`classpad_usbnet.exe`、`tools/usbppp.sh`）（默认 function 是
+  大容量存储，切换要点 `classpad_usbmode.exe`）、Casio 的 OS 是否接受写过的卷、真机上的一切。
+- **要在 VM 里做的**：`classpad.bat` 新增 `SYSGEN_USBFN=1`、`SYSGEN_USBFN_STORAGE=1`，要重新
+  Sysgen；新模块（`classpad_usbfn.dll`、`classpad_usbacm.dll`、`usbmsfn.dll`、
+  `classpad_usbmode.exe`）会占 NK 的空洞，放不下时用 `extmove.txt` 挪到 EXT。VM 里的
+  `platform.bib` 和 `platform.reg` 已经和仓库不一样（别的会话改过），这两个文件要合并，不能
+  整个覆盖。
+
 ## 九、还没做的
 
 - 在 VM 里构建（第一次构建会暴露 SDK 的差异：头文件、`WARNISERROR`）。

@@ -68,7 +68,27 @@ FILES
 ; @CESYSGEN IF CE_MODULES_FATFSD
 MODULES
     fuguedsk.dll        $(_FLATRELEASEDIR)\fuguedsk.dll        NK  SH
+    classpad_storage.cpl $(_FLATRELEASEDIR)\classpad_storage.dll NK  SH
 ; @CESYSGEN ENDIF CE_MODULES_FATFSD
+
+; USB function: the controller driver (SRC\DRIVERS\USBFN) and the CDC ACM
+; serial client (SRC\DRIVERS\USBACM); the mass storage client is
+; classpad_usbms.dll (SRC\DRIVERS\USBMS: usbmsfn with inquiry data), and
+; romexclude.txt drops the stock usbmsfn.dll of common.bib.
+; classpad_usb.cpl (SRC\APPS\USBCPL, Control Panel > USB Connection)
+; switches between the clients.
+; classpad_usbnet.exe (SRC\APPS\USBNET, Programs > USB Network) dials PPP
+; over the serial port.
+; @CESYSGEN IF CE_MODULES_USBFN
+MODULES
+    classpad_usbfn.dll  $(_FLATRELEASEDIR)\classpad_usbfn.dll  NK  SH
+    classpad_usbacm.dll $(_FLATRELEASEDIR)\classpad_usbacm.dll NK  SH
+    classpad_usb.cpl    $(_FLATRELEASEDIR)\classpad_usb.dll    NK  SH
+    classpad_usbms.dll  $(_FLATRELEASEDIR)\classpad_usbms.dll  NK  SH
+    classpad_usbnet.exe $(_FLATRELEASEDIR)\classpad_usbnet.exe NK  S
+FILES
+    usbnet.lnk          $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\usbnet.lnk       NK   S
+; @CESYSGEN ENDIF CE_MODULES_USBFN
 
 MODULES
     classpad_rotatekey.exe $(_FLATRELEASEDIR)\classpad_rotatekey.exe NK  S

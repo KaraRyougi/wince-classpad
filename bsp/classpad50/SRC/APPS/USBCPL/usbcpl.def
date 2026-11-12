@@ -1,0 +1,4 @@
+LIBRARY     CLASSPAD_USB
+
+EXPORTS
+    CPlApplet

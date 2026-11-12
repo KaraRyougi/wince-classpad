@@ -497,6 +497,9 @@ void dbt_putc(int c)
 #else
     (void)c;
 #endif
+#ifdef DBT_FLASH_LOG
+    dbt_flashlog_putc(c);           /* make FLASHLOG=1: the boot's output into a spare NOR sector (rt/nor.c) */
+#endif
 #ifdef DBT_LCD_CONSOLE
     lcdcon_putc(c);                 /* the panel console of DEVICE=1 builds (rt/lcdcon.c) */
 #endif
@@ -2656,7 +2659,7 @@ static void invalidate_all_but_rom(void)
 #define HC_DEVRANGE 0xFC                /* tests: translate [r4, r5) device-aware from now on (drops all translations at the next lookup) */
 #define HC_LCD_BLIT 0xFD                /* r4 = pixels as the guest stores them (P1/P2 address), r5 = pixel count, r6 = 16-bit LCD data port: written natively */
 #define HC_LCD_PUSH 0xFE                /* DCS panel: r4 = pixels (P1/P2), r5 = first row, r6 = rows, r7 = width: CASET/PASET/RAMWR and the pixels in one go; r7 = CLASSPAD_ROT_PUSH_TAG | angle: the rotated form of classpad_lcdrot.h */
-#define HC_STANDBY 0xFF                 /* SH7305 R-standby (docs/06): r4 = flags (unused) -> r0 = 1 after a wake-up, 0 if the machine did not enter it */
+#define HC_STANDBY 0xFF                 /* SH7305 R-standby (docs/06): r4 = 0 -> r0 = 1 after a wake-up, 0 if the machine did not enter it; r4 = HC_NOR_TAG | op: NOR programming (nor.c) */
 
 #define REG_EXPEVT (*(volatile sf_u32 *)0xFF000024u)
 #define REG_TEA    (*(volatile sf_u32 *)0xFF00000Cu)
@@ -3480,7 +3483,11 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
         }
         return RT_ACT_RESUME;
     case HC_STATS: print_stats(); return RT_ACT_RESUME;
-    case HC_STANDBY: ctx->r[0] = dbt_standby(); return RT_ACT_RESUME;
+    case HC_STANDBY:
+        /* r4 tagged: the NOR programming service (nor.c); anything else is the standby */
+        if ((ctx->r[4] & 0xFFFFFF00u) == HC_NOR_TAG) ctx->r[0] = dbt_nor(ctx->r[4] & 0xFFu, ctx->r[5], ctx->r[6], ctx->r[7]);
+        else ctx->r[0] = dbt_standby();
+        return RT_ACT_RESUME;
     case HC_BENCH: ctx->r[0] = dbt_bench_native(ctx->r[4], ctx->r[5]); return RT_ACT_RESUME;
     case HC_TLB_INVAL:
         if (ctx->r[5] == 0) user_mappings_changed(1);
@@ -3677,11 +3684,12 @@ static int hypercall(dbt_gctx *ctx, sf_u32 nr)
         case 434: v = dbt_stat.tlb_revals; break;
 #endif
         case 61: v = 1; break;         /* statistics ABI version */
-        case 62:                       /* features: bit 0 tick sampling, bit 1 HC_LCD_PUSH panel operations */
+        case 62:                       /* features: bit 0 tick sampling, bit 1 HC_LCD_PUSH panel operations, bit 2 NOR programming (nor.c) */
 #ifndef DBT_NO_TICK_SAMPLING
             v = 1u;
 #endif
             v |= CLASSPAD_LCD_OP_FEATURE;
+            v |= 4u;
             break;
 
         default: v = ctx->r[4] >= 64 ? sample_stat(ctx->r[4]) : 0u; break;
@@ -4543,6 +4551,9 @@ deliver:
     }
 #ifdef DBT_IRQ_ENTRY_CACHE
     if (ctx->vec_off == 0x600) remember_irq_entry(b, guest_pc);
+#endif
+#ifdef DBT_FLASH_LOG
+    dbt_flashlog_irq(guest_pc, ctx->ssr, ctx->vec_off == 0x600 ? ctx->intevt : 0x10000u | ctx->expevt);   /* where the boot is (rt/nor.c) */
 #endif
 #ifdef DBT_IRQPIN_GUARD
     if (ctx->vec_off == 0x600) dbt_irqpin_guard(ctx->intevt);   /* device: IRQ pins the OAL does not know (rt/irqpins.c) */

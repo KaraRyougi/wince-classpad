@@ -1,0 +1,23 @@
+// storcpl.rc - the Control Panel entry's name and description (its icon is the
+// shell's storage icon, loaded at run time) and its dialog: the volume's
+// state, Optimize, Close. An optimise shows the progress bar and no wait
+// cursor (it would sit in the middle of the dialog, over the text or the bar).
+#include <windows.h>
+#include "storcpl.h"
+
+STRINGTABLE DISCARDABLE
+BEGIN
+    IDS_STORAGE_NAME    "Fugue File System"
+    IDS_STORAGE_INFO    "Optimizes the Fugue file system"
+END
+
+IDD_STORAGE DIALOG DISCARDABLE 0, 0, 156, 76
+STYLE DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Fugue File System"
+FONT 8, "Tahoma"
+BEGIN
+    LTEXT           "",IDC_STORAGE_STATUS,7,7,142,25
+    CONTROL         "",IDC_STORAGE_PROGRESS,"msctls_progress32",NOT WS_VISIBLE | WS_BORDER,7,38,142,9
+    PUSHBUTTON      "&Optimize",IDC_STORAGE_OPTIMIZE,7,55,62,14
+    DEFPUSHBUTTON   "Close",IDOK,87,55,62,14
+END

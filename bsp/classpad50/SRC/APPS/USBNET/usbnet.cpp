@@ -1,0 +1,141 @@
+//------------------------------------------------------------------------------
+//  usbnet.cpp - classpad_usbnet.exe: "USB Network", the network over the USB cable
+//
+//  One step from "cable in" to a PPP connection with the computer at the
+//  other end (which runs pppd on the CDC ACM port, tools/usbppp.sh):
+//    1. the USB function becomes the serial port (CDC_ACM) if it is not
+//       (the USB function driver's IOCTL_UFN_CHANGE_CURRENT_CLIENT; the
+//       default for the next boot is left alone),
+//    2. the serial port shows up as a direct-connection RAS device (Unimodem
+//       gives it the function's FriendlyName); this waits for it,
+//    3. a RAS entry "USB" is written for that device: PPP, TCP/IP, address
+//       and name servers from the other end, no user name or password,
+//    4. rnaapp.exe dials it (-p: no prompt, -m: minimise when connected).
+//       The connection then has its icon in the taskbar, where it is also
+//       ended.
+//
+//  CE's direct connection opens with the text "CLIENT" and waits for
+//  "CLIENTSERVER" before PPP starts: the script on the computer answers it.
+//------------------------------------------------------------------------------
+#include <windows.h>
+#include <windev.h>
+#include <ras.h>
+#include <raserror.h>
+#include <usbfnioctl.h>
+#include "classpad_ufn.h"
+
+#define CLIENT_SERIAL   TEXT("CDC_ACM")
+#define SERIAL_KEY      TEXT("Drivers\\USB\\FunctionDrivers\\CDC_ACM")
+#define ENTRY_NAME      TEXT("USB")
+#define TITLE           TEXT("USB Network")
+#define MAX_DEVICES     16
+#define DEVICE_WAIT_MS  8000
+
+static void Fail(LPCTSTR what)
+{
+    MessageBox(NULL, what, TITLE, MB_OK | MB_ICONEXCLAMATION | MB_TOPMOST);
+}
+
+// The serial function, if the driver runs another one
+static BOOL SelectSerial(void)
+{
+    UFN_CLIENT_INFO current;
+    UFN_CLIENT_NAME wanted;
+    DWORD returned;
+    BOOL ok = TRUE;
+    HANDLE ufn = ClasspadOpenUfnBus();
+
+    if (ufn == INVALID_HANDLE_VALUE) return FALSE;
+    memset(&current, 0, sizeof current);
+    ok = DeviceIoControl(ufn, IOCTL_UFN_GET_CURRENT_CLIENT, NULL, 0, &current, sizeof current, &returned, NULL);
+    if (ok && _tcsicmp(current.szName, CLIENT_SERIAL)) {
+        memset(&wanted, 0, sizeof wanted);
+        _tcscpy(wanted.szName, CLIENT_SERIAL);
+        ok = DeviceIoControl(ufn, IOCTL_UFN_CHANGE_CURRENT_CLIENT, &wanted, sizeof wanted, NULL, 0, &returned, NULL);
+    }
+    CloseHandle(ufn);
+    return ok;
+}
+
+// The direct-connection device that is the USB serial port, into name[].
+// Unimodem names a device by the FriendlyName of its driver's registry key,
+// so that is what is looked for: the name the CDC ACM function's key has
+// now, whatever it says. With no such device but exactly one direct
+// connection in the list, that one is it (the image has no other serial
+// port).
+static BOOL FindDevice(LPTSTR name)
+{
+    static RASDEVINFO devices[MAX_DEVICES];
+    TCHAR friendly[RAS_MaxDeviceName + 1];
+    DWORD size, count, i, type, direct = 0, only = 0;
+    HKEY key;
+
+    friendly[0] = 0;
+    if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, SERIAL_KEY, 0, 0, &key) == ERROR_SUCCESS) {
+        size = sizeof friendly - sizeof(TCHAR);
+        if (RegQueryValueEx(key, TEXT("FriendlyName"), NULL, &type, (LPBYTE)friendly, &size) != ERROR_SUCCESS || type != REG_SZ) friendly[0] = 0;
+        friendly[RAS_MaxDeviceName] = 0;
+        RegCloseKey(key);
+    }
+
+    size = sizeof devices;
+    count = 0;
+    devices[0].dwSize = sizeof(RASDEVINFO);
+    if (RasEnumDevices(devices, &size, &count)) return FALSE;
+    for (i = 0; i < count && i < MAX_DEVICES; i++) {
+        if (_tcsicmp(devices[i].szDeviceType, RASDT_Direct)) continue;
+        if (friendly[0] && _tcsstr(devices[i].szDeviceName, friendly)) {
+            _tcscpy(name, devices[i].szDeviceName);
+            return TRUE;
+        }
+        direct++;
+        only = i;
+    }
+    if (direct != 1) return FALSE;
+    _tcscpy(name, devices[only].szDeviceName);
+    return TRUE;
+}
+
+int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPTSTR commandLine, int show)
+{
+    static RASENTRY entry;
+    static RASDIALPARAMS params;
+    TCHAR device[RAS_MaxDeviceName + 1], args[64];
+    PROCESS_INFORMATION pi;
+    DWORD start;
+
+    // The network components live in the EXT region: without it the RAS
+    // calls below have nobody to answer them (and end the program with an
+    // exception), so this is asked first, before USB is switched over.
+    if (!IsAPIReady(SH_COMM)) { Fail(TEXT("Networking is not available.")); return 1; }
+    if (!SelectSerial()) { Fail(TEXT("Cannot switch USB to serial port mode.")); return 1; }
+
+    start = GetTickCount();
+    while (!FindDevice(device)) {
+        if (GetTickCount() - start > DEVICE_WAIT_MS) { Fail(TEXT("The USB serial port is not available.")); return 1; }
+        Sleep(250);
+    }
+
+    memset(&entry, 0, sizeof entry);
+    entry.dwSize = sizeof entry;
+    entry.dwfOptions = RASEO_IpHeaderCompression | RASEO_SwCompression;
+    entry.dwfNetProtocols = RASNP_Ip;
+    entry.dwFramingProtocol = RASFP_Ppp;
+    _tcscpy(entry.szDeviceType, RASDT_Direct);
+    _tcscpy(entry.szDeviceName, device);
+    if (RasSetEntryProperties(NULL, ENTRY_NAME, &entry, sizeof entry, NULL, 0)) { Fail(TEXT("Cannot create the connection.")); return 1; }
+
+    memset(&params, 0, sizeof params);
+    params.dwSize = sizeof params;
+    _tcscpy(params.szEntryName, ENTRY_NAME);
+    RasSetEntryDialParams(NULL, &params, FALSE);        // no user name, no password
+
+    wsprintf(args, TEXT("-p -m -e%s"), ENTRY_NAME);
+    if (!CreateProcess(TEXT("rnaapp.exe"), args, NULL, NULL, FALSE, 0, NULL, NULL, NULL, &pi)) {
+        Fail(TEXT("Cannot start the connection."));
+        return 1;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return 0;
+}

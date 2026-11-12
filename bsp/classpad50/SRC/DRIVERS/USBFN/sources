@@ -1,0 +1,28 @@
+!if 0
+classpad_usbfn.dll - the USB function controller driver: the public MDD
+(ufnmdd.lib, sysgen'd with SYSGEN_USBFN, which classpad.bat sets) plus the
+PDD for the SH7305 USB module (sh7305_usbfn.cpp). The MDD brings the stream
+entry points (UFN_*) and DllEntry; it loads the function client named in
+[HKLM\Drivers\USB\FunctionDrivers] (platform.reg).
+!endif
+
+TARGETNAME=classpad_usbfn
+TARGETTYPE=DYNLINK
+RELEASETYPE=PLATFORM
+WINCEOEM=1
+SYNCHRONIZE_DRAIN=1
+
+DLLENTRY=DllEntry
+DEFFILE=classpad_usbfn.def
+
+INCLUDES=$(INCLUDES);$(_TARGETPLATROOT)\src\inc
+
+SOURCELIBS= \
+    $(_COMMONOAKROOT)\lib\$(_CPUINDPATH)\ufnmdd.lib
+
+TARGETLIBS= \
+    $(_COMMONSDKROOT)\lib\$(_CPUINDPATH)\coredll.lib \
+    $(_COMMONOAKROOT)\lib\$(_CPUINDPATH)\ceddk.lib
+
+SOURCES= \
+    sh7305_usbfn.cpp

@@ -39,3 +39,4 @@ bsp/classpad50/FILES/spreadce/*
 !bsp/classpad50/FILES/spreadce/README.md
 !bsp/classpad50/FILES/spreadce/spreadce.lnk
 bsp/tests/test_fugue
+bsp/tests/test_fuguewr

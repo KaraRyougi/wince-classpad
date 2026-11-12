@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """mkfugue.py - build a test image of Casio's storage memory (Fugue + FAT16)
-for the read-only CE driver (bsp/classpad50/SRC/DRIVERS/FUGUEDSK,
-classpad_fugue.h) and list what such an image holds.
+for the CE driver (bsp/classpad50/SRC/DRIVERS/FUGUEDSK, classpad_fugue.h,
+classpad_fuguewr.h) and list what such an image holds.
 
   mkfugue.py -o storage.bin [file ...]     a volume holding the files (8.3 names, root directory)
   mkfugue.py --list <storage.bin|nor.bin>  the root directory of a volume or of a 64 MiB chip dump
@@ -10,16 +10,18 @@ The output is the storage area of the chip, 242 sectors of 128 KiB (chip
 offset 0x1A20000; `nkflash.py --fugue` puts it into the emulator's NOR). The
 FAT geometry is the one OS 02.01.7003 formats (MBR with one type 0E
 partition at LBA 29, 49503 sectors, 8 sectors per cluster, 2 FATs of 25
-sectors, 512 root entries). The Fugue side holds only what the reader looks
-at: DATA records (kind 0x11, version, logical cluster, "ZZZ", ECC) for the
-clusters that have content, written from the first page on. It carries no
-FINFO or anchor records, so this is NOT a volume Casio's OS would accept:
-never flash it to a calculator.
+sectors, 512 root entries). The Fugue side is written the way the fx-CP400's
+OS writes it (classpad_fuguewr.h): a FINFO record opening each sector used,
+the DETAIL record with the erase counters, DATA records with the payload CRC
+and slice ECCs for the clusters that have content, and the tail cluster
+(0x1837). The driver's writer accepts it. Whether Casio's OS does has not
+been tried: do not flash it to a calculator.
 """
 import os, struct, sys
 
 SECTORS, SECTOR, PAGE, META_OFF, META = 242, 0x20000, 0x1000, 0x1F000, 0x40
 CHIP_OFF = 0x01A20000
+TAIL_LC = 0x1837
 HIDDEN, TOTAL, SPC, RESERVED, FATS, FATSZ, ROOT = 29, 49503, 8, 1, 2, 25, 512
 ROOT_SECS = ROOT * 32 // 512
 DATA_START = RESERVED + FATS * FATSZ + ROOT_SECS            # in the partition
@@ -46,11 +48,45 @@ def ecc(m):
     return bytes(out)
 
 
-def record(lc, version):
+def crc16(data):
+    """CRC-16/CCITT-FALSE of a payload (record bytes 8..9)"""
+    crc = 0xFFFF
+    for b in data:
+        crc ^= b << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+    return crc
+
+
+def slice_ecc(data):
+    """the 3 ECC bytes of one 512-byte slice (classpad_fuguewr.h ClasspadFugueSliceEcc)"""
+    r4, r1, r7 = 0xFF, 0x1FF, 0x1FF
+    for i, b in enumerate(data):
+        if not b:
+            continue
+        for j in range(8):
+            if b >> j & 1:
+                r4 ^= COL[j]
+        if bin(b).count("1") & 1:
+            r1 ^= i
+            r7 ^= ~i & 0x1FF
+    out = [((r4 & 0x3F) << 2) | ((r1 >> 8 & 1) << 1) | (r7 >> 8 & 1)]
+    for k in (1, 0):
+        s7 = sum(((r7 >> (4 * k + j)) & 1) << (2 * j) for j in range(4))
+        s1 = sum(((r1 >> (4 * k + j)) & 1) << (2 * j + 1) for j in range(4))
+        out.append((0xAA | s7) & (0x55 | s1))
+    return bytes(out)
+
+
+def record(lc, version, payload=None, kind=0x11):
     m = bytearray(b"\xff" * META)
-    m[0], m[1] = 0x11, 0x0F
+    m[0], m[1] = kind, 0x0F
     m[2:6] = struct.pack(">I", version)
     m[6:8] = struct.pack(">H", lc)
+    if payload is not None:
+        m[8:10] = struct.pack(">H", crc16(payload))
+        for q in range(8):
+            m[10 + 3 * q:13 + 3 * q] = slice_ecc(payload[q * 512:(q + 1) * 512])
     m[34:37] = b"ZZZ"
     m[37:40] = ecc(m)
     return bytes(m)
@@ -110,16 +146,30 @@ def build(files):
     put(HIDDEN + TOTAL - 1, bytes(512))
 
     vol = bytearray(b"\xff" * (SECTORS * SECTOR))
-    slot = 0                                                # running page index over all sectors, 30 data pages each
-    for lc in sorted({lba // 8 for lba in disk}):
-        page = b"".join(disk.get(lc * 8 + i, bytes(512)) for i in range(8))
-        s, p = divmod(slot, 30)
+    state = {"slot": 0}                                     # running page index over all sectors, 30 pages each after the header
+
+    def append(kind, lc, page):
+        s, p = divmod(state["slot"], 30)
         if s >= SECTORS:
             sys.exit("mkfugue: the volume is full")
+        if p == 0:                                          # a new sector: its FINFO record, words counting down
+            word = 0xFFFFFFFE - s
+            head = (struct.pack(">II", word, ~word & 0xFFFFFFFF) * 3).ljust(PAGE, b"\xff")
+            vol[s * SECTOR:s * SECTOR + PAGE] = head
+            vol[s * SECTOR + META_OFF:s * SECTOR + META_OFF + META] = record(0xFFFF, 0xFFFFFFFF, head, 0x22)
         p += 1
         vol[s * SECTOR + p * PAGE:s * SECTOR + (p + 1) * PAGE] = page
-        vol[s * SECTOR + META_OFF + p * META:s * SECTOR + META_OFF + (p + 1) * META] = record(lc, 0xFFFFFFFE)
-        slot += 1
+        vol[s * SECTOR + META_OFF + p * META:s * SECTOR + META_OFF + (p + 1) * META] = record(lc, 0xFFFFFFFE, page, kind)
+        state["slot"] += 1
+
+    # the DETAIL record: no erase announced, every sector's erase count 0
+    detail = bytearray(b"\xff" * PAGE)
+    detail[0x200:0x200 + 3 * SECTORS] = bytes(3 * SECTORS)
+    append(0x88, 0xFFFF, bytes(detail))
+    for lc in sorted({lba // 8 for lba in disk}):
+        append(0x11, lc, b"".join(disk.get(lc * 8 + i, b"\xff" * 512) for i in range(8)))
+    # the tail cluster: the last raw sector of the 200-sector span, ending in CCCCCCCC
+    append(0x11, TAIL_LC, b"\xff" * (7 * 512) + bytes(508) + b"\xcc" * 4)
     return bytes(vol)
 
 

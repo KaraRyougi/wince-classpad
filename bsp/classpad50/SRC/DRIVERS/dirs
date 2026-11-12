@@ -3,4 +3,7 @@ DIRS=\
     display \
     fuguedsk \
     keybd \
-    touch
+    touch \
+    usbacm \
+    usbfn \
+    usbms

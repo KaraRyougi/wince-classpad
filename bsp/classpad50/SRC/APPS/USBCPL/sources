@@ -1,0 +1,24 @@
+!if 0
+classpad_usb.dll, in the image as classpad_usb.cpl - "USB Connection" in the
+Control Panel (usbcpl.cpp): the choice between the USB drive and the serial
+port.
+!endif
+
+!INCLUDE $(_TARGETPLATROOT)\sources.cmn
+
+TARGETNAME=classpad_usb
+TARGETTYPE=DYNLINK
+RELEASETYPE=PLATFORM
+WINCEOEM=1
+
+DLLENTRY=DllEntry
+DEFFILE=usbcpl.def
+
+INCLUDES=$(INCLUDES);$(_TARGETPLATROOT)\src\inc;$(_WINCEROOT)\public\common\sdk\inc;$(_WINCEROOT)\public\common\oak\inc
+
+TARGETLIBS= \
+    $(_PROJECTROOT)\cesysgen\sdk\lib\$(_CPUINDPATH)\coredll.lib
+
+SOURCES= \
+    usbcpl.cpp \
+    usbcpl.rc

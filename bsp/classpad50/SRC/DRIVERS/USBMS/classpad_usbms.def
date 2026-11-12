@@ -1,0 +1,5 @@
+LIBRARY     CLASSPAD_USBMS
+
+EXPORTS
+    Init
+    Deinit

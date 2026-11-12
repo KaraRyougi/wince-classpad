@@ -86,8 +86,12 @@ it, so `NK_FLASH` stays 0x81000000 and the usable window ends at 0x13E0000:
     already matches its window (compared while the menu is up), and a file
     that matches is not written again. Flashing shows the steps (check,
     erase N sectors, write N records, verify by comparing again), a bar for
-    the step and one for the whole job, and the time left; a failure stops
-    on an error screen that says what was and was not written. EXE (or a tap
+    the step and one for the whole job (no time estimate); a failure stops
+    on an error screen that says what was and was not written. A translator
+    built with `FLASHLOG=1` (diagnostic, for a boot that hangs on the
+    calculator) writes the boot's debug output into the last sector of the NK
+    window (`rt/nor.c`), and the loader of the next start copies it to
+    `\fls0\WINCE.LOG`. EXE (or a tap
     on Start) runs the action, Clear (or Cancel, or the close box) returns to
     HollyHock; a tap on an action selects it. The menu answers at once: the
     files are compared 64 KiB at a time between reads of the keys and the
@@ -112,7 +116,13 @@ it, so `NK_FLASH` stays 0x81000000 and the usable window ends at 0x13E0000:
     pushes atomically (`HC_LCD_PUSH`), so the log stays visible beside the
     running desktop: the way to read driver messages on the device.
   - The flasher (`hhk/nkflash.c`) writes `\fls0\NK.bin` (Platform Builder's output, copied
-    to the calculator's USB storage) into the window: an XIP build has each
+    to the calculator's USB storage) into the window. The files may be packed first:
+    `python3 tools/cepack.py NK.bin EXT.bin -o out/` writes them under the same names
+    at about half the size ("CEZ1": 32 KiB blocks, each a raw deflate stream, behind a
+    table of their lengths), and the loader reads either kind (`hhk/cez.c` unpacks a
+    block at a time while it compares, writes and verifies; `make -C dbt cez-test`
+    checks the reader on the host). So the storage memory holds about 6 MB of images
+    instead of 12, next to the 12 MB in the two windows. An XIP build has each
     record programmed at its own address (P1 address - 0x80000000), a RAM
     image goes as is to `NK_FLASH`; the same decision `tools/nkflash.py`
     makes for the emulator. The window check above runs before the first

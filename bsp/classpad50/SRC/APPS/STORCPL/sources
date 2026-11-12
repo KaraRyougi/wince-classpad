@@ -1,0 +1,25 @@
+!if 0
+classpad_storage.dll, in the image as classpad_storage.cpl - "Storage Memory"
+in the Control Panel (storcpl.cpp): the state of Casio's storage memory and
+the Optimize button (the storage driver's ioctls, SRC\INC\classpad_fugueioctl.h).
+!endif
+
+!INCLUDE $(_TARGETPLATROOT)\sources.cmn
+
+TARGETNAME=classpad_storage
+TARGETTYPE=DYNLINK
+RELEASETYPE=PLATFORM
+WINCEOEM=1
+
+DLLENTRY=DllEntry
+DEFFILE=storcpl.def
+
+INCLUDES=$(INCLUDES);$(_TARGETPLATROOT)\src\inc;$(_WINCEROOT)\public\common\sdk\inc;$(_WINCEROOT)\public\common\oak\inc
+
+TARGETLIBS= \
+    $(_PROJECTROOT)\cesysgen\sdk\lib\$(_CPUINDPATH)\coredll.lib \
+    $(_PROJECTROOT)\cesysgen\sdk\lib\$(_CPUINDPATH)\commctrl.lib
+
+SOURCES= \
+    storcpl.cpp \
+    storcpl.rc

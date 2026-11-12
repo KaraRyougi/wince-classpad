@@ -22,13 +22,16 @@
  * compare / write per window and follows nk_progress; nk_say's lines are
  * not shown, the last one stays in nk_last for the error screen. Files are
  * read through gint's file system (POSIX open/read/lseek on /NK.bin =
- * \fls0\NK.bin). */
+ * \fls0\NK.bin), and through hhk/cez.c: a file packed by tools/cepack.py
+ * (same name, about half the size) reads as the B000FF file it was made
+ * from, unpacked a block at a time. */
 #include <fcntl.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include "util.h"
 #include "norflash.h"
 #include "nkflash.h"
+#include "cez.h"
 
 #ifndef NK_FLASH
 #define NK_FLASH     0x80EE0000u
@@ -36,7 +39,7 @@
 #ifndef NK_FLASH_MAX
 #define NK_FLASH_MAX 0x00500000u
 #endif
-#define CHUNK  0x10000u
+#define CHUNK  0x8000u
 #define HDR    15u
 
 /* gint's file system takes POSIX paths in \fls0, the storage memory */
@@ -100,17 +103,6 @@ static int fail(const char *fmt, ...)
     return -1;
 }
 
-static int read_exact(int fd, void *buf, u32 n)
-{
-    u8 *p = buf;
-    while (n) {
-        int r = (int)read(fd, p, n > CHUNK ? CHUNK : n);
-        if (r <= 0) return -1;
-        p += r; n -= (u32)r;
-    }
-    return 0;
-}
-
 int window_has_our_image(const nkwindow *w)
 {
     const char *p = (const char *)w->base;
@@ -143,6 +135,7 @@ const char *nkflash_window_state(const nkwindow *w)
 
 void nkflash_close(void)
 {
+    cez_close();
     if (nk.fd >= 0) close(nk.fd);
     nk.fd = -1;
     if (nk.buf) free(nk.buf);
@@ -161,9 +154,10 @@ int nkflash_open(const nkwindow *w)
         if (nk.fd >= 0) { nk_say("file %s", w->paths[i]); break; }
     }
     if (nk.fd < 0) return NKF_NOFILE;
-    { off_t end = lseek(nk.fd, 0, SEEK_END); if (end < 0 || lseek(nk.fd, 0, SEEK_SET) != 0) { fail("file size"); goto bad; } nk.size = (u32)end; }
+    if (cez_open(nk.fd)) { fail("the file is damaged"); goto bad; }
+    nk.size = cez_size();                           /* of the image, packed or not */
     if (nk.size < HDR) { fail("file too short"); goto bad; }
-    if (read_exact(nk.fd, hdr, HDR) || memcmp(hdr, "B000FF\n", 7)) { fail("not a B000FF image"); goto bad; }
+    if (cez_read(hdr, HDR) || memcmp(hdr, "B000FF\n", 7)) { fail("not a B000FF image"); goto bad; }
     nk.start = le32(hdr + 7); nk.length = le32(hdr + 11);
     nk_say("image %08x + %x, %u bytes file", nk.start, nk.length, nk.size);
 
@@ -172,9 +166,20 @@ int nkflash_open(const nkwindow *w)
         if (nk.start != w->base) { fail("%s image does not start at %08x", w->name, w->base); goto bad; }
         if (nk.length > w->max) { fail("image larger than the window"); goto bad; }
         pos = HDR;
-        for (;;) {
+        /* a packed file says what its records are (cez_records): nothing is
+         * unpacked to learn it. Otherwise the file is walked, record by record. */
+        for (i = 0; i < cez_records(); i++) {
+            u32 addr, len, crc;
+            cez_record(i, &addr, &len, &crc);
+            if (addr < nk.start || len > nk.length || addr - nk.start > nk.length - len) { fail("record %08x+%x outside", addr, len); goto bad; }
+            if (addr - NOR_P1 < nk.lo) nk.lo = addr - NOR_P1;
+            if (addr - NOR_P1 + len > nk.hi) nk.hi = addr - NOR_P1 + len;
+            nk.nrec++;
+            nk.bytes += len;
+        }
+        while (!cez_records()) {
             u32 addr, len, chk;
-            if (read_exact(nk.fd, rec, 12)) { fail("record header at %u", pos); goto bad; }
+            if (cez_read(rec, 12)) { fail("record header at %u", pos); goto bad; }
             addr = le32(rec); len = le32(rec + 4); chk = le32(rec + 8);
             pos += 12;
             if (addr == 0 && chk == 0) { nk.entry = len; break; }
@@ -184,7 +189,7 @@ int nkflash_open(const nkwindow *w)
             nk.nrec++;
             nk.bytes += len;
             pos += len;
-            if (lseek(nk.fd, (off_t)pos, SEEK_SET) < 0) { fail("seek to %u", pos); goto bad; }
+            if (cez_seek(pos)) { fail("record %u leaves the file", nk.nrec); goto bad; }
         }
         nk_say("%u records, %08x..%08x, entry %08x", nk.nrec, NOR_P1 + nk.lo, NOR_P1 + nk.hi, nk.entry);
         if (nk.hi > WIN_HI || nk.lo < WIN_LO) { fail("records leave the window"); goto bad; }
@@ -210,7 +215,7 @@ static int compare_stream(u32 off, u32 n)
     while (n) {
         u32 c = n > CHUNK ? CHUNK : n;
         if (nk_abort) return -2;
-        if (read_exact(nk.fd, nk.buf, c)) return -1;
+        if (cez_read(nk.buf, c)) return -1;
         if (memcmp(nk.buf, (const void *)(NOR_P1 + off), c)) return 0;
         off += c; n -= c; nk.done += c;
         PROGRESS(NKP_COMPARE, nk.done, nk.bytes, NOR_P1 + off);
@@ -218,18 +223,46 @@ static int compare_stream(u32 off, u32 n)
     return 1;
 }
 
+/* the CRC-32 of n bytes of flash at offset off against crc: 1 same, 0 differs, -2 nk_abort */
+static int compare_crc(u32 off, u32 n, u32 crc)
+{
+    u32 have = 0;
+    while (n) {
+        u32 c = n > CHUNK ? CHUNK : n;
+        if (nk_abort) return -2;
+        have = cez_crc32(have, (const void *)(NOR_P1 + off), c);
+        off += c; n -= c; nk.done += c;
+        PROGRESS(NKP_COMPARE, nk.done, nk.bytes, NOR_P1 + off);
+    }
+    return have == crc;
+}
+
+/* A packed file carries the CRC-32 of every record (of the whole file, for
+ * a RAM image): the flash is compared by CRC and the file is not unpacked
+ * for it, which is what made the check of a packed image slow. The data
+ * itself is still checked on its way into the flash (the records' sums). */
 int nkflash_compare(void)
 {
     u8 rec[12];
-    u32 pos;
+    u32 pos, i, crc;
     int r;
     nk.done = 0;
+    if (nk.xip && cez_records()) {
+        for (i = 0; i < cez_records(); i++) {
+            u32 addr, len;
+            cez_record(i, &addr, &len, &crc);
+            r = compare_crc(addr - NOR_P1, len, crc);
+            if (r != 1) return r;
+        }
+        return 1;
+    }
+    if (!nk.xip && cez_file_crc(&crc)) return compare_crc(WIN_LO, nk.size, crc);
     if (nk.xip) {
         pos = HDR;
-        if (lseek(nk.fd, (off_t)pos, SEEK_SET) < 0) return -1;
+        if (cez_seek(pos)) return -1;
         for (;;) {
             u32 addr, len, chk;
-            if (read_exact(nk.fd, rec, 12)) return -1;
+            if (cez_read(rec, 12)) return -1;
             addr = le32(rec); len = le32(rec + 4); chk = le32(rec + 8);
             pos += 12;
             if (addr == 0 && chk == 0) return 1;
@@ -238,18 +271,21 @@ int nkflash_compare(void)
             pos += len;
         }
     }
-    if (lseek(nk.fd, 0, SEEK_SET) < 0) return -1;
+    if (cez_seek(0)) return -1;
     return compare_stream(WIN_LO, nk.size);
 }
 
 /* erase the sectors covering [lo, hi) after checking each is ours to erase */
 static int erase_span(u32 lo, u32 hi)
 {
-    u32 s, first = lo & ~(NOR_SECTOR - 1), n = 0, i = 0;
+    u32 s, first = lo & ~(NOR_SECTOR - 1), n = (hi - first + NOR_SECTOR - 1) / NOR_SECTOR, i = 0;
     int ours = window_has_our_image(nk.w) || nk.w->eact;
-    for (s = first; s < hi; s += NOR_SECTOR) {
-        n++;
-        if (!nor_sector_erased(s) && !ours)
+    PROGRESS(NKP_ERASE, 0, n, NOR_P1 + first);
+    /* a window that is not known to be ours must be blank; one that is needs
+     * no look (reading every sector through the uncached alias took seconds
+     * before the first sector showed on the screen) */
+    for (s = first; s < hi && !ours; s += NOR_SECTOR) {
+        if (!nor_sector_erased(s))
             return fail("sector at %08x is in use", NOR_P1 + s);
     }
     for (s = first; s < hi; s += NOR_SECTOR) {
@@ -267,7 +303,7 @@ static int program_stream(u32 off, u32 n, u32 *sum)
     u32 done = 0;
     while (n) {
         u32 c = n > CHUNK ? CHUNK : n, w = c + (c & 1);
-        if (read_exact(nk.fd, nk.buf, c)) return fail("read at file byte %u", done);
+        if (cez_read(nk.buf, c)) return fail("read at file byte %u", done);
         *sum += bytesum(nk.buf, c);
         if (w != c) nk.buf[c] = 0xFF;               /* odd tail: pad with the erased value */
         if (nor_program(off, nk.buf, w)) return fail("program at %08x", NOR_P1 + off);
@@ -286,10 +322,10 @@ int nkflash_write(void)
     PROGRESS(NKP_WRITE, 0, nk.bytes, nk.w->base);
     if (nk.xip) {
         pos = HDR;
-        if (lseek(nk.fd, (off_t)pos, SEEK_SET) < 0) return fail("seek");
+        if (cez_seek(pos)) return fail("seek");
         for (;;) {
             u32 addr, len, chk, sum = 0;
-            if (read_exact(nk.fd, rec, 12)) return fail("record header at %u", pos);
+            if (cez_read(rec, 12)) return fail("record header at %u", pos);
             addr = le32(rec); len = le32(rec + 4); chk = le32(rec + 8);
             pos += 12;
             if (addr == 0 && chk == 0) break;
@@ -303,7 +339,7 @@ int nkflash_write(void)
         if (memcmp((const char *)nk.w->base + 0x40, "ECEC", 4)) return fail("no ROMHDR at %08x", nk.w->base + 0x40);
     } else {
         u32 sum = 0;
-        if (lseek(nk.fd, 0, SEEK_SET) < 0) return fail("seek");
+        if (cez_seek(0)) return fail("seek");
         nk_say("programming %u bytes", nk.size);
         if (program_stream(WIN_LO, nk.size, &sum)) return -1;
     }

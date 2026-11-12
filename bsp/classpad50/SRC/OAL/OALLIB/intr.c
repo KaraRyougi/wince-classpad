@@ -20,6 +20,7 @@ static const CLASSPAD_IRQ_MASK g_irqMask[] = {
     { IRQ_KEYSC,      5, INTC_IMR5_KEYSC },
     { IRQ_TOUCH_PEN,  3, INTC_IMR3_TOUCH },
     { IRQ_RTC_ALARM,  10, INTC_IMR10_RTC_ALARM },
+    { IRQ_USB,        9, INTC_IMR9_USB },
 };
 
 static const CLASSPAD_IRQ_MASK *FindMask(UINT32 irq)
@@ -65,6 +66,10 @@ static UINT32 TouchIntrHandler(void)
 {
     return DeviceIntrHandler(3, INTC_IMR3_TOUCH, IRQ_TOUCH_PEN);
 }
+static UINT32 UsbIntrHandler(void)
+{
+    return DeviceIntrHandler(9, INTC_IMR9_USB, IRQ_USB);
+}
 extern UINT32 ClasspadRtcAlarmIsr(void);
 static UINT32 RtcAlarmIntrHandler(void)
 {
@@ -85,8 +90,9 @@ BOOL OALIntrInit()
     MMIO_W8(INTC_IMR(5), INTC_IMR5_KEYSC);
     MMIO_W8(INTC_IMR(3), INTC_IMR3_TOUCH);
     MMIO_W8(INTC_IMR(10), INTC_IMR10_RTC_ALARM);
+    MMIO_W8(INTC_IMR(9), INTC_IMR9_USB);
     MMIO_W16(INTC_IPRA, (MMIO_R16(INTC_IPRA) & 0x0FFF) | (IRQ_TMU0_PRIORITY << 12));
-    MMIO_W16(INTC_IPRF, (MMIO_R16(INTC_IPRF) & 0x0FFF) | (IRQ_KEYSC_PRIORITY << 12));
+    MMIO_W16(INTC_IPRF, (MMIO_R16(INTC_IPRF) & 0x0F0F) | (IRQ_KEYSC_PRIORITY << 12) | (IRQ_USB_PRIORITY << 4));
     MMIO_W16(INTC_IPRB, (MMIO_R16(INTC_IPRB) & 0xFF0F) | (IRQ_TOUCH_PRIORITY << 4));
     MMIO_W16(INTC_IPRK, (MMIO_R16(INTC_IPRK) & 0x0FFF) | (IRQ_RTC_PRIORITY << 12));
 
@@ -100,6 +106,9 @@ BOOL OALIntrInit()
         return FALSE;
     }
     if (!HookAndSetPriority(VEC_RTC_ALARM, (FARPROC)RtcAlarmIntrHandler, IRQ_RTC_PRIORITY)) {
+        return FALSE;
+    }
+    if (!HookAndSetPriority(VEC_USB, (FARPROC)UsbIntrHandler, IRQ_USB_PRIORITY)) {
         return FALSE;
     }
     OALIntrStaticTranslate(SYSINTR_RTC_ALARM, IRQ_RTC_ALARM);

@@ -1,0 +1,34 @@
+!if 0
+classpad_usbacm.dll - the USB serial function client with CDC ACM
+descriptors (usbacm.cpp), for hosts that have no driver for CE's
+vendor-specific serial interface (macOS, Linux). usbacm.cpp compiles
+Microsoft's client from PUBLIC\COMMON\OAK\DRIVERS\USBFN\CLASS\SERIAL (the
+first INCLUDES entry) and changes what it registers; the libraries are the
+ones cesysgen links serialusbfn.dll with: the serial MDD (com_mdd2), the
+common serial PDD and the function client library (SYSGEN_USBFN).
+!endif
+
+TARGETNAME=classpad_usbacm
+TARGETTYPE=DYNLINK
+RELEASETYPE=PLATFORM
+WINCEOEM=1
+SYNCHRONIZE_DRAIN=1
+
+DLLENTRY=DllEntry
+DEFFILE=classpad_usbacm.def
+
+CDEFINES=$(CDEFINES) -DUSE_NEW_SERIAL_MODEL
+
+INCLUDES=$(_PUBLICROOT)\common\oak\drivers\usbfn\class\serial;$(INCLUDES)
+
+SOURCELIBS= \
+    $(_COMMONOAKROOT)\lib\$(_CPUINDPATH)\com_mdd2.lib \
+    $(_COMMONOAKROOT)\lib\$(_CPUINDPATH)\serpddcm.lib \
+    $(_COMMONOAKROOT)\lib\$(_CPUINDPATH)\ufnclientlib.lib
+
+TARGETLIBS= \
+    $(_COMMONSDKROOT)\lib\$(_CPUINDPATH)\coredll.lib \
+    $(_COMMONOAKROOT)\lib\$(_CPUINDPATH)\ceddk.lib
+
+SOURCES= \
+    usbacm.cpp

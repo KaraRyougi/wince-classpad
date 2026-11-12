@@ -95,7 +95,7 @@ code, .mono { font-family: var(--f-mono); font-size: 12.5px; }
         <li>Four named actions instead of one EXE prompt. Each one says what it writes and whether it survives: <b>Persistent</b> (NK.bin in the NOR window) or <b>Non-persistent</b> (EXT.bin, cleared the next time Casio OS starts).</li>
         <li>Actions that need a missing file are greyed out and say which file is missing, so the user never presses EXE on something that cannot run.</li>
         <li>The status box answers "will this rewrite my flash?" before anything happens: what the window holds and whether NK.bin differs.</li>
-        <li>Flashing shows the step list, a bar for the current step and a bar for the whole job, with bytes and time left. Cancel is disabled while sectors are being written.</li>
+        <li>Flashing shows the step list, a bar for the current step and a bar for the whole job, with the bytes done (no time estimate). Cancel is disabled while sectors are being written.</li>
         <li>The start screen is on black, laid out like the CE 5.0 header art: the XP flag left of the original lettering (white on black, original resolution), then the marquee, which freezes at takeover.</li>
       </ul>
     </div>
@@ -384,14 +384,12 @@ function drawFlash(now){
   });
   const cur=j.steps[Math.min(js.k,j.steps.length-1)];
   const by=y+16;
-  groupBox(8,by,W-16,134,'Progress');
+  groupBox(8,by,W-16,122,'Progress');
   txt(cur.label,18,by+24,{bold:true});
   txt(cur.detail(js.p),18,by+40,{color:P.text2});
   progress(18,by+48,barW(30),js.p); txt(Math.round(js.p*100)+'%',W-20,by+59,{align:'right'});
   txt('All steps',18,by+90,{bold:true});
   progress(18,by+98,barW(30),js.overall); txt(Math.round(js.overall*100)+'%',W-20,by+109,{align:'right'});
-  const left=Math.max(0,Math.ceil((j.total-js.el)/1000));
-  txt('About '+left+' s left',18,by+128,{size:10,color:P.text2});
   // footer
   hline(0,H-50,W,P.edge); hline(0,H-49,W,P.white);
   button(W-86,H-40,76,'Cancel',{disabled:true});

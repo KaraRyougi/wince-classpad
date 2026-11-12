@@ -120,6 +120,15 @@ void dbt_putc(int c);
 void dbt_puts(const char *s);
 void dbt_puthex(sf_u32 v);
 void dbt_halt(const char *why) __attribute__((noreturn));
+/* nor.c: the guest's NOR programming service (HC_STANDBY with r4 = HC_NOR_TAG | op) */
+#define HC_NOR_TAG      0x4E4F5200u     /* "NOR", op in the low byte */
+#define HC_NOR_MAGIC    0x4E4F5231u     /* what the probe returns */
+sf_u32 dbt_nor(sf_u32 op, sf_u32 a, sf_u32 b, sf_u32 c);
+#ifdef DBT_FLASH_LOG
+void dbt_flashlog_init(sf_u32 nk_end);      /* nk_end: P1 address after the NK image */
+void dbt_flashlog_putc(int c);
+void dbt_flashlog_irq(sf_u32 guest_pc, sf_u32 ssr, sf_u32 intevt);
+#endif
 
 /* statistics */
 typedef struct {

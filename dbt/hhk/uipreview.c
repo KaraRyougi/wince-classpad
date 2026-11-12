@@ -48,7 +48,7 @@ int main(int argc, char **argv)
     ui_pressed = UI_HIT_CLOSE;
     ui_menu(&s, UA_CORE, 0);            save(dir, "menu-close");
     ui_pressed = UI_HIT_NONE;
-    ui_flash(&j, 1, "Record 3 of 7 " GFX_MIDDOT " 1.4 MB of 3.2 MB", 430, 610, 6);
+    ui_flash(&j, 1, "Record 3 of 7 " GFX_MIDDOT " 1.4 MB of 3.2 MB", 430, 610);
     save(dir, "flash");
     ui_boot(7);                         save(dir, "boot");
     ui_error("Flashing stopped", "Erase failed at 80F00000.",

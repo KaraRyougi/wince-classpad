@@ -1,0 +1,26 @@
+// usbcpl.rc - the Control Panel entry (icon by tools/mkusbicon.py, name,
+// description) and its dialog: the two USB modes, OK, Cancel.
+#include <windows.h>
+#include "usbcpl.h"
+
+IDI_USB ICON DISCARDABLE "usb.ico"
+
+STRINGTABLE DISCARDABLE
+BEGIN
+    IDS_USB_NAME    "USB Connection"
+    IDS_USB_INFO    "Changes the USB mode of the device"
+END
+
+IDD_USB DIALOG DISCARDABLE 0, 0, 140, 78
+STYLE DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "USB Connection"
+FONT 8, "Tahoma"
+BEGIN
+    CONTROL         "&Mass Storage Device",IDC_USB_STORAGE,"Button",BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP,14,18,112,10
+    CONTROL         "&Serial Port (CDC ACM)",IDC_USB_SERIAL,"Button",BS_AUTORADIOBUTTON,14,32,112,10
+    DEFPUSHBUTTON   "OK",IDOK,25,57,50,14,WS_GROUP
+    PUSHBUTTON      "Cancel",IDCANCEL,83,57,50,14
+    // last, as in the shell's own dialogs: CE's group box paints its inside, and
+    // a control that comes after it in the template is covered by it
+    GROUPBOX        "USB Mode",-1,7,5,126,44
+END

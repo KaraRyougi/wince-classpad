@@ -28,7 +28,10 @@
 // RTC alarm: INTEVT 0xA80 is vector 68, logical IRQ 49 (the suspend wake-up, rtc.c)
 #define VEC_RTC_ALARM               EXCEPTIONCODETOIRQ(0xA80)   // 68
 #define IRQ_RTC_ALARM               49
-// later: USB 0xA20, ADC 0x560, IIC0 0xE00-0xE60
+// USB function controller: INTEVT 0xA20 is vector 65, logical IRQ 50 (SRC\DRIVERS\USBFN)
+#define VEC_USB                     EXCEPTIONCODETOIRQ(0xA20)   // 65
+#define IRQ_USB                     50
+// later: ADC 0x560, IIC0 0xE00-0xE60
 
 // Interrupt priorities (IPR fields; the kernel masks SR.IMASK to this while the ISR runs)
 #define IRQ_TMU0_PRIORITY           0xE     // system timer
@@ -37,6 +40,7 @@
 #define IRQ_KEYSC_PRIORITY          0xD     // what the fx-CG100 OS programs into IPRF 15:12
 #define IRQ_TOUCH_PRIORITY          0xC     // IPRB 7:4
 #define IRQ_RTC_PRIORITY            0xB     // IPRK 15:12
+#define IRQ_USB_PRIORITY            0x8     // IPRF 7:4 (gint uses 8)
 
 BOOL HookAndSetPriority(int hwIntNumber, FARPROC pfnHandler, BYTE intrPrio);
 

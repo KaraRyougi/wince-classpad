@@ -1,0 +1,22 @@
+!if 0
+classpad_usbnet.exe - "USB Network": switches the USB function to the serial
+port, writes the RAS entry for it and dials (usbnet.cpp). The RAS functions
+are in coredll when the OS design has PPP (classpad.bat SYSGEN_MODEM).
+!endif
+
+!INCLUDE $(_TARGETPLATROOT)\sources.cmn
+
+TARGETNAME=classpad_usbnet
+TARGETTYPE=PROGRAM
+RELEASETYPE=PLATFORM
+WINCEOEM=1
+EXEENTRY=WinMainCRTStartup
+
+INCLUDES=$(INCLUDES);$(_TARGETPLATROOT)\src\inc;$(_WINCEROOT)\public\common\sdk\inc;$(_WINCEROOT)\public\common\oak\inc
+
+TARGETLIBS= \
+    $(_PROJECTROOT)\cesysgen\sdk\lib\$(_CPUINDPATH)\coredll.lib
+
+SOURCES= \
+    usbnet.cpp \
+    usbnet.rc

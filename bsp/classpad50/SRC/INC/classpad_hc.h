@@ -41,6 +41,23 @@ static __inline void ClasspadHcLcdBlit(DWORD src, DWORD pixels, DWORD port) { __
 static __inline void ClasspadHcLcdPush(DWORD src, DWORD top, DWORD rows, DWORD width) { __asm("trapa #254", src, top, rows, width); }
 static __inline DWORD ClasspadHcStandby(DWORD flags) { return __asm1("trapa #255", flags); }
 
+// NOR programming by the translator (dbt/rt/nor.c): HC_STANDBY with r4 =
+// HC_NOR_TAG | op. Only Casio's storage memory (chip 0x01A20000-0x0385FFFF)
+// is accepted. Returns 0 when done and verified (1 bad arguments, 2 the chip
+// did not finish, 3 verify mismatch); the probe returns HC_NOR_MAGIC.
+//   HC_NOR_PROGRAM  a = chip offset (even), b = source: RAM at a P1/P2
+//                   address, c = bytes (even, at most 4096)
+//   HC_NOR_ERASE    a = chip offset of the 128 KiB sector
+// A translator without the service would take the trap for a standby
+// request: ask HC_GETSTAT 62 for HC_FEATURE_NOR first.
+#define HC_NOR_TAG      0x4E4F5200
+#define HC_NOR_MAGIC    0x4E4F5231
+#define HC_NOR_PROBE    0
+#define HC_NOR_PROGRAM  1
+#define HC_NOR_ERASE    2
+#define HC_FEATURE_NOR  0x00000004  // HC_GETSTAT 62
+static __inline DWORD ClasspadHcNor(DWORD op, DWORD a, DWORD b, DWORD c) { return __asm1("trapa #255", (DWORD)(HC_NOR_TAG | op), a, b, c); }
+
 // HC_GETSTAT: one 32-bit counter of the translator (all wrap modulo 2^32:
 // take deltas). Works from user mode too (a trapa is a general exception the
 // translator takes before the kernel sees it). User-mode
@@ -54,6 +71,7 @@ static __inline DWORD ClasspadHcStandby(DWORD flags) { return __asm1("trapa #255
 //   entries  28 TLB hooks  29 bank evictions  30 user IC hash-hit feature
 //   31 same-mode SR fast returns; 26 includes both fast and C paths
 //   63 bit 0: DBT_FAST_LDC_SR enabled
+//   62 bit 2 (HC_FEATURE_NOR): the NOR programming service below
 //   60 "DBTS" 0x44425453  61 stats ABI version (1)  62 features: bit 0 tick sampling
 //   64 tick samples  65 in translated code  66 exit stub  67 stub window
 //   68 translating  69 helper  70 idle (sleep)  71 user-mode pcs  72 of those

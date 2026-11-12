@@ -61,7 +61,7 @@
 #define INTC_IPR(n)                 (SH7305_REG_PA_INTC + 4 * (n))
 #define INTC_IPRA                   INTC_IPR(0)     // TMU0 bits 15:12, TMU1 11:8, TMU2 7:4
 #define INTC_IPRB                   INTC_IPR(1)     // bits 7:4: touch contact (INTEVT 0x700)
-#define INTC_IPRF                   INTC_IPR(5)     // bits 15:12: KEYSC (INTEVT 0xBE0)
+#define INTC_IPRF                   INTC_IPR(5)     // bits 15:12: KEYSC (INTEVT 0xBE0), bits 7:4: USB (INTEVT 0xA20)
 #define INTC_IPRK                   INTC_IPR(10)    // bits 15:12: RTC (alarm INTEVT 0xA80, periodic 0xAA0, carry 0xAC0)
 #define INTC_IMR(n)                 (SH7305_REG_PA_INTC + 0x80 + 4 * (n))   // write 1 to mask
 #define INTC_IMCR(n)                (SH7305_REG_PA_INTC + 0xC0 + 4 * (n))   // write 1 to unmask
@@ -71,6 +71,7 @@
 #define INTC_IMR4_TMU2              0x40
 #define INTC_IMR5_KEYSC             0x80            // KEYSC (casio-emu keyboard.c)
 #define INTC_IMR10_RTC_ALARM        0x01            // RTC alarm (casio-emu rtc.c)
+#define INTC_IMR9_USB               0x02            // USB function controller (INTEVT 0xA20; gint intc.c)
 
 // KEYSC key scan controller (register map in classpad_keysc.h)
 #define SH7305_REG_PA_KEYSC         0xA44B0000

@@ -1,0 +1,4 @@
+LIBRARY     CLASSPAD_STORAGE
+
+EXPORTS
+    CPlApplet
