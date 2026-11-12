@@ -235,3 +235,11 @@
     "Product"="ClassPad WinCE"
     "bcdDevice"=dword:0
 ; @CESYSGEN ENDIF CE_MODULES_USBFN
+
+; Telnet server (classpad.bat SYSGEN_TELNETD): without a log-on, and not
+; loaded at boot. With IsEnabled 0 services.exe drops the server again when
+; it goes through its list; USB Network (usbnet.cpp) loads it while the PPP
+; link over the USB cable is there, the only way in.
+[HKEY_LOCAL_MACHINE\COMM\TELNETD]
+    "IsEnabled"=dword:0
+    "UseAuthentication"=dword:0

@@ -40,3 +40,6 @@
 ^ *route\.exe\>
 ^ *netstat\.exe\>
 ^ *ndisconfig\.exe\>
+^ *telnetd\.dll\>
+^ *services\.exe\>
+^ *cmd\.exe\>

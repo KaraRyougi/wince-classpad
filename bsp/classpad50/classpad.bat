@@ -39,6 +39,14 @@ REM after adding this.
 set SYSGEN_MODEM=1
 set SYSGEN_CONNMC=1
 set SYSGEN_NETUTILS=1
+REM A command line reached from the computer: the Telnet server (telnetd,
+REM under services.exe) hands out cmd.exe; winceos.bat and servers.bat add
+REM SYSGEN_CMD, SYSGEN_STDIO, SYSGEN_SERVICES and SYSGEN_FSPASSWORD for it.
+REM With PPP up (USB Network): telnet 192.168.55.2. No console window on the
+REM device (SYSGEN_CONSOLE needs a Courier font the flash has no room for).
+REM FILES\extmove.txt sends the three modules to the EXT region. Sysgen again
+REM after adding this.
+set SYSGEN_TELNETD=1
 set IMGNOKITL=1
 set IMGNODEBUGGER=1
 set IMGNOSHAREETH=1
