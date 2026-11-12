@@ -12,7 +12,11 @@
 //       and name servers from the other end, no user name or password,
 //    4. rnaapp.exe dials it (-p: no prompt, -m: minimise when connected).
 //       The connection then has its icon in the taskbar, where it is also
-//       ended.
+//       ended,
+//    5. the Telnet server is loaded for as long as rnaapp.exe runs, which is
+//       as long as the connection is there: this program waits for it to
+//       end and unloads the server again. At boot the server is not loaded
+//       (platform.reg: IsEnabled 0), so nothing listens without the link.
 //
 //  CE's direct connection opens with the text "CLIENT" and waits for
 //  "CLIENTSERVER" before PPP starts: the script on the computer answers it.
@@ -22,6 +26,7 @@
 #include <ras.h>
 #include <raserror.h>
 #include <usbfnioctl.h>
+#include <service.h>
 #include "classpad_ufn.h"
 
 #define CLIENT_SERIAL   TEXT("CDC_ACM")
@@ -30,6 +35,10 @@
 #define TITLE           TEXT("USB Network")
 #define MAX_DEVICES     16
 #define DEVICE_WAIT_MS  8000
+#define TELNET_KEY      TEXT("COMM\\TELNETD")
+#define TELNET_SERVICE  TEXT("TELNETD")
+#define TELNET_DEVICE   TEXT("TEL0:")
+#define OWNER_MUTEX     TEXT("ClasspadUsbNetTelnet")
 
 static void Fail(LPCTSTR what)
 {
@@ -96,6 +105,38 @@ static BOOL FindDevice(LPTSTR name)
     return TRUE;
 }
 
+// The Telnet server's "IsEnabled": services.exe asks the server whether it
+// wants its port when it loads it, and the server answers with this value
+// (and looks at it again for every connection).
+static void EnableTelnet(DWORD enabled)
+{
+    HKEY key;
+
+    if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, TELNET_KEY, 0, 0, &key) != ERROR_SUCCESS) return;
+    RegSetValueEx(key, TEXT("IsEnabled"), 0, REG_DWORD, (LPBYTE)&enabled, sizeof enabled);
+    RegCloseKey(key);
+}
+
+// Loads the Telnet server into services.exe, which then listens on its port.
+// An image without the server just has no Telnet: nothing is said.
+static void StartTelnet(void)
+{
+    if (!IsAPIReady(SH_SERVICES)) return;
+    EnableTelnet(1);
+    if (GetServiceHandle(TELNET_DEVICE, NULL, NULL) == INVALID_HANDLE_VALUE) ActivateService(TELNET_SERVICE, 0);
+}
+
+// Unloads it: the port is closed and the sessions that are open end.
+static void StopTelnet(void)
+{
+    HANDLE service;
+
+    if (!IsAPIReady(SH_SERVICES)) return;
+    service = GetServiceHandle(TELNET_DEVICE, NULL, NULL);
+    if (service != INVALID_HANDLE_VALUE) DeregisterService(service);
+    EnableTelnet(0);
+}
+
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPTSTR commandLine, int show)
 {
     static RASENTRY entry;
@@ -103,6 +144,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPTSTR commandLine, i
     TCHAR device[RAS_MaxDeviceName + 1], args[64];
     PROCESS_INFORMATION pi;
     DWORD start;
+    HANDLE mutex;
+    BOOL owner;
 
     // The network components live in the EXT region: without it the RAS
     // calls below have nobody to answer them (and end the program with an
@@ -130,12 +173,24 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPTSTR commandLine, i
     _tcscpy(params.szEntryName, ENTRY_NAME);
     RasSetEntryDialParams(NULL, &params, FALSE);        // no user name, no password
 
+    // Only the first instance looks after the Telnet server: one started
+    // while the connection is there must not take the server away when its
+    // own rnaapp.exe leaves at once.
+    mutex = CreateMutex(NULL, FALSE, OWNER_MUTEX);
+    owner = mutex && GetLastError() != ERROR_ALREADY_EXISTS;
+    if (owner) StartTelnet();
+
     wsprintf(args, TEXT("-p -m -e%s"), ENTRY_NAME);
     if (!CreateProcess(TEXT("rnaapp.exe"), args, NULL, NULL, FALSE, 0, NULL, NULL, NULL, &pi)) {
+        if (owner) StopTelnet();
         Fail(TEXT("Cannot start the connection."));
         return 1;
     }
     CloseHandle(pi.hThread);
+    if (owner) {
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        StopTelnet();
+    }
     CloseHandle(pi.hProcess);
     return 0;
 }
