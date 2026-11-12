@@ -186,10 +186,39 @@ fail:
 //  measured once per boot: a resume keeps it (the translator restores the
 //  clock generator it saved, and the measurement costs 125 ms).
 //
+//
+//  The counts kept across a rate change (the performance counter's base and
+//  the idle total) are rescaled, so that counts / frequency stays continuous;
+//  a program that cached QueryPerformanceFrequency keeps the old rate.
+//
+static UINT64 TimerRescale(UINT64 counts, UINT32 from, UINT32 to)
+{
+    UINT64 whole = counts / from;
+    return whole * to + (counts - whole * from) * to / from;
+}
+
+static void RateChanged(UINT32 from, UINT32 to)
+{
+    ULARGE_INTEGER idle;
+
+    if (from == 0 || from == to) return;
+    g_oalTimer.curCounts = TimerRescale(g_oalTimer.curCounts, from, to);
+    idle.LowPart = curridlelow; idle.HighPart = curridlehigh;
+    idle.QuadPart = TimerRescale(idle.QuadPart, from, to);
+    curridlelow = idle.LowPart; curridlehigh = idle.HighPart;
+    idleconv = to;
+}
+
 void InitClock(void)
 {
-    if (g_countsPerMSec == 0) {
+    // A resume that comes back with other clock settings than the OAL last
+    // saw (OALClockChanged, ioctl.c) is measured again like a boot.
+    BOOL moved = OALClockChanged();
+    UINT32 old = g_countsPerMSec;
+
+    if (g_countsPerMSec == 0 || moved) {
         g_countsPerMSec = CalibrateCountsPerMSec(COUNT_FREQUENCY / 1000);
+        RateChanged(old, g_countsPerMSec);
         if (g_calibratedHz)
             RETAILMSG(1, (L"CLASSPAD OAL: TMU0 counts %u Hz by the RTC (nominal %u): %u counts per ms\r\n",
                           g_calibratedHz, COUNT_FREQUENCY, g_countsPerMSec));
@@ -197,6 +226,40 @@ void InitClock(void)
             RETAILMSG(1, (L"CLASSPAD OAL: TMU0 rate not measured (the RTC does not count, or implausible), nominal %u Hz\r\n", COUNT_FREQUENCY));
     }
     OALTimerInit(TICK_MAX_MSEC, g_countsPerMSec, TICK_MARGIN_COUNTS);
+}
+
+//------------------------------------------------------------------------------
+//  IOCTL_HAL_CLASSPAD_CLOCK_SET (ioctl.c) changed Pphi by the factor mul/div:
+//  the count rate follows by exactly that factor (the dividers are integers),
+//  so the measured rate is scaled instead of measured again (125 ms with the
+//  timer stopped). The period in flight is closed at the old rate: its whole
+//  milliseconds go to CurMSec, the rest (< 1 ms) and the time the switch
+//  itself took are dropped. Interrupts are off; the tick restarts with a
+//  1 ms period and the ISR takes it from there.
+//
+VOID OALTimerRetune(UINT32 mul, UINT32 div)
+{
+    UINT32 old = g_oalTimer.countsPerMSec, hz, perMSec, elapsedMSec;
+
+    if (old == 0 || mul == 0 || div == 0 || mul == div) return;
+    hz = (UINT32)((UINT64)(g_calibratedHz ? g_calibratedHz : COUNT_FREQUENCY) * mul / div);
+    perMSec = (hz + 500) / 1000;
+    if (perMSec == 0) return;
+
+    MMIO_W8(TMU_TSTR, MMIO_R8(TMU_TSTR) & ~TMU_TSTR_STR0);
+    elapsedMSec = (UINT32)OALTimerCountsSinceSysTick() / old;
+    CurMSec += elapsedMSec;
+    g_oalTimer.curCounts += (UINT64)elapsedMSec * old;
+    RateChanged(old, perMSec);
+    g_calibratedHz  = hz;
+    g_countsPerMSec = perMSec;
+    OALTimerInit(TICK_MAX_MSEC, perMSec, TICK_MARGIN_COUNTS);
+}
+
+//  The TMU0 count rate in Hz (Pphi / 4), as measured or scaled
+UINT32 OALTimerCountHz(void)
+{
+    return g_calibratedHz ? g_calibratedHz : COUNT_FREQUENCY;
 }
 
 //------------------------------------------------------------------------------

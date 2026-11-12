@@ -1509,3 +1509,46 @@ left to chance was whether GWES tries a key click or a tap click when the
 Volume key is absent (each try would be a call into an API set nobody
 serves). platform.reg now says it outright: Key 0, Screen 0, Mute 0,
 Volume 0. Needs the next image build.
+
+### CEtune: a clock tuner after Xtune (2026-11-12)
+
+`SRC\APPS\CETUNE` (Start > Programs > CEtune, `\Windows\cetune.exe`) is the
+CE counterpart of Xtune/CPtune4: FLL and PLL multipliers, the four dividers
+(Iphi, Sphi, Bphi, Pphi), Xtune's fx-CP400 limits, red zones and wait tables,
+five presets (F1 = what the loader left, F2-F5 stored by holding the button,
+`Save` writes them to `\Storage\cetune.sav` or `\cetune.sav`), a small bench
+and a pattern test of a 256 KiB block. The rules are in
+`INC\classpad_clock.h`, a plain C header without floating point shared with
+the OAL and tested on the host (`bsp/tests/test_clock.c`).
+
+The program writes no register. `IOCTL_HAL_CLASSPAD_CLOCK_GET` returns the
+current and the boot setting and Pphi as the OAL keeps time by it;
+`IOCTL_HAL_CLASSPAD_CLOCK_SET` takes FLLFRQ, FRQCR, CS0WCR.WR and CS3WCR.TRC
+(nothing else of those registers), and with interrupts off sets the slowest
+waits, switches (KICK, LSTATS), sets the requested waits and calls
+`OALTimerRetune`. Pphi changes by an exact ratio of integers, so the TMU0
+rate measured against the RTC at boot is scaled by it rather than measured
+again (125 ms with the timer stopped): the open period is closed at the old
+rate, `curCounts` and the idle total are rescaled, the tick restarts with a
+1 ms period. `InitClock` now also asks `OALClockChanged()`: a resume that
+comes back with other multipliers or dividers than the OAL last saw is
+measured again like a boot. Drivers that derive a rate from Pphi (the IIC
+bus of the touch sensor) read `OALClockPphi()` or the GET IOCTL.
+
+Unlike Xtune a step only edits a target (the dial shows the applied setting
+as a dashed needle); `Apply` writes it and the previous setting returns
+unless `Keep` is pressed within ten seconds. The window is drawn for the
+320 x 528 portrait screen with fills, lines and one 11 px font; in the
+rotated (landscape) mode the lower bands do not fit.
+
+The icon is Ptune's (Xtune's `assets-cg/icon-uns.png`, MIT): an add-in icon
+is a wide badge, so `tools/mkcetuneicon.py` cuts the dial out and sets it on
+a square of the badge's colour, 32x32 and 16x16 with 256 colours
+(`cetune.ico`, `cetune.rc`). The source PNG is not in the repository.
+
+Not adjusted: CS5A (the panel's bus waits), CS0BCR/CS3BCR idle cycles, spread
+spectrum. The wait tables use a 5 % margin (Xtune's default was not found in
+its source). State: host tests pass (`test_clock`, the retune and resume
+cases in `test_timer50`), `cetune.c` passes a syntax check against a stub
+`windows.h`; not built with Platform Builder, not run in the emulator or on
+the calculator.

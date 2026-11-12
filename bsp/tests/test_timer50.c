@@ -37,6 +37,8 @@ static int reload_on_read, reload_before_write;
 static int suspended, power_calls, irq_enabled;
 static BOOL INTERRUPTS_ENABLE(BOOL enabled) { BOOL old=irq_enabled; irq_enabled=enabled; return old; }
 static BOOL ClasspadPowerTimerIsr(void) { ++power_calls; return suspended; }
+static int clock_changed;
+static BOOL OALClockChanged(void) { return clock_changed; }   /* ioctl.c: the CPG settings moved since the last look */
 /* calibration model: every read of R64CNT or TCNT0 takes sim_read_us; the RTC counts 128 Hz, TMU0 sim_hz */
 static UINT32 sim_hz, sim_read_us = 3, sim_rtc_start = 1, sim_rtc_dead;
 static uint64_t sim_us;
@@ -141,6 +143,31 @@ int main(void) {
         sim_rtc_dead = 0; sim_hz = 100000000; sim_us = 0; CHECK("implausible rate: nominal", CalibrateCountsPerMSec(7372) == 7372);
         sim_hz = 0;
     }
+    /* a clock change (OALTimerRetune): Pphi x 3/2, 3 ms and 100 counts into a 10 ms period */
+    init(); g_calibratedHz = 7372000; g_countsPerMSec = 7372;
+    g_oalTimer.curCounts = (UINT64)7372 * 4000; curridlelow = 7372u * 1000u; curridlehigh = 0;
+    g_oalTimer.actualMSecPerSysTick = 10; g_oalTimer.actualCountsPerSysTick = 73720;
+    tcnt = 73720 - 1 - 3 * 7372 - 100; tstr = TMU_TSTR_STR0 | 2;
+    OALTimerRetune(3, 2);
+    CHECK("retune: whole ms of the open period reach CurMSec", CurMSec == 103);
+    CHECK("retune: new rate", g_oalTimer.countsPerMSec == 11058 && g_countsPerMSec == 11058 && OALTimerCountHz() == 11058000);
+    CHECK("retune: performance counter continuous", g_oalTimer.curCounts == (UINT64)11058 * 4003);
+    CHECK("retune: idle total and its unit", curridlelow == 11058u * 1000u && curridlehigh == 0 && idleconv == 11058);
+    CHECK("retune: 1 ms period, 1000 ms reload, running, TMU1 untouched", tcnt == 11057 && tcor == 11058u * 1000u - 1 && tstr == (TMU_TSTR_STR0 | 2));
+    OALTimerRetune(2, 3);
+    CHECK("retune back", g_oalTimer.countsPerMSec == 7372 && g_oalTimer.curCounts == (UINT64)7372 * 4003 && CurMSec == 103);
+    OALTimerRetune(5, 5);
+    CHECK("retune by 1 changes nothing", g_oalTimer.countsPerMSec == 7372 && tcnt == 7371);
+    /* a resume with other clock settings: measured again, the counts rescaled */
+    g_oalTimer.curCounts = (UINT64)7372 * 5000;
+    clock_changed = 1; sim_hz = 3686400; sim_us = 0; tstr = 0;
+    InitClock();
+    CHECK("resume with a changed clock is measured again", g_oalTimer.countsPerMSec >= 3685 && g_oalTimer.countsPerMSec <= 3687);
+    CHECK("... and the counter rescaled", g_oalTimer.curCounts == (UINT64)g_oalTimer.countsPerMSec * 5000 && idleconv == g_oalTimer.countsPerMSec);
+    clock_changed = 0; sim_hz = 14745600; sim_us = 0;
+    InitClock();
+    CHECK("resume with the same clock keeps the rate", g_oalTimer.countsPerMSec >= 3685 && g_oalTimer.countsPerMSec <= 3687);
+    sim_hz = 0;
     printf("CE 5.0 timer regression: %d failures\n", failures);
     return failures ? 1 : 0;
 }

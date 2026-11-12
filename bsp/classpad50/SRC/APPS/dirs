@@ -9,4 +9,5 @@ DIRS=\
     PEGHELP \
     USBCPL \
     USBNET \
-    STORCPL
+    STORCPL \
+    CETUNE
