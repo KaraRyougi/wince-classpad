@@ -31,7 +31,7 @@
 // USB function controller: INTEVT 0xA20 is vector 65, logical IRQ 50 (SRC\DRIVERS\USBFN)
 #define VEC_USB                     EXCEPTIONCODETOIRQ(0xA20)   // 65
 #define IRQ_USB                     50
-// later: ADC 0x560, IIC0 0xE00-0xE60
+// later: ADC 0x560. IIC0 (0xE00-0xE60) is polled by the touch driver and stays masked.
 
 // Interrupt priorities (IPR fields; the kernel masks SR.IMASK to this while the ISR runs)
 #define IRQ_TMU0_PRIORITY           0xE     // system timer

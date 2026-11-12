@@ -13,7 +13,8 @@
 //    ICDR  data, ICCR control (ICE, TRS, BBSY/start, SCP), ICSR status
 //    (BUSY, AL, TACK, WAIT, DTE), ICIC status enables, ICCL/ICCH clock.
 //    The production transaction polls WAIT/DTE with peripheral IRQs masked
-//    at the INTC; ICIC=0x0E keeps WAIT/TACK status functional.
+//    at the INTC; ICIC=0x0E keeps WAIT/TACK status functional. ICCL/ICCH
+//    follow the measured Pphi (classpad_iic.h, classpad_touch_bus.h).
 //
 //  Sensor packet (command 0x84, 16 bytes, big-endian words):
 //  x1,y1,z1,gh,x2,y2,z2,dm. Contact is PRDR, not z1. x/y are left-aligned by
@@ -33,26 +34,7 @@
 #ifndef __CLASSPAD_TOUCH_H
 #define __CLASSPAD_TOUCH_H
 
-#define IIC0_ICDR               (SH7305_REG_PA_IIC0 + 0x00)     // data
-#define IIC0_ICCR               (SH7305_REG_PA_IIC0 + 0x04)     // control
-#define IIC0_ICSR               (SH7305_REG_PA_IIC0 + 0x08)     // status
-#define IIC0_ICIC               (SH7305_REG_PA_IIC0 + 0x0C)     // interrupt enables
-#define IIC0_ICCL               (SH7305_REG_PA_IIC0 + 0x10)     // clock low
-#define IIC0_ICCH               (SH7305_REG_PA_IIC0 + 0x14)     // clock high
-
-#define ICCR_ICE                0x80    // interface enable (clearing it resets the controller)
-#define ICCR_RACK               0x40
-#define ICCR_TRS                0x10    // transmit (1) / receive (0)
-#define ICCR_BBSY               0x04    // with TRS: start condition
-#define ICCR_SCP                0x01    // receive: keep reading (1) / last byte (0)
-
-#define ICSR_SCLM               0x80
-#define ICSR_SDAM               0x40
-#define ICSR_BUSY               0x10
-#define ICSR_AL                 0x08
-#define ICSR_TACK               0x04    // no acknowledge from the slave
-#define ICSR_WAIT               0x02
-#define ICSR_DTE                0x01    // data transfer enable: next byte may be written / read
+#include "classpad_iic.h"         // the IIC0 registers, the SCL counts, the OAL's clock IOCTL
 
 #define TOUCH_IIC_ADDRESS       0x40
 #define TOUCH_CMD_SNAPSHOT      0x84

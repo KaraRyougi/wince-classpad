@@ -604,6 +604,56 @@ R64CNT（独立的 32.768 kHz 晶振）量一次：TMU0 自由计数 16 个 RTC 
 失败情形。没有跟着校准的：触摸 I2C 的时钟分频、LCD 时序这些按 Pphi 算的硬件
 定时。待 VM 重建后在模拟器和真机验证。
 
+**触摸 I2C 跟随实测 Pphi，轮询改为按实际时间限时（2026-11-12，未在 VM 构建，未上模拟器和真机）。**
+目的：超频工具抬高 Pphi 之后触摸仍然能用。原先 `classpad_touch_bus.h` 的
+ICCL/ICCH 写死 Casio/gint 的 0x29/0x22，每个阶段读 64 次 ICSR 后 `Sleep(1)`。
+
+- 时钟：`IOCTL_HAL_CLASSPAD_CLOCK`（timer.c，实测的 TMU0 计数率 x4）给出
+  Pphi，`ClasspadIicCounts`（classpad_iic.h）按 41:34 的比例把 ICCL/ICCH 放大到
+  SCL 不超过 393216 Hz（= 29.4912 MHz / 75，Casio 这两个常数在标称 Pphi 下的
+  速率），不会比 Casio 的计数更少，上限 255。注册表 `HARDWARE\DEVICEMAP\TOUCH`
+  的 `BusHz` 可改目标速率，0 = 原样使用 0x29/0x22。注意：按 bsp_cfg.h 记录的
+  真机 Pphi（约为标称的 1.67 倍），Casio 的常数在 fx-CP400 上给出的是约
+  650 kHz，所以默认设置下真机的 SCL 会比以前慢；若要与 Casio 一致设 BusHz=0。
+  Pphi 会在 CE 运行中改变（另一分支的超频工具 cetune 通过 OAL 的 IOCTL 改时钟并
+  重设 TMU0）：`IOCTL_HAL_CLASSPAD_PPHI` 报的是 `g_oalTimer.countsPerMSec` x4000，
+  也就是 tick 当前实际使用的计数率，开机时是 RTC 实测值，之后谁重设 TMU0 谁就
+  得更新它，这里自动跟随，不需要通知。触摸驱动在每次落笔和每次事务失败后重新
+  取 Pphi 并重算 ICCL/ICCH（每笔一次 IOCTL，不是每个采样一次）。超频工具移植到
+  classpad50 时注意：timer.c 的 `g_countsPerMSec`（恢复后 InitClock 用它）也要
+  一并更新，否则休眠恢复会退回开机时的计数率。
+- 轮询：整个事务在调用线程里连续读 ICSR，不再 Sleep（16 字节的包在 393 kHz 下
+  约 0.5 ms）。64 次读在快的 CPU 上不到一个字节的时间，旧写法 CPU 越快落进
+  `Sleep(1)` 的阶段越多。时限改成实际时间：每 1024 次读问一次 `GetTickCount`
+  （TMU0，已按 RTC 校准，CE 在跑它就在走），从第一次问起满 10 ms 就放弃；
+  正常的事务读不到 1024 次就结束，一次内核调用都没有。失败后 50 ms 内不重试
+  （死掉的总线每次要空转满时限）。
+- 试过又撤掉的方案：照 gint 的 `i2c_inth.c` 由 IIC0 的四个中断（0xE00..0xE60）
+  在 OAL 的 ISR 里逐步推进。翻译器下一次中断的开销和等一个字节（约 23 µs）
+  是同一量级，一个包要三十多次中断外加线程转发，不比忙等省，所以保留轮询；
+  IIC0 的中断在 INTC 里一直屏蔽（OALIntrInit 和驱动各屏蔽一次）。
+- `bsp/tests/test_touch_bus50`：寄存器顺序、命令、写寄存器、NACK、仲裁丢失、
+  按节拍计数的时限（CPU 变快时读次数变多，时限不变；正常事务不问时间）、
+  失败后恢复，以及计数换算。LCD 时序仍未跟随 Pphi。
+
+**键盘只轮询，键盘和触摸共用一个节拍（2026-11-12，未在 VM 构建，未上模拟器和真机）。**
+照 gint 的 `keysc_tick`（定时器回调里读六个数据字，同一个 tick 里采样触摸）：
+
+- `kbd_pdd.cpp` 只剩一个线程，每 `PollMs`（默认由 20 改为 8 ms，对齐 gint 的 128 Hz：其作者 2018 年实测
+  KEYSC 数据寄存器读得慢于约 64 Hz 会出现松键后仍报按下，原来的 20 ms 低于
+  这个下限）扫一次矩阵；
+  KEYSC 中断的 IST、`InterruptInitialize`、应答都去掉了。IRQ_KEYSC 的 SYSINTR
+  仍然申请并登记为唤醒源：休眠由 OAL 自己开 KEYSC 中断等 Clear/ON
+  （classpad_power.h），CE 运行期间它一直屏蔽。
+- kbdmouse.dll 导出 `ClasspadInputTickRegister`；touch.dll 用
+  `LoadLibrary`/`GetProcAddress` 取到后登记 `InputTick`，每次扫描之后在键盘线程
+  里调用：笔按下时 `SetEvent` 唤醒 MDD 的 IST（高采样率每个 tick，低采样率隔一个 tick）。
+  触摸自己的线程不再每 10 ms 醒，只每 640 ms 读一次休眠选项、恢复后给传感器
+  上电；键盘的 tick 还没起来或取不到导出时，它照旧按采样率自己轮询并每 640 ms
+  重试登记。
+- 效果按代码路径估计：原来键盘 50 次/秒 + 触摸 100 次/秒两个各自的定时唤醒，
+  加上每个按键边沿一次中断和线程唤醒；现在一个约 125 次/秒的唤醒。没有实测。
+
 **USB 供电检测与系统帮助页（2026-11-10，待重建验证）。** 电池 PDD 的
 ACLineStatus 现在取 USB 功能控制器的 VBUS 输入电平（INTSTS0 0xA4D80040 bit 7
 VBSTS，连读三次一致才算）；Casio OS 自己也是这么读的（0x80016742 就是

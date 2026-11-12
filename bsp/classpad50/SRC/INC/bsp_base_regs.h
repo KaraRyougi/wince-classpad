@@ -71,6 +71,7 @@
 #define INTC_IMR4_TMU2              0x40
 #define INTC_IMR5_KEYSC             0x80            // KEYSC (casio-emu keyboard.c)
 #define INTC_IMR10_RTC_ALARM        0x01            // RTC alarm (casio-emu rtc.c)
+#define INTC_IMR7_IIC0              0xF0            // IIC0: 0x10 AL, 0x20 TACK, 0x40 WAIT, 0x80 DTE (casio-emu classpad/iic.c); kept masked
 #define INTC_IMR9_USB               0x02            // USB function controller (INTEVT 0xA20; gint intc.c)
 
 // KEYSC key scan controller (register map in classpad_keysc.h)

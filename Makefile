@@ -13,13 +13,14 @@ PEGHELP  := bsp/classpad50/SRC/APPS/PEGHELP
 XPANDER_WINDOWS ?= $(HOME)/Downloads/Xpander_SH3/files/Windows
 # an fx-CP400 chip image for the storage-memory reader's test; the test skips the real volume when absent
 FUGUE_NOR ?= $(HOME)/Downloads/nor-fx-cp400.bin
-test: $(TEST) $(DBT_TEST) $(DBT_TEST)_icrefill bsp/tests/test_touch_bus bsp/tests/test_timer bsp/tests/test_timer50 bsp/tests/test_extrom bsp/tests/extrom-test.bin bsp/tests/test_peghelp bsp/tests/test_lcdrot bsp/tests/test_battery bsp/tests/test_fugue bsp/tests/test_fuguewr
+test: $(TEST) $(DBT_TEST) $(DBT_TEST)_icrefill bsp/tests/test_touch_bus bsp/tests/test_timer bsp/tests/test_timer50 bsp/tests/test_touch_bus50 bsp/tests/test_extrom bsp/tests/extrom-test.bin bsp/tests/test_peghelp bsp/tests/test_lcdrot bsp/tests/test_battery bsp/tests/test_fugue bsp/tests/test_fuguewr
 	./$(TEST)
 	./$(DBT_TEST)
 	./$(DBT_TEST)_icrefill
 	./bsp/tests/test_touch_bus
 	./bsp/tests/test_timer
 	./bsp/tests/test_timer50
+	./bsp/tests/test_touch_bus50
 	./bsp/tests/test_peghelp "$(XPANDER_WINDOWS)"
 	./bsp/tests/test_extrom bsp/tests/extrom-test.bin
 	./bsp/tests/test_lcdrot
@@ -38,7 +39,7 @@ $(TEST): fpuemu/tests/test_host.c $(SRC) $(HDR)
 	$(CC) $(CFLAGS) -Ifpuemu/src -o $@ fpuemu/tests/test_host.c $(SRC) -lm
 
 clean:
-	rm -f $(TEST) $(DBT_TEST) $(DBT_TEST)_icrefill bsp/tests/test_touch_bus bsp/tests/test_timer bsp/tests/test_timer50 bsp/tests/test_extrom bsp/tests/extrom-test.bin bsp/tests/test_peghelp bsp/tests/test_lcdrot bsp/tests/test_battery bsp/tests/test_fugue bsp/tests/test_fuguewr
+	rm -f $(TEST) $(DBT_TEST) $(DBT_TEST)_icrefill bsp/tests/test_touch_bus bsp/tests/test_timer bsp/tests/test_timer50 bsp/tests/test_touch_bus50 bsp/tests/test_extrom bsp/tests/extrom-test.bin bsp/tests/test_peghelp bsp/tests/test_lcdrot bsp/tests/test_battery bsp/tests/test_fugue bsp/tests/test_fuguewr
 
 bsp/tests/test_touch_bus: bsp/tests/test_touch_bus.c bsp/classpad/SRC/INC/classpad_touch_bus.h bsp/classpad/SRC/INC/classpad_touch.h
 	$(CC) $(CFLAGS) -o $@ $<
@@ -52,6 +53,9 @@ bsp/tests/test_peghelp: bsp/tests/test_peghelp.c $(PEGHELP)/hpcore.c $(PEGHELP)/
 
 bsp/tests/test_timer50: bsp/tests/test_timer50.c bsp/classpad50/SRC/OAL/OALLIB/timer.c bsp/classpad50/SRC/INC/bsp_base_regs.h
 	$(CC) $(CFLAGS) -Wno-unused-parameter -o $@ $<
+
+bsp/tests/test_touch_bus50: bsp/tests/test_touch_bus50.c bsp/classpad50/SRC/INC/classpad_touch_bus.h bsp/classpad50/SRC/INC/classpad_iic.h bsp/classpad50/SRC/INC/classpad_touch.h bsp/classpad50/SRC/INC/bsp_base_regs.h
+	$(CC) $(CFLAGS) -o $@ $<
 
 bsp/tests/test_battery: bsp/tests/test_battery.c bsp/classpad50/SRC/INC/classpad_battery.h
 	$(CC) $(CFLAGS) -o $@ bsp/tests/test_battery.c

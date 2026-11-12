@@ -1,36 +1,79 @@
-/* ClassPad polled IIC0 transactions. Include after classpad_touch.h and the
- * MMIO/Sleep adapters. Same WAIT-stage ordering as ClasspadDev/gint's
- * src/touch/i2c_inth.c, but peripheral IRQs remain masked at the INTC.
- * ICIC enables WAIT and TACK status even though no ISR is used.
- * Stage/status survive a reset for diagnostics. No unbounded bus waits. */
+/* ClassPad polled IIC0 transactions. Include after bsp_base_regs.h,
+ * classpad_touch.h (classpad_iic.h) and the MMIO adapters. Same WAIT-stage
+ * ordering as ClasspadDev/gint's src/touch/i2c_inth.c, but peripheral IRQs
+ * remain masked at the INTC: ICIC enables WAIT and TACK status even though
+ * no ISR is used.
+ *
+ * The caller spins on ICSR for the whole transaction (about 0.5 ms for the
+ * 16-byte packet at 393 kHz) and never sleeps in it: a byte takes some 23
+ * microseconds, far less than any Sleep, and under the translator one
+ * interrupt per byte costs about as much as waiting for the byte.
+ *
+ * No unbounded bus waits, and none that depend on how fast the CPU runs:
+ * the limit of a transaction is TOUCH_BUS_LIMIT_MS of the system's tick
+ * count (TMU0, calibrated against the RTC; it runs whenever CE does). The
+ * tick count is a kernel call, so it is asked only once every
+ * TOUCH_BUS_CLOCK_EVERY status reads, and the limit starts at the first
+ * such look: a transaction that goes well ends before it and never asks.
+ * (Until 2026-11-12 every stage was 64 status reads, then Sleep(1), twenty
+ * times: 64 reads are less than a byte on a fast CPU, so the faster the
+ * CPU, the more stages fell into the Sleep.)
+ *
+ * ICCL/ICCH are set by TouchBusSetClock for the Pphi the OAL measured
+ * (classpad_iic.h); until it is called they are Casio's.
+ * Stage/status survive a reset for diagnostics. */
 #ifndef CLASSPAD_TOUCH_BUS_H
 #define CLASSPAD_TOUCH_BUS_H
+
+#define TOUCH_BUS_CLOCK_EVERY   1024        /* status reads between two looks at the tick count */
+#define TOUCH_BUS_LIMIT_MS      10          /* from the first look; a packet takes about 0.5 ms */
+#ifndef TOUCH_BUS_NOW_MS
+#define TOUCH_BUS_NOW_MS()      GetTickCount()
+#endif
+
 static unsigned g_touchBusStage, g_touchBusStatus;
+static unsigned g_touchBusIccl = CLASSPAD_IIC_ICCL_STOCK, g_touchBusIcch = CLASSPAD_IIC_ICCH_STOCK;
+static unsigned g_touchBusReads, g_touchBusSince;       /* status reads of this transaction; tick count at the first look, valid once reads >= CLOCK_EVERY */
+
+static void TouchBusSetClock(unsigned pphiHz, unsigned sclHz)
+{
+    UINT32 l, h;
+    ClasspadIicCounts(pphiHz, sclHz, &l, &h);
+    g_touchBusIccl = l;
+    g_touchBusIcch = h;
+}
 
 static void TouchBusReset(void)
 {
     MMIO_W8(IIC0_ICCR, 0);                /* abort stale transfer, reset controller */
     MMIO_W8(IIC0_ICCR, ICCR_ICE);
-    MMIO_W8(IIC0_ICCL, 0x29);            /* Casio/gint clock at stock Pphi */
-    MMIO_W8(IIC0_ICCH, 0x22);
+    MMIO_W8(IIC0_ICCL, g_touchBusIccl);
+    MMIO_W8(IIC0_ICCH, g_touchBusIcch);
     MMIO_W8(IIC0_ICSR, 0);
     MMIO_W8(IIC0_ICIC, 0x0E);            /* AL, TACK, WAIT; INTC masked */
 }
 
+/* A transaction starts: reset the controller and its time limit */
+static void TouchBusBegin(void)
+{
+    TouchBusReset();
+    g_touchBusReads = 0;
+}
+
 static int TouchBusWait(unsigned mask, unsigned expected, unsigned stage)
 {
-    unsigned round, poll;
     g_touchBusStage = stage;
-    for (round = 0; round < 20; ++round) {
-        for (poll = 0; poll < 64; ++poll) {
-            unsigned sr = MMIO_R8(IIC0_ICSR);
-            g_touchBusStatus = sr;
-            if (sr & (ICSR_AL | ICSR_TACK)) return 0;
-            if ((sr & mask) == expected) return 1;
+    for (;;) {
+        unsigned sr = MMIO_R8(IIC0_ICSR);
+        g_touchBusStatus = sr;
+        if (sr & (ICSR_AL | ICSR_TACK)) return 0;
+        if ((sr & mask) == expected) return 1;
+        if ((++g_touchBusReads % TOUCH_BUS_CLOCK_EVERY) == 0) {
+            unsigned ms = (unsigned)TOUCH_BUS_NOW_MS();
+            if (g_touchBusReads == TOUCH_BUS_CLOCK_EVERY) g_touchBusSince = ms;
+            else if (ms - g_touchBusSince >= TOUCH_BUS_LIMIT_MS) return 0;
         }
-        Sleep(1);
     }
-    return 0;
 }
 
 static void TouchBusReleaseWait(void)
@@ -45,7 +88,7 @@ static int TouchBusReadReg(unsigned char reg, unsigned char *pkt, int n)
 {
     int i;
     if (!pkt || n < 1) return 0;
-    TouchBusReset();
+    TouchBusBegin();
     if (!TouchBusWait(ICSR_BUSY, 0, 1)) goto fail;
     MMIO_W8(IIC0_ICCR, ICCR_ICE | ICCR_TRS | ICCR_BBSY);
     if (!TouchBusWait(ICSR_DTE, ICSR_DTE, 2)) goto fail;
@@ -85,7 +128,7 @@ static int TouchBusRead(unsigned char *pkt, int n)
  * (the OS's 0x8008A690). */
 static int TouchBusWriteReg(unsigned char reg, unsigned char value)
 {
-    TouchBusReset();
+    TouchBusBegin();
     if (!TouchBusWait(ICSR_BUSY, 0, 21)) goto fail;
     MMIO_W8(IIC0_ICCR, ICCR_ICE | ICCR_TRS | ICCR_BBSY);
     if (!TouchBusWait(ICSR_DTE, ICSR_DTE, 22)) goto fail;
@@ -111,7 +154,7 @@ fail:
  * ICE | TRS with BBSY clear (the stop condition) at the byte's WAIT. */
 static int TouchBusCommand(unsigned char cmd)
 {
-    TouchBusReset();
+    TouchBusBegin();
     if (!TouchBusWait(ICSR_BUSY, 0, 11)) goto fail;
     MMIO_W8(IIC0_ICCR, ICCR_ICE | ICCR_TRS | ICCR_BBSY);
     if (!TouchBusWait(ICSR_DTE, ICSR_DTE, 12)) goto fail;

@@ -31,6 +31,7 @@
 #include "intr_cfg.h"
 #include "classpad_mmio.h"
 #include "classpad_hc.h"
+#include "classpad_iic.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -52,6 +53,8 @@ BOOL OALIoCtlHalPresuspend(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);
 BOOL OALIoCtlHalClasspadSuspendStats(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);
 BOOL OALIoCtlHalClasspadPanel(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);
 BOOL OALIoCtlHalClasspadSuspendOptions(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);
+BOOL OALIoCtlHalClasspadPphi(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);
+UINT32 OALClockPphiHz(void);                           // timer.c: the measured peripheral clock
 BOOL OALIoCtlHalPostInit(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);
 BOOL OALIoCtlHalInitRTC(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);
 BOOL OALIoCtlHalGetCacheInfo(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);

@@ -1,9 +1,19 @@
 //------------------------------------------------------------------------------
 //  classpad_touch.cpp - DDSI layer of touch.dll for the fx-CP400 panel
 //
-//  The MDD owns the interrupt event and calls GetPoint. A separate sampler
-//  polls the contact pin even before the first down, so missing/unverified
-//  pen IRQ routing cannot prevent all input. Only the MDD reads IIC0.
+//  The MDD owns the interrupt event and calls GetPoint. The contact pin is
+//  polled even before the first down, so missing/unverified pen IRQ routing
+//  cannot prevent all input: since 2026-11-12 from the keyboard driver's
+//  input tick (kbdmouse.dll's ClasspadInputTickRegister; one timer wake-up
+//  for keys and pen, as gint samples the panel from its keyboard tick), and
+//  from this driver's own thread at the sample rate only when that tick is
+//  not to be had. The thread otherwise does the slow, rare work (the suspend
+//  option, the sensor's power-up after a resume). Only the MDD reads IIC0, by
+//  polling the controller's status for the half millisecond a packet takes
+//  (classpad_touch_bus.h). Registry "BusHz": the SCL rate ICCL/ICCH are
+//  scaled to at the Pphi the OAL measured, so that a clock raised by an
+//  overclocking tool does not clock the sensor faster; 0 = Casio's counts
+//  as they are.
 //  Keep the MDD wait infinite (CE WaitOneMore interrupt-event timeout bug).
 //  The sampler waits on an ordinary stop event with a timeout instead.
 //  ClassPad command 0x84 returns x1,y1,z1,gh,x2,y2,z2,dm, NOT contact flags.
@@ -95,7 +105,14 @@ static INT      g_lastX, g_lastY;
 static LONG     g_attached;
 static DWORD    g_samples, g_contacts, g_busErrors;
 static HANDLE   g_hSampler;                     // sample thread
-static HANDLE   g_hevSample;                    // manual-reset shutdown event
+static HANDLE   g_hevSample;                    // auto-reset: work for the thread (shutdown, sensor power-up)
+static BOOL   (*g_pfnTickRegister)(void (*)(void));     // kbdmouse.dll's, NULL: none
+static volatile BOOL g_sharedTick;              // InputTick is being called by the keyboard's tick
+static DWORD    g_tickMs;                       // its period
+static DWORD    g_tickCount;
+#define TOUCH_KEYBD_DLL             TEXT("kbdmouse.dll")
+#define TOUCH_KEYBD_REG_KEY         TEXT("HARDWARE\\DEVICEMAP\\KEYBD")
+#define TOUCH_IDLE_POLL_MS          640         // the thread's own period with the shared tick: the suspend option
 static volatile BOOL g_sampling;                // stylus down: keep waking the IST
 static volatile BOOL g_quit, g_suspended;
 static volatile BOOL g_wakePending;             // after a resume: the sample thread powers the sensor up (it may sleep, the power handler may not)
@@ -113,17 +130,59 @@ static DWORD RegDword(LPCTSTR name, DWORD dflt)
 }
 
 //------------------------------------------------------------------------------
-//  Polled IIC state machine, shared with the host protocol regression test.
+//  Polled IIC state machine, shared with the host protocol regression test
+//  (bsp/tests/test_touch_bus50).
 #include "classpad_touch_bus.h"
+
+#define TOUCH_BUS_HOLD_MS           50          // after a failed transaction: no retry before this (a dead bus costs its whole time limit of spinning)
+static DWORD g_busHoldUntil;
+static BOOL  g_busHeld;
+static DWORD g_busPphi;                         // the Pphi the counts were made for, 0: not asked yet
+static DWORD g_busHz = CLASSPAD_IIC_SCL_HZ;     // registry "BusHz"
+static void  BusClockRefresh(void);
+static BOOL  g_busPphiMeasured;
 
 static BOOL TouchReadPacket(UINT8 *pkt, int n)
 {
+    if (g_busHeld) {
+        if ((INT)(GetTickCount() - g_busHoldUntil) < 0) return FALSE;
+        g_busHeld = FALSE;
+    }
     if (TouchBusRead(pkt, n)) return TRUE;
+    BusClockRefresh();                          // a clock changed under a held pen: right for the retry
+    g_busHeld = TRUE;
+    g_busHoldUntil = GetTickCount() + TOUCH_BUS_HOLD_MS;
     g_busErrors++;
     if (g_busErrors <= 5 || (g_busErrors % 100) == 0)
-        RETAILMSG(1, (TEXT("CLASSPAD TOUCH: IIC error %d stage=%d status=%02x\r\n"),
-                      g_busErrors, g_touchBusStage, g_touchBusStatus));
+        RETAILMSG(1, (TEXT("CLASSPAD TOUCH: IIC error %d stage=%d status=%02x after %d status reads\r\n"),
+                      g_busErrors, g_touchBusStage, g_touchBusStatus, g_touchBusReads));
     return FALSE;
+}
+
+// ICCL/ICCH for the peripheral clock the machine runs now. The OAL measured
+// it at boot and follows a clock change made while CE runs (an overclocking
+// tool), so this is asked again at every pen-down and after a failed
+// transaction; the counts go to the controller at the next transaction's
+// reset. Says so only when Pphi changed.
+static void BusClockRefresh(void)
+{
+    CLASSPAD_PPHI clock;
+    DWORD n = 0;
+    memset(&clock, 0, sizeof clock);
+    if (!KernelIoControl(IOCTL_HAL_CLASSPAD_PPHI, NULL, 0, &clock, sizeof clock, &n) || !clock.pphiHz) {
+        if (!g_busPphi) {
+            g_busPphi = 1;                      // said once
+            RETAILMSG(1, (TEXT("CLASSPAD TOUCH: the OAL does not tell Pphi: Casio's ICCL/ICCH as they are\r\n")));
+        }
+        return;
+    }
+    if (clock.pphiHz == g_busPphi) return;
+    g_busPphi = clock.pphiHz;
+    g_busPphiMeasured = clock.measured != 0;
+    TouchBusSetClock(clock.pphiHz, g_busHz);
+    RETAILMSG(1, (TEXT("CLASSPAD TOUCH: Pphi %u Hz (%s), ICCL %02x ICCH %02x = SCL %u Hz (BusHz %u)\r\n"),
+                  g_busPphi, g_busPphiMeasured ? TEXT("boot value measured") : TEXT("boot value nominal: not measured"),
+                  g_touchBusIccl, g_touchBusIcch, g_busPphi / (g_touchBusIccl + g_touchBusIcch), g_busHz));
 }
 
 // The sensor's set-up, read back once while it still has what Casio's OS
@@ -209,23 +268,74 @@ static BOOL PenDown(void)
 }
 
 //------------------------------------------------------------------------------
-//  Poll for the first down as well as movement/up. The sampler never reads
-//  IIC: the MDD serializes all transfers. A failed packet is retried while
-//  contact stays low, even if no down has been accepted yet.
+//  One sample period: wake the MDD's IST while the pen is down (first down
+//  as well as movement/up). Never reads IIC: the MDD serializes all
+//  transfers. A failed packet is retried while contact stays low, even if no
+//  down has been accepted yet. Called from the keyboard's tick thread or
+//  from SampleThread; does not block.
+static void SampleTick(void)
+{
+    if (!g_suspended && hTouchPanelEvent && (PenDown() || g_sampling)) SetEvent(hTouchPanelEvent);
+}
+
+// The keyboard's tick (every g_tickMs): every tick at the high sample rate,
+// as many as make the low rate's period otherwise. Work that may sleep goes
+// to the thread.
+static void InputTick(void)
+{
+    DWORD every = g_tickMs ? (1000 / (DWORD)g_rate) / g_tickMs : 1;      // 8 ms tick: every tick at the high rate, every other at the low
+    if (g_wakePending) SetEvent(g_hevSample);
+    if (every > 1 && (++g_tickCount % every) != 0) return;
+    SampleTick();
+}
+
+static void SharedTickOpen(void)
+{
+    HKEY key; DWORD v = 0, type, size = sizeof v;
+    HMODULE kbd = LoadLibrary(TOUCH_KEYBD_DLL);     // GWES's own keyboard driver: the same instance
+    g_sharedTick = FALSE;
+    g_tickMs = 8;                                   // the keyboard driver's default (kbd_pdd.cpp)
+    if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, TOUCH_KEYBD_REG_KEY, 0, 0, &key) == ERROR_SUCCESS) {
+        if (RegQueryValueEx(key, TEXT("PollMs"), NULL, &type, (LPBYTE)&v, &size) == ERROR_SUCCESS && type == REG_DWORD) g_tickMs = v;
+        RegCloseKey(key);
+    }
+    if (g_tickMs < 5) g_tickMs = 5;
+    if (kbd) g_pfnTickRegister = (BOOL (*)(void (*)(void)))GetProcAddress(kbd, TEXT("ClasspadInputTickRegister"));
+    if (!g_pfnTickRegister) RETAILMSG(1, (TEXT("CLASSPAD TOUCH: no keyboard tick to share: own sample thread\r\n")));
+}
+
+// The keyboard's tick only exists once GWES has entered its PDD, which may
+// be after this driver starts: tried again from the thread until it is there.
+static void SharedTickTry(void)
+{
+    if (g_sharedTick || !g_pfnTickRegister || !g_pfnTickRegister(InputTick)) return;
+    g_sharedTick = TRUE;
+    RETAILMSG(1, (TEXT("CLASSPAD TOUCH: sampled from the keyboard's input tick (%d ms)\r\n"), g_tickMs));
+}
+
+static void SharedTickClose(void)
+{
+    if (g_sharedTick && g_pfnTickRegister) g_pfnTickRegister(NULL);     // returns with InputTick not running
+    g_sharedTick = FALSE;
+}
+
 static DWORD WINAPI SampleThread(LPVOID)
 {
-    DWORD optionPoll = 0;
     CeSetThreadPriority(GetCurrentThread(), (int)RegDword(TEXT("Priority256"), TOUCH_THREAD_PRIORITY));
+    DWORD optionPoll = 0, rc;
+    SharedTickOpen();
+    SharedTickTry();
     while (!g_quit) {
-        DWORD rc = WaitForSingleObject(g_hevSample, 1000 / (DWORD)g_rate);
-        if (rc != WAIT_TIMEOUT || g_quit) break;
-        if ((++optionPoll & 63) == 0) {         // the suspend options (classpad_pwrstat.h), every 64 polls
+        rc = WaitForSingleObject(g_hevSample, g_sharedTick ? TOUCH_IDLE_POLL_MS : 1000 / (DWORD)g_rate);
+        if (g_quit) break;
+        if (g_sharedTick || (++optionPoll & 63) == 0 || rc != WAIT_TIMEOUT) {   // the suspend options (classpad_pwrstat.h), about every 640 ms
             HKEY key; DWORD v = 0, type, size = sizeof v;
             if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, TEXT("Software\\ClassPad\\Suspend"), 0, 0, &key) == ERROR_SUCCESS) {
                 if (RegQueryValueEx(key, TEXT("Options"), NULL, &type, (LPBYTE)&v, &size) != ERROR_SUCCESS || type != REG_DWORD) v = CLASSPAD_SUSPEND_OPT_DEFAULT;
                 RegCloseKey(key);
             } else v = CLASSPAD_SUSPEND_OPT_DEFAULT;
             g_powerSwitch = (v & CLASSPAD_SUSPEND_OPT_TOUCH) != 0;
+            SharedTickTry();
         }
         if (g_wakePending) {                    // resumed: nobody else uses the bus while g_suspended is set
             SensorPowerUp();
@@ -233,8 +343,9 @@ static DWORD WINAPI SampleThread(LPVOID)
             g_suspended = FALSE;
             g_sampling = TRUE;
         }
-        if (!g_suspended && hTouchPanelEvent && (PenDown() || g_sampling)) SetEvent(hTouchPanelEvent);
+        if (!g_sharedTick) SampleTick();
     }
+    SharedTickClose();
     return 0;
 }
 
@@ -336,11 +447,13 @@ BOOL DdsiTouchPanelEnable(void)
         MMIO_W16(TOUCH_PJCR, MMIO_R16(TOUCH_PJCR) & ~0x0F00); // PJ4/5: IIC
         MMIO_W16(TOUCH_PRCR, (MMIO_R16(TOUCH_PRCR) & ~0x0C00) | 0x0C00); // PR5 input
         MMIO_W8(INTC_IMR(7), 0xF0);                 // IIC IRQs masked; status is polled
+        g_busHz = RegDword(TEXT("BusHz"), CLASSPAD_IIC_SCL_HZ);
+        BusClockRefresh();
         TouchBusReset();
         SensorConfigCapture();
         if (!g_hSampler) {
             g_quit = FALSE;
-            g_hevSample = CreateEvent(NULL, TRUE, FALSE, NULL);
+            g_hevSample = CreateEvent(NULL, FALSE, FALSE, NULL);
             if (g_hevSample) g_hSampler = CreateThread(NULL, 0, SampleThread, NULL, 0, NULL);
             if (!g_hSampler) {
                 if (g_hevSample) { CloseHandle(g_hevSample); g_hevSample = NULL; }
@@ -419,6 +532,7 @@ void DdsiTouchPanelGetPoint(P_TOUCH_PANEL_SAMPLE_FLAGS pTipState, INT *pUncalX, 
     if (g_suspended) return;
     if (g_panel && PenDown()) {
         UINT8 pkt[TOUCH_PACKET_BYTES];
+        if (!g_prevDown) BusClockRefresh();         // a stroke starts: one IOCTL, not one per sample
         if (TouchReadPacket(pkt, TOUCH_PACKET_BYTES)) {
             if (PenDown()) {                       // z1 is a measurement, not a flag
                 down = TRUE;

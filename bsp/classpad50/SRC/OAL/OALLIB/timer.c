@@ -181,6 +181,35 @@ fail:
 }
 
 //------------------------------------------------------------------------------
+//  Pphi in Hz, now, for whatever else divides it (the touch driver's IIC0
+//  clock, classpad_iic.h): four times the rate the tick is programmed for
+//  (TCR.TPSC = Pphi/4). That is the rate measured at boot, and after a clock
+//  change inside CE (an overclocking tool's IOCTL) whatever TMU0 was retuned
+//  to: anything that changes Pphi has to update g_oalTimer.countsPerMSec for
+//  the tick's sake, and this follows without being told. Good to 1 count per
+//  ms (0.01 %).
+//
+UINT32 OALClockPphiHz(void)
+{
+    UINT32 perMSec = g_oalTimer.countsPerMSec ? g_oalTimer.countsPerMSec : COUNT_FREQUENCY / 1000;
+    return perMSec * 1000 * 4;
+}
+
+#ifndef CLASSPAD_TIMER_HOST_TEST
+BOOL OALIoCtlHalClasspadPphi(UINT32 code, VOID *in, UINT32 insize,
+    VOID *out, UINT32 outsize, UINT32 *returned)
+{
+    CLASSPAD_PPHI *clock = (CLASSPAD_PPHI *)out;
+    if (returned) *returned = 0;
+    if (!clock || outsize < sizeof *clock) return FALSE;
+    clock->pphiHz   = OALClockPphiHz();
+    clock->measured = g_calibratedHz != 0;
+    if (returned) *returned = sizeof *clock;
+    return TRUE;
+}
+#endif
+
+//------------------------------------------------------------------------------
 //  InitClock: the kernel's name for it (called with interrupts off from
 //  OEMInit, and from CallOEMPowerOff after OEMPowerOff returns). The rate is
 //  measured once per boot: a resume keeps it (the translator restores the

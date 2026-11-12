@@ -2,22 +2,30 @@
 //  kbd_pdd.cpp - KEYSC matrix keyboard PDD for the Layout Manager
 //
 //  The Layout Manager (layoutmanager.lib, linked into this DLL) calls the
-//  entries in g_rgpfnPddEntries; ours brings the SH7305 KEYSC up, requests
-//  a SYSINTR for its interrupt (logical IRQ_KEYSC, intr_cfg.h) and starts an
-//  IST that keeps a 96-bit image of the matrix. Every changed bit becomes a
-//  key event: scan code = 16 * KIUDATA word + bit (classpad_keysc.h), key
-//  down when the bit is set. The IST wakes on the interrupt only; a second
-//  thread rescans every "PollMs", because the emulator drops an edge that
-//  arrives while the source is masked between the ISR and InterruptDone.
-//  The poll is a separate thread rather than a timeout on the IST's wait on
-//  purpose: a timed wait on an interrupt event hits a CE 6.0 R3 kernel hole
-//  (WaitOneMore's retry path; notes/ce/kernel-sh-notes.md section 10,
-//  bsp/kernel/kcalls-waitonemore.patch) whenever the timeout expires between
-//  the kernel calls that set the wait up, and the translator's slow guest
-//  time makes that routine. Auto-repeat is the MDD's job.
+//  entries in g_rgpfnPddEntries; ours brings the SH7305 KEYSC up and starts
+//  one thread, the input tick, that reads the 96-bit matrix image every
+//  "PollMs" and turns every changed bit into a key event: scan code = 16 *
+//  KIUDATA word + bit (classpad_keysc.h), key down when the bit is set.
+//  Auto-repeat is the MDD's job.
+//
+//  Polling only, as gint's keysc driver does it (a timer tick that reads the
+//  six data words; no KEYSC interrupt). Until 2026-11-12 an IST scanned on
+//  the KEYSC interrupt and a second thread rescanned every 20 ms because an
+//  edge can be lost while the source is masked between the ISR and
+//  InterruptDone; the scan compares whole images, so the poll alone finds
+//  everything and the interrupt only added an ISR, a thread wake-up and an
+//  InterruptDone per key edge. The SYSINTR of IRQ_KEYSC is still requested
+//  and registered as a wake source: the OAL's suspend uses the KEYSC
+//  interrupt for Clear/ON (power.c), with its own unmasking; it is never
+//  InterruptInitialize'd, so it stays masked while CE runs.
+//
+//  The same tick serves the touch driver (one timer wake-up for both, as
+//  gint samples the touch panel from its keyboard tick): touch.dll registers
+//  a function through the exported ClasspadInputTickRegister and it is
+//  called after every scan, in this thread. It must not block.
 //
 //  Registry (HKLM\HARDWARE\DEVICEMAP\KEYBD): "Priority256" (priority of
-//  both threads, default 145), "PollMs" (default 20), "Matrix" (0 = fx-CG100
+//  the tick thread, default 145), "PollMs" (the tick, default 8, at least 5), "Matrix" (0 = fx-CG100
 //  keypad, 1 = fx-CP400 keypad; read by kbd_layout.cpp).
 //
 //  SHIFT then Clear/ON (or Clear/ON with SHIFT held) suspends, as on the
@@ -39,7 +47,7 @@
 
 #define KEYBD_REG_KEY           TEXT("HARDWARE\\DEVICEMAP\\KEYBD")
 #define KEYBD_IST_PRIORITY      145
-#define KEYBD_POLL_MS           20
+#define KEYBD_POLL_MS           8           // gint scans at 128 Hz; its author found the KEYSC data wrong (keys stuck down) when read below about 64 Hz
 
 #ifndef DEBUG
 // The Layout Manager and the IST library carry their own zones in DEBUG
@@ -57,10 +65,9 @@ DBGPARAM dpCurSettings = {
 static UINT             g_uiPddId;
 static PFN_KEYBD_EVENT  g_pfnKeybdEvent;
 static DWORD            g_dwSysIntr = SYSINTR_UNDEFINED;
-static HANDLE           g_hevInterrupt;
-static HANDLE           g_hThread;                  // IST
-static HANDLE           g_hPoll;                    // poll thread
-static CRITICAL_SECTION g_csScan;                   // one scan at a time
+static HANDLE           g_hThread;                  // the input tick
+static CRITICAL_SECTION g_csTick;                   // the registered tick function: called and changed under it
+static void           (*g_pfnInputTick)(void);      // touch.dll's part of the tick
 static UINT16           g_image[KEYSC_WORDS];       // last matrix image
 static volatile BOOL    g_suppressClear;
 static DWORD            g_events;                   // key events delivered
@@ -107,14 +114,6 @@ static void KeyscInit(void)
 static void KeyscStop(void)
 {
     MMIO_W16(KEYSC_KIUCNTREG, 0);
-}
-
-// Acknowledge the interrupt: write the status low byte back with the enable
-// bits (the OS reads the low byte and merges the high bits).
-static void KeyscAck(void)
-{
-    UINT16 v = MMIO_R16(KEYSC_KIUINTREG);
-    MMIO_W16(KEYSC_KIUINTREG, (UINT16)(KEYSC_INT_ENABLE | (v & 0x00FF)));
 }
 
 //------------------------------------------------------------------------------
@@ -168,8 +167,8 @@ static UINT KeyscScan(void)
     return n;
 }
 
-// Outside the scan lock: SetSystemPowerState returns only after the resume,
-// and the power handlers run in between.
+// SetSystemPowerState returns only after the resume, and the power handlers
+// run in between.
 static void SuspendIfRequested(void)
 {
     if (!g_suspendRequest) return;
@@ -177,65 +176,44 @@ static void SuspendIfRequested(void)
     SetSystemPowerState(NULL, POWER_STATE_SUSPEND, POWER_FORCE);
 }
 
-static DWORD WINAPI KeyscPoll(LPVOID arg)
+//------------------------------------------------------------------------------
+//  The other user of the tick (touch.dll): fn is called after every scan, in
+//  the tick thread; NULL takes it out again, and when the call returns the
+//  old function is not running and will not be called any more.
+//
+extern "C" BOOL ClasspadInputTickRegister(void (*fn)(void))
 {
-    DWORD pollMs = (DWORD)arg;
-    CeSetThreadPriority(GetCurrentThread(), (int)RegDword(TEXT("Priority256"), KEYBD_IST_PRIORITY));
-    for (;;) {
-        Sleep(pollMs);
-        EnterCriticalSection(&g_csScan);
-        KeyscScan();
-        LeaveCriticalSection(&g_csScan);
-        SuspendIfRequested();
-    }
-    return 0;
+    if (!g_hThread) return FALSE;               // no tick (the PDD was never entered)
+    EnterCriticalSection(&g_csTick);
+    g_pfnInputTick = fn;
+    LeaveCriticalSection(&g_csTick);
+    return TRUE;
 }
 
-static DWORD WINAPI KeyscIst(LPVOID)
+static DWORD WINAPI KeyscTick(LPVOID)
 {
-    DWORD irq = IRQ_KEYSC, pollMs = RegDword(TEXT("PollMs"), KEYBD_POLL_MS), wakeups = 0;
+    DWORD irq = IRQ_KEYSC, pollMs = RegDword(TEXT("PollMs"), KEYBD_POLL_MS);
     if (pollMs < 5) pollMs = 5;
 
     CeSetThreadPriority(GetCurrentThread(), (int)RegDword(TEXT("Priority256"), KEYBD_IST_PRIORITY));
 
+    // The SYSINTR only as the suspend's wake source (see the header)
     if (!KernelIoControl(IOCTL_HAL_REQUEST_SYSINTR, &irq, sizeof irq, &g_dwSysIntr, sizeof g_dwSysIntr, NULL)) {
-        RETAILMSG(1, (TEXT("CLASSPAD KEYBD: no SYSINTR for IRQ %d, polling only\r\n"), irq));
+        RETAILMSG(1, (TEXT("CLASSPAD KEYBD: no SYSINTR for IRQ %d: Clear/ON will not wake a suspend\r\n"), irq));
         g_dwSysIntr = SYSINTR_UNDEFINED;
-    } else if (!InterruptInitialize(g_dwSysIntr, g_hevInterrupt, NULL, 0)) {
-        RETAILMSG(1, (TEXT("CLASSPAD KEYBD: InterruptInitialize(%d) failed, polling only\r\n"), g_dwSysIntr));
-        KernelIoControl(IOCTL_HAL_RELEASE_SYSINTR, &g_dwSysIntr, sizeof g_dwSysIntr, NULL, 0, NULL);
-        g_dwSysIntr = SYSINTR_UNDEFINED;
-    }
-
-    if (g_dwSysIntr != SYSINTR_UNDEFINED &&
-        !KernelIoControl(IOCTL_HAL_ENABLE_WAKE, &g_dwSysIntr, sizeof g_dwSysIntr, NULL, 0, NULL))
+    } else if (!KernelIoControl(IOCTL_HAL_ENABLE_WAKE, &g_dwSysIntr, sizeof g_dwSysIntr, NULL, 0, NULL))
         RETAILMSG(1, (TEXT("CLASSPAD KEYBD: wake registration failed %d\r\n"), GetLastError()));
     g_cp400 = RegDword(TEXT("Matrix"), 0) == 1;
     KeyscInit();
     KeyscScan();        // keys already held: report them, start from the live image
-    g_hPoll = CreateThread(NULL, 0, KeyscPoll, (LPVOID)pollMs, 0, NULL);
-    RETAILMSG(1, (TEXT("CLASSPAD KEYBD: IST running, SYSINTR %d, poll %d ms%s\r\n"), g_dwSysIntr, pollMs,
-                  g_hPoll ? TEXT("") : TEXT(" (poll thread failed)")));
-    if (g_dwSysIntr == SYSINTR_UNDEFINED) return 0;     // the poll thread carries the keyboard
+    RETAILMSG(1, (TEXT("CLASSPAD KEYBD: input tick every %d ms, polling only (wake SYSINTR %d)\r\n"), pollMs, g_dwSysIntr));
 
     for (;;) {
-        // INFINITE on purpose, see the header: a timeout here left this
-        // thread's proxy linked on the interrupt event (2026-11-04/05), after
-        // which every wait failed with ERROR_INVALID_HANDLE and the loop spun
-        // at IST priority, starving GWES and the display push thread.
-        DWORD rc = WaitForSingleObject(g_hevInterrupt, INFINITE);
-        if (rc != WAIT_OBJECT_0) {
-            RETAILMSG(1, (TEXT("CLASSPAD KEYBD: WaitForSingleObject failed, error %d: polling only\r\n"), GetLastError()));
-            return 0;
-        }
-        wakeups++;
-        if (wakeups <= 10 || (wakeups % 100) == 0)
-            RETAILMSG(1, (TEXT("CLASSPAD KEYBD: interrupt %d, KIUINTREG %04x\r\n"), wakeups, MMIO_R16(KEYSC_KIUINTREG)));
-        EnterCriticalSection(&g_csScan);
-        KeyscAck();
+        Sleep(pollMs);
         KeyscScan();
-        LeaveCriticalSection(&g_csScan);
-        InterruptDone(g_dwSysIntr);
+        EnterCriticalSection(&g_csTick);
+        if (g_pfnInputTick) g_pfnInputTick();
+        LeaveCriticalSection(&g_csTick);
         SuspendIfRequested();
     }
     return 0;
@@ -277,13 +255,11 @@ static BOOL WINAPI ClassPad_Entry(UINT uiPddId, PFN_KEYBD_EVENT pfnKeybdEvent, P
     *ppKeybdPdd = &g_classpadPdd;
 
     if (g_hThread) return TRUE;
-    InitializeCriticalSection(&g_csScan);
-    g_hevInterrupt = CreateEvent(NULL, FALSE, FALSE, NULL);
-    if (!g_hevInterrupt) return FALSE;
-    g_hThread = CreateThread(NULL, 0, KeyscIst, NULL, 0, NULL);
+    InitializeCriticalSection(&g_csTick);
+    g_hThread = CreateThread(NULL, 0, KeyscTick, NULL, 0, NULL);
     if (!g_hThread) {
         RETAILMSG(1, (TEXT("CLASSPAD KEYBD: CreateThread failed %d\r\n"), GetLastError()));
-        CloseHandle(g_hevInterrupt); g_hevInterrupt = NULL;
+        DeleteCriticalSection(&g_csTick);
         return FALSE;
     }
     return TRUE;
