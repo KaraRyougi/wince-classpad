@@ -40,12 +40,12 @@
 #define CPCLK_PPHI_MIN  1000000u            /* the 1 ms tick needs Pphi/4000 counts */
 
 /* KernelIoControl codes (OAL\OALLIB\ioctl.c; 2100..2102 are in
- * classpad_pwrstat.h). GET: output ClasspadClockInfo. SET: input
+ * classpad_pwrstat.h, 2103 is the touch driver's IOCTL_HAL_CLASSPAD_PPHI). GET: output ClasspadClockInfo. SET: input
  * ClasspadClockRegs; the OAL takes FLLFRQ, FRQCR, CS0WCR.WR and CS3WCR.TRC
  * from it, switches with interrupts off and rescales the TMU0 tick. */
 #ifdef CTL_CODE
-#define IOCTL_HAL_CLASSPAD_CLOCK_GET CTL_CODE(FILE_DEVICE_HAL, 2103, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_HAL_CLASSPAD_CLOCK_SET CTL_CODE(FILE_DEVICE_HAL, 2104, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_HAL_CLASSPAD_CLOCK_GET CTL_CODE(FILE_DEVICE_HAL, 2104, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_HAL_CLASSPAD_CLOCK_SET CTL_CODE(FILE_DEVICE_HAL, 2105, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #endif
 
 typedef struct { unsigned fllfrq, frqcr, cs0wcr, cs3wcr; } ClasspadClockRegs;
