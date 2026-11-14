@@ -156,10 +156,14 @@ int             g_iProjection = PERSPECTIVE;
 typedef struct { NUMERIC x, y, z; } Vertex;
 typedef struct { int i0, i1; } Edge;
 
-#define X_GRID_MAX      30
-#define Y_GRID_MAX      30
-#define U_GRID_MAX      20
-#define V_GRID_MAX      20
+/* ClassPad (2026-11-14): every grid limit is 90 (upstream: 30, 30, 20, 20) */
+#define X_GRID_MAX      90
+#define Y_GRID_MAX      90
+#define U_GRID_MAX      90
+#define V_GRID_MAX      90
+/* ClassPad (2026-11-14): the Window dialog's range, also applied to grids
+   read from a file, which upstream took unchecked */
+#define CLAMP_GRID(n, max) ((n) < 5 ? 5 : (n) > (max) ? (max) : (n))
 #define BUFFER_MAX(a,b) ((a) > (b) ? (a) : (b))
 #define VERTEX_BUFFER_SIZE  BUFFER_MAX(X_GRID_MAX + Y_GRID_MAX + X_GRID_MAX * Y_GRID_MAX, U_GRID_MAX * V_GRID_MAX * 3)
 
@@ -2000,10 +2004,16 @@ static BOOL LoadSession(HWND hWnd) {
         Camera.uMax = (PZ_FLOAT)Utils_Atof(PineIni_Section_GetString(pSec, "umax", "6.2832"));
         Camera.vMin = (PZ_FLOAT)Utils_Atof(PineIni_Section_GetString(pSec, "vmin", "0"));
         Camera.vMax = (PZ_FLOAT)Utils_Atof(PineIni_Section_GetString(pSec, "vmax", "6.2832"));
+        /* ClassPad (2026-11-14): clamped; upstream stored ugrid and vgrid in
+           xGrid and yGrid, over the values just read */
         Camera.xGrid = PineIni_Section_GetInt(pSec, "xgrid", SAMPLE_DEFAULT_GRID);
         Camera.yGrid = PineIni_Section_GetInt(pSec, "ygrid", SAMPLE_DEFAULT_GRID);
-        Camera.xGrid = PineIni_Section_GetInt(pSec, "ugrid", SAMPLE_DEFAULT_GRID);
-        Camera.yGrid = PineIni_Section_GetInt(pSec, "vgrid", SAMPLE_DEFAULT_GRID);
+        Camera.uGrid = PineIni_Section_GetInt(pSec, "ugrid", SAMPLE_DEFAULT_GRID);
+        Camera.vGrid = PineIni_Section_GetInt(pSec, "vgrid", SAMPLE_DEFAULT_GRID);
+        Camera.xGrid = CLAMP_GRID(Camera.xGrid, X_GRID_MAX);
+        Camera.yGrid = CLAMP_GRID(Camera.yGrid, Y_GRID_MAX);
+        Camera.uGrid = CLAMP_GRID(Camera.uGrid, U_GRID_MAX);
+        Camera.vGrid = CLAMP_GRID(Camera.vGrid, V_GRID_MAX);
         Camera.iZoomLevel = PineIni_Section_GetInt(pSec, "zoom", Camera.iZoomLevel);
         Camera.iFovLevel = PineIni_Section_GetInt(pSec, "fov", Camera.iFovLevel);
         Camera.iViewportX = PineIni_Section_GetInt(pSec, "viewx", Camera.iViewportX);
@@ -2230,7 +2240,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         Camera.xGrid = SAMPLE_DEFAULT_GRID;
                         Camera.yGrid = SAMPLE_DEFAULT_GRID;
                         Camera.uGrid = SAMPLE_DEFAULT_GRID;
-                        Camera.uGrid = SAMPLE_DEFAULT_GRID;
+                        Camera.vGrid = SAMPLE_DEFAULT_GRID;   /* ClassPad (2026-11-14): upstream set uGrid twice */
                         switch (p->iFuncType) {
                             case FUNC_TYPE_CARTESIAN:
                                 Utils_StringCopy(g_szCartExpr, CART_EXPR_LENGTH, p->szExpr[0]);

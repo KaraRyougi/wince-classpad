@@ -59,6 +59,17 @@ it the canvas clear, and painted nothing until the pen came up.
   Exponents -1 to 2 give the same bits as `pow`, the others differ by a few
   units in the last place of a float.
 
+Third round (2026-11-14): `X_GRID_MAX`, `Y_GRID_MAX`, `U_GRID_MAX` and
+`V_GRID_MAX` are all 90 (upstream: 30, 30, 20, 20), the upper bound the
+Window dialog clamps the four Grid fields to. `g_fVertexBuf` grows to
+90 x 90 x 3 fixed-point values (about 95 KB), and a recalculation at the
+maximum evaluates nine times (Cartesian) or about twenty times (parametric)
+as many points as upstream's maximum. `LoadSession` clamps the four grids
+it reads to the same range (5 to the limit; upstream took them unchecked, and
+a saved value above the limit overran the buffer) and stores `ugrid` and
+`vgrid` in `uGrid` and `vGrid` (upstream overwrote `xGrid` and `yGrid`
+with them); choosing a sample sets `vGrid` (upstream set `uGrid` twice).
+
 When replacing upstream's files with a newer checkout, reapply them (or
 better, send them upstream).
 
