@@ -765,9 +765,7 @@ static void Paint(HWND hWnd)
 DWORD tick_count(volatile DWORD *flag);                     // bench.src
 DWORD mem_bench(DWORD *area, volatile DWORD *flag);
 int   dhrystone(int runs);                                  // dhry.c: 1 = it ended with the right values
-BOOL  SetKMode(BOOL on);                                    // coredll: the uncached addresses below
-BOOL  CeSetThreadPriority(HANDLE thread, int priority);
-int   CeGetThreadPriority(HANDLE thread);
+//  SetKMode (pkfuncs.h, for the uncached addresses below) and CeSet/GetThreadPriority come with windows.h
 
 #define BENCH_DHRYSTONE 10000
 #define BENCH_ROM   0xA0150000u
@@ -818,7 +816,8 @@ static void RunBench(void)
     DWORD data[8];
     LARGE_INTEGER t0, t1;
     ClasspadClockChain cur;
-    BOOL kmode, pushed, right;
+    BOOL pushed, right;
+    DWORD kmode;
     HDC hdc;
     int i;
 
