@@ -2672,6 +2672,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             }
             break;
         case WM_SIZE:
+#if VER_PLATFORM_WIN32_CE
+            /* A command bar keeps its width and its close button's place
+             * until it is told: the window's width changes when the screen
+             * is rotated (ClassPad: the strip's Rotate icon). */
+            if (wParam != SIZE_MINIMIZED && hwndCB != NULL && g_iBarHeight > 0) {
+                SendMessage(hwndCB, TB_AUTOSIZE, 0, 0);
+                CommandBar_AlignAdornments(hwndCB);
+            }
+#endif
             if (wParam != SIZE_MINIMIZED && g_iCanvasW > 0) {
                 int iNewW, iNewH, iCw, iCh;
                 iNewW = LOWORD(lParam);

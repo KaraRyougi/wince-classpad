@@ -46,11 +46,118 @@ static CLSID g_clsidMathKeyPad =
 // is put back: one that filled the old work area (or the old screen) fills
 // the new one, anything else (a dialog) keeps its size and is moved so that
 // its top right corner, where the close button is, is on the screen.
-struct REFIT { RECT oldScreen, oldWork, screen, work; int count; };
+struct REFIT { RECT oldScreen, oldWork, screen, work; int count, bars; };
 
 static BOOL IsToolbarClass(LPCTSTR cls)
 {
     return !wcscmp(cls, TEXT("ToolbarWindow32")) || !wcscmp(cls, TEXT("CommandBar"));
+}
+
+// Messages to another program's toolbar. A message's pointer argument is
+// not carried across processes: the toolbar's thread reads and writes that
+// address in ITS OWN address space. A pointer to this program's stack there
+// wrote a TBBUTTON into the other program's stack area (WordPad kept
+// running with it; Plotter-Z's page was not committed and it died:
+// "Exception 060 ... commctrl.dll", 2026-11-14). A view of a memory-mapped
+// file is at the same address in every process of CE 5.0, so everything the
+// toolbar is to fill in or read lives in one such page. And a program that
+// does not answer must not hang the strip: every message has a time limit.
+#define BAR_MSG_MS 3000
+static BYTE *g_shared;
+
+static BYTE *Shared(void)
+{
+    if (!g_shared) {
+        HANDLE map = CreateFileMapping(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, 4096, NULL);
+        if (map) g_shared = (BYTE *)MapViewOfFile(map, FILE_MAP_WRITE, 0, 0, 0);
+        if (!g_shared) RETAILMSG(1, (TEXT("ROTATEKEY: no shared page: %d\r\n"), GetLastError()));
+    }
+    return g_shared;
+}
+
+static LRESULT BarMsg(HWND bar, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    DWORD result = 0;
+    if (!SendMessageTimeout(bar, msg, wParam, lParam, SMTO_NORMAL, BAR_MSG_MS, &result)) return 0;
+    return (LRESULT)result;
+}
+
+// A toolbar button's rectangle, through the shared page
+static BOOL BarItemRect(HWND bar, int index, RECT *out)
+{
+    RECT *r = (RECT *)Shared();
+    if (!r) return FALSE;
+    SetRectEmpty(r);
+    if (!BarMsg(bar, TB_GETITEMRECT, (WPARAM)index, (LPARAM)r)) return FALSE;
+    *out = *r;
+    return TRUE;
+}
+
+// CommandBar_AlignAdornments for a bar of another process. The library
+// function sends its messages with pointers to its own stack, so it is done
+// again here with the shared page, step for step (commctrl.dll of CE 5.0,
+// disassembled): among the last five buttons find the close / OK / help
+// buttons (command IDs WM_CLOSE, IDOK, WM_HELP); the button before the first
+// of them must be the separator that CommandBar_AddAdornments put there
+// (style TBSTYLE_SEP, command ID 0xCCDEADCC); its width becomes whatever is
+// left of the bar's client width after the buttons behind it.
+#define ADORNMENT_SEPARATOR_ID 0xCCDEADCC
+
+static void AlignAdornments(HWND bar)
+{
+    BYTE *page = Shared();
+    if (!page) return;
+    TBBUTTON *tbb = (TBBUTTON *)(page + 64);
+    TBBUTTONINFO *info = (TBBUTTONINFO *)(page + 128);
+    int n = (int)BarMsg(bar, TB_BUTTONCOUNT, 0, 0), i, sep = -1, avail;
+    RECT client, r;
+    for (i = n - 1; i >= 0 && i >= n - 5; i--) {
+        ZeroMemory(tbb, sizeof *tbb);
+        if (BarMsg(bar, TB_GETBUTTON, (WPARAM)i, (LPARAM)tbb)
+            && (tbb->idCommand == WM_CLOSE || tbb->idCommand == IDOK || tbb->idCommand == WM_HELP))
+            sep = i - 1;
+    }
+    if (sep < 0 || !GetClientRect(bar, &client)) return;
+    avail = client.right - client.left;
+    for (i = n - 1; i > sep; i--)
+        if (BarItemRect(bar, i, &r)) avail -= r.right - r.left;
+    ZeroMemory(tbb, sizeof *tbb);
+    if (!BarMsg(bar, TB_GETBUTTON, (WPARAM)sep, (LPARAM)tbb)
+        || tbb->fsStyle != TBSTYLE_SEP || (DWORD)tbb->idCommand != ADORNMENT_SEPARATOR_ID)
+        return;
+    if (!BarItemRect(bar, sep, &r) || r.left >= avail) return;     // no room: as it is
+    ZeroMemory(info, sizeof *info);
+    info->cbSize = sizeof *info;
+    info->dwMask = TBIF_SIZE;
+    info->cx = (WORD)(avail - r.left);
+    BarMsg(bar, TB_SETBUTTONINFO, (WPARAM)ADORNMENT_SEPARATOR_ID, (LPARAM)info);
+}
+
+// The bars across the top of a window after its width changed. A command
+// bar follows its parent only when its program tells it to, which programs
+// written for one screen shape do not do: it gets the client width and its
+// adornments (close, OK, help) go to the right end. Command bands (a rebar:
+// WordPad) only need the new width, the bands arrange themselves. Returns
+// the number of bars changed.
+static int RefitBars(HWND hwnd)
+{
+    RECT client, r; POINT origin = { 0, 0 }; TCHAR cls[32];
+    int changed = 0;
+    if (!GetClientRect(hwnd, &client) || client.right <= 0) return 0;
+    ClientToScreen(hwnd, &origin);
+    for (HWND c = GetWindow(hwnd, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) {
+        if (!IsWindowVisible(c) || !GetClassName(c, cls, 32) || !GetWindowRect(c, &r)) continue;
+        BOOL bar = IsToolbarClass(cls), bands = !wcscmp(cls, TEXT("ReBarWindow32"));
+        if (!bar && !bands) continue;
+        if (r.left - origin.x > 2 || r.top - origin.y > 2) continue;       // only a bar that starts at the top left corner
+        if (r.right - r.left == client.right && !bar) continue;
+        if (r.right - r.left != client.right) {
+            SetWindowPos(c, NULL, 0, 0, client.right, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            changed++;
+        }
+        if (bar) AlignAdornments(c);
+    }
+    return changed;
 }
 
 static BOOL Covers(const RECT *r, const RECT *area)
@@ -67,39 +174,29 @@ static BOOL CALLBACK RefitWindow(HWND hwnd, LPARAM lParam)
     if (GetClassName(hwnd, cls, 32) && (!wcscmp(cls, TEXT("HHTaskBar")) || !wcscmp(cls, TEXT("DesktopExplorerWindow"))
         || !wcscmp(cls, TEXT("SipWndClass")) || !wcscmp(cls, TEXT("SipBackDropWndClass"))))
         return TRUE;
-    if (r.left >= f->screen.left && r.top >= f->screen.top && r.right <= f->screen.right && r.bottom <= f->screen.bottom)
-        return TRUE;
-    int x = r.left, y = r.top, w = r.right - r.left, h = r.bottom - r.top;
-    if (Covers(&r, &f->oldWork)) {
-        const RECT *to = Covers(&r, &f->oldScreen) ? &f->screen : &f->work;
-        x = to->left; y = to->top; w = to->right - to->left; h = to->bottom - to->top;
-    } else {
-        if (x + w > f->work.right) x = f->work.right - w;
-        if (x < f->work.left && w <= f->work.right - f->work.left) x = f->work.left;
-        if (y + h > f->work.bottom) y = f->work.bottom - h;
-        if (y < f->work.top) y = f->work.top;
-    }
-    SetWindowPos(hwnd, NULL, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
-    // A command bar follows its parent only when told to, which such programs
-    // do not do: TB_AUTOSIZE gives it the parent's width, then
-    // CommandBar_AlignAdornments moves the close/OK/help buttons to its right
-    // end. That function is only toolbar messages to the bar (it widens the
-    // separator before the adornments with TB_SETBUTTONINFO; CE 5.0
-    // commctrl.lib, disassembled), so it works on another process's bar, and
-    // does nothing on a toolbar without adornments.
-    for (HWND c = GetWindow(hwnd, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT))
-        if (GetClassName(c, cls, 32) && IsToolbarClass(cls)) {
-            SendMessage(c, TB_AUTOSIZE, 0, 0);
-            CommandBar_AlignAdornments(c);
+    if (!(r.left >= f->screen.left && r.top >= f->screen.top && r.right <= f->screen.right && r.bottom <= f->screen.bottom)) {
+        int x = r.left, y = r.top, w = r.right - r.left, h = r.bottom - r.top;
+        if (Covers(&r, &f->oldWork)) {
+            const RECT *to = Covers(&r, &f->oldScreen) ? &f->screen : &f->work;
+            x = to->left; y = to->top; w = to->right - to->left; h = to->bottom - to->top;
+        } else {
+            if (x + w > f->work.right) x = f->work.right - w;
+            if (x < f->work.left && w <= f->work.right - f->work.left) x = f->work.left;
+            if (y + h > f->work.bottom) y = f->work.bottom - h;
+            if (y < f->work.top) y = f->work.top;
         }
-    f->count++;
+        SetWindowPos(hwnd, NULL, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+        f->count++;
+    }
+    // its bars, whether this moved the window or the program did itself
+    f->bars += RefitBars(hwnd);
     return TRUE;
 }
 
 static void RefitWindows(const RECT *oldScreen, const RECT *oldWork)
 {
     REFIT f; int i;
-    f.oldScreen = *oldScreen; f.oldWork = *oldWork; f.count = 0;
+    f.oldScreen = *oldScreen; f.oldWork = *oldWork; f.count = 0; f.bars = 0;
     SetRect(&f.screen, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
     // Let the programs that do follow the rotation move first, and wait for
     // the taskbar to set the new work area (the old one does not fit the
@@ -113,7 +210,7 @@ static void RefitWindows(const RECT *oldScreen, const RECT *oldWork)
     }
     if (i == 30) f.work = f.screen;
     EnumWindows(RefitWindow, (LPARAM)&f);
-    RETAILMSG(1, (TEXT("ROTATEKEY: %d windows put back on the screen\r\n"), f.count));
+    RETAILMSG(1, (TEXT("ROTATEKEY: %d windows put back on the screen, %d bars given the new width\r\n"), f.count, f.bars));
 }
 
 static void Rotate(void)
@@ -192,8 +289,8 @@ static void TaskManager(void)
 static BOOL TapFirstButton(HWND tb)
 {
     RECT r;
-    if (!tb || !IsWindowVisible(tb) || SendMessage(tb, TB_BUTTONCOUNT, 0, 0) <= 0) return FALSE;
-    if (!SendMessage(tb, TB_GETITEMRECT, 0, (LPARAM)&r)) return FALSE;
+    if (!tb || !IsWindowVisible(tb) || BarMsg(tb, TB_BUTTONCOUNT, 0, 0) <= 0) return FALSE;
+    if (!BarItemRect(tb, 0, &r)) return FALSE;                  // through the shared page: tb is another program's
     POINT p = { (r.left + r.right) / 2, (r.top + r.bottom) / 2 };
     ClientToScreen(tb, &p);
     int cx = GetSystemMetrics(SM_CXSCREEN), cy = GetSystemMetrics(SM_CYSCREEN);
@@ -211,7 +308,7 @@ static HWND FindToolbar(HWND w, int depth)
     TCHAR cls[32];
     for (HWND c = GetWindow(w, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) {
         if (GetClassName(c, cls, 32) && IsToolbarClass(cls)
-            && IsWindowVisible(c) && SendMessage(c, TB_BUTTONCOUNT, 0, 0) > 0)
+            && IsWindowVisible(c) && BarMsg(c, TB_BUTTONCOUNT, 0, 0) > 0)
             return c;
         if (depth > 0) {
             HWND t = FindToolbar(c, depth - 1);
