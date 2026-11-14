@@ -467,6 +467,38 @@ static int flash_failed(int action, int file, int phase)
     return error_screen("Flashing stopped", headline, detail, todo, 3);
 }
 
+/* The window is neither blank nor recognisably ours (nk_refused): what a
+ * flash of ours that was cut off leaves behind. EXE erases it and goes on;
+ * anything else leaves. 1 = go on. */
+static int confirm_erase(int file)
+{
+    static char headline[64], detail[200];
+    static const char *const todo[] = {
+        "Press EXE to erase this area and write the image.",
+        "Press Clear, or tap the button, to leave it as it is.",
+        "Only go on if Windows CE was flashed on this calculator before.",
+    };
+    hhk_format(headline, sizeof headline, "%s", reason());
+    if (headline[0] >= 'a' && headline[0] <= 'z') headline[0] -= 32;
+    hhk_format(detail, sizeof detail, "The flash area for %s is not empty and does not hold a complete Windows CE image. "
+               "An earlier flashing that was cut off (a reset, the batteries) leaves it like this.", file_name[file]);
+    E.title = "Flash area not empty"; E.headline = headline; E.detail = detail; E.todo = todo; E.n = 3;
+    ui_pressed = UI_HIT_NONE;
+    draw_error();
+    for (;;) {
+        int k = read_input(1), was = ui_pressed;
+        if (k == K_EXE) return 1;
+        if (k == K_CLEAR) { flash_button(UI_HIT_BACK, draw_error); return 0; }
+        if (k == K_PRESS || k == K_DRAG) ui_pressed = held_button(ui_error_hit);
+        if (k == K_TAP) {
+            int h = ui_error_hit(tap_x, tap_y);
+            ui_pressed = UI_HIT_NONE;
+            if (h != UI_HIT_NONE && h == ui_error_hit(down_x, down_y)) { draw_error(); return 0; }
+        }
+        if (ui_pressed != was) draw_error();
+    }
+}
+
 static int ram_mismatch(void)
 {
     static char detail[160];
@@ -530,6 +562,11 @@ static int loader(void)
         J.full = 1;
         for (i = 0; i < 2; i++) {
             r = write_file(i);
+            if (r && nk_refused && confirm_erase(i)) {
+                nk_force = 1;
+                r = write_file(i);
+                nk_force = 0;
+            }
             if (r) { nk_progress = 0; return flash_failed(sel, i, r); }
         }
         nk_progress = 0;

@@ -11,8 +11,20 @@
 //  Keep is pressed within ten seconds (a setting that breaks touch input or
 //  the tick must not need touch input to undo).
 //
-//  Everything is drawn with solid fills, lines and one small font, and only
-//  the bands that changed are repainted: GDI is slow under the translator.
+//  Everything is drawn with solid fills, lines and one small font. GDI is
+//  slow under the translator (every call is a trap into GWES and a blit in
+//  the display driver), so a change costs as few calls as it can:
+//    - Refresh compares what the screen shows (g_shown) with what it should
+//      show and invalidates only the cells that differ: a row's value, bar
+//      and MHz figure apart from its name and buttons, one preset button, one
+//      wait chip, the Apply button;
+//    - Paint draws exactly the cells in the update region, not everything
+//      inside its bounding box, which two far-apart cells would make the
+//      whole window; the region's rectangles are fetched once (GetUpdateRgn,
+//      GetRegionData) and tested here, not with a call per cell;
+//    - a box is two fills, an arc one polygon, and the DC's colours are only
+//      set when they change.
+//  Until 2026-11-14 every step repainted the whole window, about 700 calls.
 //  No floating point: the FPU is emulated.
 //
 //  Without the two IOCTLs (an older kernel) the window still opens, marked
@@ -24,6 +36,7 @@
 #define FILE_DEVICE_HAL 0x00000101
 #endif
 #include "classpad_clock.h"
+#include "classpad_bkl.h"             // DRVESC_CLASSPAD_PUSHFRAME
 
 BOOL KernelIoControl(DWORD code, LPVOID in, DWORD inSize, LPVOID out, DWORD outSize, LPDWORD returned);
 
@@ -80,8 +93,25 @@ static TCHAR  g_msg[40];                    // right of the CLOCK header
 static COLORREF g_msgColor;
 static int    g_keepLeft;                   // > 0: Apply waits for Keep
 static ClasspadClockRegs g_prev;            // what Revert restores
-static TCHAR  g_bench[48];
+static TCHAR  g_bench[80], g_bench2[80];     // the benchmark's two lines
 static int    g_downPreset = -1, g_downRow = -1, g_downDir, g_repeats;
+
+//  What the window shows, cell by cell (Refresh), and painting state
+typedef struct {
+    unsigned cpu, cpuApplied, cpuBoot; BOOL same;   // the dial
+    unsigned rowVal[6], rowHz[6]; int sel;          // the six rows
+    unsigned chip[4];                               // wait chips
+    unsigned presetMHz[5]; BOOL presetOn[5];
+    unsigned frqcr, fllfrq;
+    int keep; BOOL dirty;                           // action bar
+    unsigned pphi; BOOL limits, oal;                // title
+} Shown;
+static Shown    g_shown;
+static HRGN     g_update;                           // scratch region for GetUpdateRgn
+#define UPDATE_MAX 64
+static RECT     g_upd[UPDATE_MAX];                  // the update region of the WM_PAINT being served, as rectangles
+static int      g_nupd;
+static COLORREF g_dcBk, g_dcText;                   // colours the DC in use has now (CLR_INVALID: unknown)
 
 //------------------------------------------------------------------------------
 //  Clock state
@@ -248,15 +278,21 @@ static void InvalidateBand(int top, int bottom)
     SetR(&r, 0, top, g_cx, bottom);
     InvalidateRect(g_hWnd, &r, FALSE);
 }
-static void InvalidateState(void)           // everything a target or applied change shows in
-{
-    InvalidateBand(0, Y_BENCH);
-    InvalidateBand(g_cy - H_ACTION, g_cy);
-}
 static void SetMsg(const TCHAR *text, COLORREF color)
 {
+    if (!wcsncmp(g_msg, text, 39) && (g_msgColor == color || !text[0])) return;   // shown already
     wcsncpy(g_msg, text, 39); g_msg[39] = 0; g_msgColor = color;
     InvalidateBand(Y_CLOCK, Y_ROWS);
+}
+
+//  A row's cells, left to right: name and - button, value, + button, bar, MHz
+#define ROW_CELLS 5
+static void RowCell(int i, int cell, RECT *r)
+{
+    static const short left[ROW_CELLS] = { 0, 60, 109, 132, -75 };      // negative: from the right edge
+    int l = left[cell] < 0 ? g_cx + left[cell] : left[cell];
+    int e = cell == ROW_CELLS - 1 ? g_cx : (left[cell + 1] < 0 ? g_cx + left[cell + 1] : left[cell + 1]);
+    SetR(r, l, Y_ROWS + i * H_ROW, e, Y_ROWS + (i + 1) * H_ROW);
 }
 
 //------------------------------------------------------------------------------
@@ -266,32 +302,45 @@ static void Fill(HDC hdc, int l, int t, int r, int b, COLORREF c)
 {
     RECT rc;
     SetR(&rc, l, t, r, b);
-    SetBkColor(hdc, c);
+    if (c != g_dcBk) { SetBkColor(hdc, c); g_dcBk = c; }
     ExtTextOut(hdc, 0, 0, ETO_OPAQUE, &rc, NULL, 0, NULL);
 }
-static void Frame(HDC hdc, const RECT *r, COLORREF c)
+//  a one-pixel edge around a filled inside: two fills
+static void Box(HDC hdc, const RECT *r, COLORREF edge, COLORREF inside)
 {
-    Fill(hdc, r->left, r->top, r->right, r->top + 1, c);
-    Fill(hdc, r->left, r->bottom - 1, r->right, r->bottom, c);
-    Fill(hdc, r->left, r->top, r->left + 1, r->bottom, c);
-    Fill(hdc, r->right - 1, r->top, r->right, r->bottom, c);
+    Fill(hdc, r->left, r->top, r->right, r->bottom, edge);
+    if (inside != edge) Fill(hdc, r->left + 1, r->top + 1, r->right - 1, r->bottom - 1, inside);
 }
 static void Text(HDC hdc, int l, int t, int r, int b, const TCHAR *s, COLORREF c, UINT align)
 {
     RECT rc;
     SetR(&rc, l, t, r, b);
-    SetTextColor(hdc, c);
+    if (c != g_dcText) { SetTextColor(hdc, c); g_dcText = c; }
     DrawText(hdc, s, -1, &rc, align | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+}
+static void Line(HDC hdc, int x0, int y0, int x1, int y1)
+{
+    POINT p[2];
+    p[0].x = x0; p[0].y = y0; p[1].x = x1; p[1].y = y1;
+    Polyline(hdc, p, 2);
 }
 //  style: 0 plain, 1 lit (amber outline), 2 primary (amber fill), 3 warning (red outline)
 static void Button(HDC hdc, const RECT *r, const TCHAR *label, int style)
 {
     COLORREF edge = style == 1 ? C_AMBER : style == 3 ? C_RED : style == 2 ? C_AMBER : C_LINE;
     COLORREF text = style == 1 ? C_AMBER : style == 3 ? C_RED : style == 2 ? C_BG : C_TEXT;
-    Fill(hdc, r->left, r->top, r->right, r->bottom, style == 2 ? C_AMBER : C_PANEL);
-    Frame(hdc, r, edge);
+    Box(hdc, r, edge, style == 2 ? C_AMBER : C_PANEL);
     if (label) Text(hdc, r->left, r->top, r->right, r->bottom, label, text, DT_CENTER);
 }
+//  Is any of this rectangle in the update region being painted?
+static BOOL In(const RECT *r)
+{
+    int i;
+    for (i = 0; i < g_nupd; i++)
+        if (r->left < g_upd[i].right && r->right > g_upd[i].left && r->top < g_upd[i].bottom && r->bottom > g_upd[i].top) return TRUE;
+    return FALSE;
+}
+static BOOL InBand(int top, int bottom) { RECT r; SetR(&r, 0, top, g_cx, bottom); return In(&r); }
 static void Section(HDC hdc, int y, const TCHAR *name, const TCHAR *right, COLORREF rightColor)
 {
     Fill(hdc, 0, y, g_cx, y + 1, C_LINE);
@@ -347,17 +396,19 @@ static int DialDeg(unsigned hz)
     if (khz > GAUGE_MAX_KHZ) khz = GAUGE_MAX_KHZ;
     return (int)(khz * 180u / GAUGE_MAX_KHZ);
 }
+//  A piece of the ring as one polygon: along the outer edge in 6 degree
+//  steps, back along the inner edge through the same angles
 static void DialArc(HDC hdc, int ox, int oy, int from, int to, HBRUSH brush)
 {
-    POINT q[4];
-    int a, e;
+    POINT q[2 * (180 / 6 + 2)];
+    int deg[180 / 6 + 2], n = 0, i, a;
+    if (to <= from) return;
+    for (a = from; a < to; a += 6) deg[n++] = a;
+    deg[n++] = to;
+    for (i = 0; i < n; i++) DialPoint(ox, oy, 95, deg[i], &q[i]);
+    for (i = 0; i < n; i++) DialPoint(ox, oy, 89, deg[n - 1 - i], &q[n + i]);
     SelectObject(hdc, brush);
-    for (a = from; a < to; a = e) {
-        e = a + 6 > to ? to : a + 6;
-        DialPoint(ox, oy, 89, a, &q[0]); DialPoint(ox, oy, 95, a, &q[1]);
-        DialPoint(ox, oy, 95, e, &q[2]); DialPoint(ox, oy, 89, e, &q[3]);
-        Polygon(hdc, q, 4);
-    }
+    Polygon(hdc, q, 2 * n);
 }
 
 static void PaintGauge(HDC hdc)
@@ -390,7 +441,7 @@ static void PaintGauge(HDC hdc)
     for (v = 0; v <= GAUGE_MAX_KHZ / 1000u; v += 50) {
         int d = DialDeg(v * 1000000u);
         DialPoint(ox, oy, 98, d, &p); DialPoint(ox, oy, 104, d, &q);
-        MoveToEx(hdc, p.x, p.y, NULL); LineTo(hdc, q.x, q.y);
+        Line(hdc, p.x, p.y, q.x, q.y);
         DialPoint(ox, oy, 114, d, &p);
         wsprintf(text, TEXT("%u"), v);
         Text(hdc, p.x - 14, p.y - 7, p.x + 14, p.y + 7, text, C_DIM, DT_CENTER);
@@ -400,18 +451,17 @@ static void PaintGauge(HDC hdc)
     if (!SameChain(&cur, &g_tg)) {
         DialPoint(ox, oy, 80, DialDeg(curHz[2]), &p);
         SelectObject(hdc, g_penGhost);
-        MoveToEx(hdc, ox, oy, NULL); LineTo(hdc, p.x, p.y);
+        Line(hdc, ox, oy, p.x, p.y);
     }
     DialPoint(ox, oy, 82, deg, &p);
     SelectObject(hdc, g_penNeedle);
-    MoveToEx(hdc, ox, oy, NULL); LineTo(hdc, p.x, p.y);
+    Line(hdc, ox, oy, p.x, p.y);
     SelectObject(hdc, oldPen); SelectObject(hdc, oldBrush);
     Fill(hdc, ox - 4, oy - 4, ox + 4, oy + 4, C_TEXT);
 
     // readout: up to three digits, a point, two digits
     SetR(&box, ox - 56, Y_GAUGE + 62, ox + 56, Y_GAUGE + 102);
-    Fill(hdc, box.left, box.top, box.right, box.bottom, C_BLACK);
-    Frame(hdc, &box, C_LINE);
+    Box(hdc, &box, C_LINE, C_BLACK);
     v = (hz[2] + 5000u) / 10000u;
     if (v > 99999u) v = 99999u;
     x = box.right - 10 - 14;
@@ -454,37 +504,65 @@ static void PaintTitle(HDC hdc)
 static void PaintRow(HDC hdc, int i)
 {
     unsigned hz[6], w;
-    RECT row, r;
+    RECT row, r, cell;
     TCHAR text[24];
     BOOL sel = i == g_sel, hot;
+    COLORREF bg = sel ? C_PANEL : C_BG;
     int barL = 132, barR = g_cx - 75, mid;
 
     ClockHz(&g_tg, g_pllOn, hz);
     hot = hz[i] > g_cpclkRed[i];
     RowRect(i, &row);
     mid = (row.top + row.bottom) / 2;
-    Fill(hdc, 0, row.top, g_cx, row.bottom, sel ? C_PANEL : C_BG);
-    if (sel) Fill(hdc, 0, row.top, 2, row.bottom, C_AMBER);
-    Text(hdc, 6, row.top, 38, row.bottom, g_rowName[i], sel ? C_AMBER : C_DIM, DT_LEFT);
-    MinusRect(i, &r); Button(hdc, &r, TEXT("-"), 0);
-    PlusRect(i, &r);  Button(hdc, &r, TEXT("+"), 0);
-    if (i == 0)      wsprintf(text, TEXT("x%u"), g_tg.fll);
-    else if (i == 1) wsprintf(text, TEXT("x%u"), g_tg.pll);
-    else             wsprintf(text, TEXT("1/%u"), g_tg.div[i - 2]);
-    Text(hdc, 60, row.top, 108, row.bottom, text, C_TEXT, DT_CENTER);
 
-    // bar against the scale of this clock, red-zone mark on top
-    SetR(&r, barL, mid - 4, barR, mid + 4);
-    Fill(hdc, r.left, r.top, r.right, r.bottom, C_BLACK);
-    Frame(hdc, &r, C_LINE);
-    w = (unsigned)(barR - barL - 2) * (hz[i] / 1000u) / (g_cpclkScale[i] / 1000u);
-    if (w > (unsigned)(barR - barL - 2)) w = (unsigned)(barR - barL - 2);
-    if (w) Fill(hdc, barL + 1, mid - 3, barL + 1 + (int)w, mid + 3, hot ? C_RED : C_AMBER);
-    w = (unsigned)(barR - barL - 2) * (g_cpclkRed[i] / 1000u) / (g_cpclkScale[i] / 1000u);
-    Fill(hdc, barL + 1 + (int)w, mid - 6, barL + 2 + (int)w, mid + 6, C_RED);
+    RowCell(i, 0, &cell);                           // name and -
+    if (In(&cell)) {
+        Fill(hdc, cell.left, cell.top, cell.right, cell.bottom, bg);
+        if (sel) Fill(hdc, 0, row.top, 2, row.bottom, C_AMBER);
+        Text(hdc, 6, row.top, 38, row.bottom, g_rowName[i], sel ? C_AMBER : C_DIM, DT_LEFT);
+        MinusRect(i, &r); Button(hdc, &r, TEXT("-"), 0);
+    }
+    RowCell(i, 1, &cell);                           // value
+    if (In(&cell)) {
+        if (i == 0)      wsprintf(text, TEXT("x%u"), g_tg.fll);
+        else if (i == 1) wsprintf(text, TEXT("x%u"), g_tg.pll);
+        else             wsprintf(text, TEXT("1/%u"), g_tg.div[i - 2]);
+        Fill(hdc, cell.left, cell.top, cell.right, cell.bottom, bg);
+        Text(hdc, 60, row.top, 108, row.bottom, text, C_TEXT, DT_CENTER);
+    }
+    RowCell(i, 2, &cell);                           // +
+    if (In(&cell)) {
+        Fill(hdc, cell.left, cell.top, cell.right, cell.bottom, bg);
+        PlusRect(i, &r); Button(hdc, &r, TEXT("+"), 0);
+    }
+    RowCell(i, 3, &cell);                           // bar against the scale of this clock, red-zone mark on top
+    if (In(&cell)) {
+        Fill(hdc, cell.left, cell.top, cell.right, cell.bottom, bg);
+        SetR(&r, barL, mid - 4, barR, mid + 4);
+        Box(hdc, &r, C_LINE, C_BLACK);
+        w = (unsigned)(barR - barL - 2) * (hz[i] / 1000u) / (g_cpclkScale[i] / 1000u);
+        if (w > (unsigned)(barR - barL - 2)) w = (unsigned)(barR - barL - 2);
+        if (w) Fill(hdc, barL + 1, mid - 3, barL + 1 + (int)w, mid + 3, hot ? C_RED : C_AMBER);
+        w = (unsigned)(barR - barL - 2) * (g_cpclkRed[i] / 1000u) / (g_cpclkScale[i] / 1000u);
+        Fill(hdc, barL + 1 + (int)w, mid - 6, barL + 2 + (int)w, mid + 6, C_RED);
+    }
+    RowCell(i, 4, &cell);                           // MHz
+    if (In(&cell)) {
+        FormatMHz(text, hz[i]);
+        Fill(hdc, cell.left, cell.top, cell.right, cell.bottom, bg);
+        Text(hdc, g_cx - 72, row.top, g_cx - 6, row.bottom, text, hot ? C_RED : C_TEXT, DT_RIGHT);
+    }
+}
 
-    FormatMHz(text, hz[i]);
-    Text(hdc, g_cx - 72, row.top, g_cx - 6, row.bottom, text, hot ? C_RED : C_TEXT, DT_RIGHT);
+//  A strip of buttons: its background only when the left margin, which no
+//  button covers, is to be painted (the whole strip is), each button when it is
+static BOOL StripBackground(HDC hdc, int top, int bottom)
+{
+    RECT margin;
+    SetR(&margin, 0, top, 6, bottom);
+    if (!In(&margin)) return FALSE;
+    Fill(hdc, 0, top, g_cx, bottom, C_BG);
+    return TRUE;
 }
 
 static void PaintWait(HDC hdc)
@@ -492,17 +570,20 @@ static void PaintWait(HDC hdc)
     ClasspadClockRegs t;
     TCHAR text[16];
     RECT r;
+    int i;
 
     TargetRegs(&t);
-    Section(hdc, Y_WAIT, TEXT("WAIT STATES"), TEXT("AUTO"), C_GREEN);
-    Fill(hdc, 0, Y_CHIPS, g_cx, Y_PRESET, C_BG);
-    wsprintf(text, TEXT("roR %u"), ClockWRCycles((t.cs0wcr & CPCLK_WR_MASK) >> CPCLK_WR_SHIFT));
-    ChipRect(0, &r); Button(hdc, &r, text, 0);
-    wsprintf(text, TEXT("TRC %u"), ClockTRCCycles(t.cs3wcr & CPCLK_TRC_MASK));
-    ChipRect(1, &r); Button(hdc, &r, text, 0);
-    wsprintf(text, TEXT("CL %u"), ((t.cs3wcr >> 7) & 3u) + 1u);
-    ChipRect(2, &r); Button(hdc, &r, text, 0);
-    ChipRect(3, &r); Button(hdc, &r, g_tg.selxm ? TEXT("XM 1/2") : TEXT("XM 1"), 0);
+    if (InBand(Y_WAIT, Y_CHIPS)) Section(hdc, Y_WAIT, TEXT("WAIT STATES"), TEXT("AUTO"), C_GREEN);
+    StripBackground(hdc, Y_CHIPS, Y_PRESET);
+    for (i = 0; i < 4; i++) {
+        ChipRect(i, &r);
+        if (!In(&r)) continue;
+        if (i == 0)      wsprintf(text, TEXT("roR %u"), ClockWRCycles((t.cs0wcr & CPCLK_WR_MASK) >> CPCLK_WR_SHIFT));
+        else if (i == 1) wsprintf(text, TEXT("TRC %u"), ClockTRCCycles(t.cs3wcr & CPCLK_TRC_MASK));
+        else if (i == 2) wsprintf(text, TEXT("CL %u"), ((t.cs3wcr >> 7) & 3u) + 1u);
+        else             wcscpy(text, g_tg.selxm ? TEXT("XM 1/2") : TEXT("XM 1"));
+        Button(hdc, &r, text, 0);
+    }
 }
 
 static void PaintPresets(HDC hdc)
@@ -512,11 +593,12 @@ static void PaintPresets(HDC hdc)
     RECT r;
     int i;
 
-    Section(hdc, Y_PRESET, TEXT("PRESETS"), TEXT("hold F2-F5 to store"), C_DIM);
-    Fill(hdc, 0, Y_PBTNS, g_cx, Y_REGS, C_BG);
+    if (InBand(Y_PRESET, Y_PBTNS)) Section(hdc, Y_PRESET, TEXT("PRESETS"), TEXT("hold F2-F5 to store"), C_DIM);
+    StripBackground(hdc, Y_PBTNS, Y_REGS);
     for (i = 0; i < 5; i++) {
         BOOL on = SameChain(&g_preset[i], &g_tg);
         PresetRect(i, &r);
+        if (!In(&r)) continue;
         Button(hdc, &r, NULL, on ? 1 : 0);
         wsprintf(text, TEXT("F%d"), i + 1);
         Text(hdc, r.left, r.top + 2, r.right, r.top + 15, text, on ? C_AMBER : C_TEXT, DT_CENTER);
@@ -545,87 +627,239 @@ static void PaintActions(HDC hdc)
     RECT r, last;
     TCHAR text[16];
     BOOL dirty = Dirty();
+    int i;
 
-    Fill(hdc, 0, g_cy - H_ACTION, g_cx, g_cy - H_ACTION + 1, C_LINE);
-    Fill(hdc, 0, g_cy - H_ACTION + 1, g_cx, g_cy, C_BLACK);
+    if (InBand(g_cy - H_ACTION, g_cy - H_ACTION + 1)) {     // the line on top: the whole bar is to be painted
+        Fill(hdc, 0, g_cy - H_ACTION, g_cx, g_cy - H_ACTION + 1, C_LINE);
+        Fill(hdc, 0, g_cy - H_ACTION + 1, g_cx, g_cy, C_BLACK);
+    }
     if (g_keepLeft > 0) {
-        wsprintf(text, TEXT("Keep (%d)"), g_keepLeft);
-        ActionRect(0, &r); Button(hdc, &r, text, 2);
+        ActionRect(0, &r);
+        if (In(&r)) { wsprintf(text, TEXT("Keep (%d)"), g_keepLeft); Button(hdc, &r, text, 2); }
         ActionRect(1, &r); ActionRect(3, &last); r.right = last.right;
-        Button(hdc, &r, TEXT("Revert now"), 0);
+        if (In(&r)) Button(hdc, &r, TEXT("Revert now"), 0);
         return;
     }
-    ActionRect(0, &r); Button(hdc, &r, dirty ? TEXT("Apply") : TEXT("Applied"), dirty ? 2 : 0);
-    ActionRect(1, &r); Button(hdc, &r, TEXT("Bench"), 0);
-    ActionRect(2, &r); Button(hdc, &r, TEXT("MemTest"), 0);
-    ActionRect(3, &r); Button(hdc, &r, TEXT("Save"), 0);
+    for (i = 0; i < 4; i++) {
+        ActionRect(i, &r);
+        if (!In(&r)) continue;
+        if (i == 0) Button(hdc, &r, dirty ? TEXT("Apply") : TEXT("Applied"), dirty ? 2 : 0);
+        else        Button(hdc, &r, i == 1 ? TEXT("Bench") : i == 2 ? TEXT("MemTest") : TEXT("Save"), 0);
+    }
 }
 
-static BOOL Touches(const RECT *paint, int top, int bottom) { return paint->top < bottom && paint->bottom > top; }
+//------------------------------------------------------------------------------
+//  What the window shows, and what has to be painted again after a change
+//
+static void Snapshot(Shown *s)
+{
+    ClasspadClockChain c;
+    ClasspadClockRegs t;
+    unsigned hz[6];
+    int i;
+
+    memset(s, 0, sizeof *s);
+    ClockHz(&g_tg, g_pllOn, hz);
+    s->cpu = hz[2];
+    for (i = 0; i < 6; i++) s->rowHz[i] = hz[i];
+    s->rowVal[0] = g_tg.fll; s->rowVal[1] = g_tg.pll;
+    for (i = 0; i < 4; i++) s->rowVal[2 + i] = g_tg.div[i];
+    s->sel = g_sel;
+    ClockDecode(&g_cur, &c);  s->same = SameChain(&c, &g_tg); ClockHz(&c, g_pllOn, hz); s->cpuApplied = hz[2];
+    ClockDecode(&g_boot, &c); ClockHz(&c, g_pllOn, hz); s->cpuBoot = hz[2];
+    TargetRegs(&t);
+    s->chip[0] = t.cs0wcr & CPCLK_WR_MASK; s->chip[1] = t.cs3wcr & CPCLK_TRC_MASK;
+    s->chip[2] = (t.cs3wcr >> 7) & 3u;     s->chip[3] = g_tg.selxm;
+    s->frqcr = t.frqcr; s->fllfrq = t.fllfrq;
+    for (i = 0; i < 5; i++) {
+        s->presetOn[i] = SameChain(&g_preset[i], &g_tg);
+        ClockHz(&g_preset[i], g_pllOn, hz);
+        s->presetMHz[i] = (hz[2] + 500000u) / 1000000u;
+    }
+    s->keep = g_keepLeft; s->dirty = memcmp(&t, &g_cur, sizeof t) != 0;
+    s->pphi = g_pphi; s->limits = g_limits; s->oal = g_haveOal;
+}
+
+//  After any change of state: invalidate the cells that no longer show it
+static void Refresh(void)
+{
+    Shown n;
+    const Shown *o = &g_shown;
+    RECT r;
+    int i, c;
+
+    Snapshot(&n);
+    if (n.pphi != o->pphi || n.limits != o->limits || n.oal != o->oal) InvalidateBand(0, Y_GAUGE);
+    if (n.cpu != o->cpu || n.cpuApplied != o->cpuApplied || n.cpuBoot != o->cpuBoot || n.same != o->same) InvalidateBand(Y_GAUGE, Y_CLOCK);
+    for (i = 0; i < 6; i++) {
+        if (n.sel != o->sel && (i == n.sel || i == o->sel)) { RowRect(i, &r); InvalidateRect(g_hWnd, &r, FALSE); continue; }
+        if (n.rowVal[i] != o->rowVal[i]) { RowCell(i, 1, &r); InvalidateRect(g_hWnd, &r, FALSE); }
+        if (n.rowHz[i] != o->rowHz[i]) for (c = 3; c < ROW_CELLS; c++) { RowCell(i, c, &r); InvalidateRect(g_hWnd, &r, FALSE); }
+    }
+    for (i = 0; i < 4; i++) if (n.chip[i] != o->chip[i]) { ChipRect(i, &r); InvalidateRect(g_hWnd, &r, FALSE); }
+    for (i = 0; i < 5; i++)
+        if (n.presetOn[i] != o->presetOn[i] || n.presetMHz[i] != o->presetMHz[i]) { PresetRect(i, &r); InvalidateRect(g_hWnd, &r, FALSE); }
+    if (n.frqcr != o->frqcr || n.fllfrq != o->fllfrq) InvalidateBand(Y_REGS, Y_BENCH);
+    if ((n.keep > 0) != (o->keep > 0)) InvalidateBand(g_cy - H_ACTION, g_cy);      // the bar changes its buttons
+    else if (n.keep != o->keep || n.dirty != o->dirty) { ActionRect(0, &r); InvalidateRect(g_hWnd, &r, FALSE); }
+    g_shown = n;
+}
 
 static void Paint(HWND hWnd)
 {
+    struct { RGNDATAHEADER h; RECT r[UPDATE_MAX]; } data;
     PAINTSTRUCT ps;
-    HDC hdc = BeginPaint(hWnd, &ps);
-    HGDIOBJ oldFont = SelectObject(hdc, g_font);
-    const RECT *p = &ps.rcPaint;
-    int i;
+    HDC hdc;
+    HGDIOBJ oldFont;
+    int i, kind;
+
+    // the region's rectangles, before BeginPaint validates it; the bounding
+    // box when there is no region to be had or it has too many pieces
+    if (!g_update) g_update = CreateRectRgn(0, 0, 0, 0);
+    kind = GetUpdateRgn(hWnd, g_update, FALSE);
+    g_nupd = 0;
+    if (kind != ERROR && kind != NULLREGION && GetRegionData(g_update, sizeof data, (RGNDATA *)&data) && data.h.nCount <= UPDATE_MAX)
+        for (i = 0; i < (int)data.h.nCount; i++) g_upd[g_nupd++] = data.r[i];
+    hdc = BeginPaint(hWnd, &ps);
+    if (!g_nupd) { g_upd[0] = ps.rcPaint; g_nupd = 1; }
+    oldFont = SelectObject(hdc, g_font);
+    g_dcBk = g_dcText = CLR_INVALID;
 
     SetBkMode(hdc, TRANSPARENT);
-    if (Touches(p, 0, Y_GAUGE)) PaintTitle(hdc);
-    if (Touches(p, Y_GAUGE, Y_CLOCK)) PaintGauge(hdc);
-    if (Touches(p, Y_CLOCK, Y_ROWS)) Section(hdc, Y_CLOCK, TEXT("CLOCK"), g_msg[0] ? g_msg : TEXT("MHz"), g_msg[0] ? g_msgColor : C_DIM);
-    for (i = 0; i < 6; i++) if (Touches(p, Y_ROWS + i * H_ROW, Y_ROWS + (i + 1) * H_ROW)) PaintRow(hdc, i);
-    if (Touches(p, Y_ROWS + 6 * H_ROW, Y_WAIT)) Fill(hdc, 0, Y_ROWS + 6 * H_ROW, g_cx, Y_WAIT, C_BG);
-    if (Touches(p, Y_WAIT, Y_PRESET)) PaintWait(hdc);
-    if (Touches(p, Y_PRESET, Y_REGS)) PaintPresets(hdc);
-    if (Touches(p, Y_REGS, Y_BENCH)) PaintRegs(hdc);
-    if (Touches(p, Y_BENCH, Y_END)) Section(hdc, Y_BENCH, TEXT("BENCH"), g_bench, C_TEXT);
-    if (Touches(p, Y_END, g_cy - H_ACTION) && g_cy - H_ACTION > Y_END) Fill(hdc, 0, Y_END, g_cx, g_cy - H_ACTION, C_BG);
-    if (Touches(p, g_cy - H_ACTION, g_cy)) PaintActions(hdc);
+    if (InBand(0, Y_GAUGE)) PaintTitle(hdc);
+    if (InBand(Y_GAUGE, Y_CLOCK)) PaintGauge(hdc);
+    if (InBand(Y_CLOCK, Y_ROWS)) Section(hdc, Y_CLOCK, TEXT("CLOCK"), g_msg[0] ? g_msg : TEXT("MHz"), g_msg[0] ? g_msgColor : C_DIM);
+    for (i = 0; i < 6; i++) if (InBand(Y_ROWS + i * H_ROW, Y_ROWS + (i + 1) * H_ROW)) PaintRow(hdc, i);
+    if (InBand(Y_ROWS + 6 * H_ROW, Y_WAIT)) Fill(hdc, 0, Y_ROWS + 6 * H_ROW, g_cx, Y_WAIT, C_BG);
+    if (InBand(Y_WAIT, Y_PRESET)) PaintWait(hdc);
+    if (InBand(Y_PRESET, Y_REGS)) PaintPresets(hdc);
+    if (InBand(Y_REGS, Y_BENCH)) PaintRegs(hdc);
+    if (InBand(Y_BENCH, Y_END)) Section(hdc, Y_BENCH, TEXT("BENCH"), g_bench, C_TEXT);
+    if (g_cy - H_ACTION > Y_END && InBand(Y_END, g_cy - H_ACTION)) {
+        Fill(hdc, 0, Y_END, g_cx, g_cy - H_ACTION, C_BG);
+        if (g_bench2[0]) Text(hdc, 6, Y_END, g_cx - 6, Y_END + 16, g_bench2, C_TEXT, DT_RIGHT);
+    }
+    if (InBand(g_cy - H_ACTION, g_cy)) PaintActions(hdc);
     SelectObject(hdc, oldFont);
     EndPaint(hWnd, &ps);
 }
 
 //------------------------------------------------------------------------------
-//  Bench and memory test. Times come from GetTickCount, so a tick that the
-//  OAL failed to retune shows here as scores that do not follow the clock.
+//  Benchmark: Xtune's (src/benchmark/benchmark.c), score for score.
+//    CPU       passes of an empty counting loop in 100 ms, / 100
+//    ROM, RAM, I/O   passes of 179 uncached long reads in 50 ms, of the flash
+//              (0xA0150000), the SDRAM (0xAC150000) and a peripheral register
+//              (0xA4150000); the loops are Xtune's own (bench.src)
+//    dupdate   the whole frame to the panel, as frames per second: Xtune
+//              times gint's dupdate(), here the display driver pushes its
+//              frame (DRVESC_CLASSPAD_PUSHFRAME)
+//    INT       10000 runs of Dhrystone 2.1, as Dhrystones per second
+//  and Xtune's correction for the spread-spectrum clock generator.
+//  Xtune stops a loop from a timer interrupt; here a thread of higher
+//  priority clears the flag after a Sleep, and the count is scaled by the
+//  time the loop really ran (the performance counter), a Sleep being only
+//  good to a millisecond or two. Everything runs under the translator and
+//  beside Windows CE's threads, so the scores are lower than Ptune4's on the
+//  same clock; they compare one clock setting with another.
 //
-#define BENCH_MS 300
+DWORD tick_count(volatile DWORD *flag);                     // bench.src
+DWORD mem_bench(DWORD *area, volatile DWORD *flag);
+int   dhrystone(int runs);                                  // dhry.c: 1 = it ended with the right values
+BOOL  SetKMode(BOOL on);                                    // coredll: the uncached addresses below
+BOOL  CeSetThreadPriority(HANDLE thread, int priority);
+int   CeGetThreadPriority(HANDLE thread);
+
+#define BENCH_DHRYSTONE 10000
+#define BENCH_ROM   0xA0150000u
+#define BENCH_RAM   0xAC150000u
+#define BENCH_IO    0xA4150000u
+#define BENCH_SSCGCR_SSEN ((const volatile BYTE *)0xA4150044u)     // bit 7 of the register's first byte: spread spectrum on
+
+static volatile DWORD g_benchFlag;
+
+static DWORD WINAPI BenchStop(LPVOID ms)
+{
+    Sleep((DWORD)ms);
+    g_benchFlag = 0;
+    return 0;
+}
+
+static DWORD MicroSeconds(const LARGE_INTEGER *from, const LARGE_INTEGER *to)
+{
+    LARGE_INTEGER f;
+    if (!QueryPerformanceFrequency(&f) || f.QuadPart == 0) return 0;
+    return (DWORD)((to->QuadPart - from->QuadPart) * 1000000 / f.QuadPart);
+}
+
+//  One timed loop: area = NULL for the counting loop. Passes in `ms`.
+static DWORD BenchLoop(DWORD *area, DWORD ms)
+{
+    LARGE_INTEGER t0, t1;
+    HANDLE stop;
+    DWORD n, us;
+
+    g_benchFlag = 1;
+    stop = CreateThread(NULL, 0, BenchStop, (LPVOID)ms, CREATE_SUSPENDED, NULL);
+    if (!stop) return 0;
+    CeSetThreadPriority(stop, CeGetThreadPriority(GetCurrentThread()) - 1);
+    ResumeThread(stop);                                     // it runs at once, as far as its Sleep
+    QueryPerformanceCounter(&t0);
+    n = area ? mem_bench(area, &g_benchFlag) : tick_count(&g_benchFlag);
+    QueryPerformanceCounter(&t1);
+    CloseHandle(stop);
+    us = MicroSeconds(&t0, &t1);
+    if (us) n = (DWORD)((unsigned __int64)n * (ms * 1000) / us);
+    return n;
+}
 
 static void RunBench(void)
 {
-    static DWORD bufA[4096], bufB[4096];
-    volatile DWORD sink = 0;
-    DWORD start, x = 0x12345678, cpu = 0, ram = 0, gdi = 0;
+    static const DWORD area[3] = { BENCH_ROM, BENCH_RAM, BENCH_IO };
+    DWORD data[8];
+    LARGE_INTEGER t0, t1;
+    ClasspadClockChain cur;
+    BOOL kmode, pushed, right;
     HDC hdc;
     int i;
 
     wcscpy(g_bench, TEXT("running..."));
-    InvalidateBand(Y_BENCH, Y_END); UpdateWindow(g_hWnd);
+    g_bench2[0] = 0;
+    InvalidateBand(Y_BENCH, g_cy - H_ACTION); UpdateWindow(g_hWnd);
 
-    start = GetTickCount();
-    while (GetTickCount() - start < BENCH_MS) {         // integer: xorshift and a multiply
-        for (i = 0; i < 2000; i++) { x ^= x << 13; x ^= x >> 17; x ^= x << 5; x += x * 2654435761u; }
-        sink += x; cpu++;
-    }
-    start = GetTickCount();
-    while (GetTickCount() - start < BENCH_MS) {         // memory: 16 KB copies
-        memcpy(bufB, bufA, sizeof bufA); bufA[ram & 4095] = bufB[(ram + 7) & 4095] + 1;
-        ram++;
-    }
+    memset(data, 0, sizeof data);
+    kmode = SetKMode(TRUE);
+    data[0] = BenchLoop(NULL, 100) / 100;
+    for (i = 0; i < 3; i++) data[1 + i] = BenchLoop((DWORD *)area[i], 50);
+
     hdc = GetDC(g_hWnd);
-    start = GetTickCount();
-    while (GetTickCount() - start < BENCH_MS) {         // GDI: fills of the dial area
-        Fill(hdc, 0, Y_GAUGE, g_cx, Y_GAUGE + H_GAUGE, (gdi & 1) ? C_PANEL : C_BG);
-        gdi++;
-    }
+    QueryPerformanceCounter(&t0);
+    pushed = ExtEscape(hdc, DRVESC_CLASSPAD_PUSHFRAME, 0, NULL, 0, NULL) > 0;
+    QueryPerformanceCounter(&t1);
     ReleaseDC(g_hWnd, hdc);
+    data[4] = pushed ? MicroSeconds(&t0, &t1) : 0;
 
-    // CPU in thousands of rounds per second, RAM in KB/s, GDI in fills per second
-    wsprintf(g_bench, TEXT("CPU %u  RAM %u  GDI %u"), cpu * 2u * 1000u / BENCH_MS, ram * 16u * 1000u / BENCH_MS, gdi * 1000u / BENCH_MS);
-    InvalidateBand(Y_GAUGE, Y_CLOCK);
-    InvalidateBand(Y_BENCH, Y_END);
+    QueryPerformanceCounter(&t0);
+    right = dhrystone(BENCH_DHRYSTONE);
+    QueryPerformanceCounter(&t1);
+    data[6] = MicroSeconds(&t0, &t1);
+
+    // Xtune: with the spread spectrum on and PLL x3 or more, scores down and times up by 256 / PLL / 1000
+    ClockDecode(&g_cur, &cur);
+    if (g_haveOal && (*BENCH_SSCGCR_SSEN & 0x80) && cur.pll >= 3) {
+        for (i = 0; i < 8; i++) {
+            DWORD correction = data[i] * 256 / cur.pll / 1000;
+            if (i <= 3) data[i] -= correction; else data[i] += correction;
+        }
+    }
+    SetKMode(kmode);
+
+    wsprintf(g_bench, TEXT("CPU %u  ROM %u  RAM %u  I/O %u"), data[0], data[1], data[2], data[3]);
+    if (data[4]) { DWORD fps = 100000000u / data[4]; wsprintf(g_bench2, TEXT("dupdate: %u.%02u FPS   "), fps / 100, fps % 100); }
+    else         wcscpy(g_bench2, TEXT("dupdate: n/a   "));
+    if (!right)        wcscat(g_bench2, TEXT("INT: Dhrystone result WRONG"));
+    else if (data[6])  wsprintf(g_bench2 + wcslen(g_bench2), TEXT("INT: %u Dhrystone/s"), (DWORD)((unsigned __int64)BENCH_DHRYSTONE * 1000000 / data[6]));
+    else               wcscat(g_bench2, TEXT("INT: n/a"));
+    InvalidateBand(Y_BENCH, g_cy - H_ACTION);
 }
 
 //  Pattern test of a freshly committed block. It exercises SDRAM at the
@@ -672,14 +906,14 @@ static void Step(int row, int dir, int big)
     } else {
         SetMsg(TEXT(""), C_DIM);
     }
-    InvalidateState();
+    Refresh();
 }
 
 static void StopKeep(void)
 {
     KillTimer(g_hWnd, TIMER_KEEP);
     g_keepLeft = 0;
-    InvalidateState();
+    Refresh();
 }
 
 static void Revert(void)
@@ -688,7 +922,7 @@ static void Revert(void)
     if (!WriteClock(&g_prev)) SetMsg(TEXT("revert refused by the OAL"), C_RED);
     else                      SetMsg(TEXT("reverted"), C_GREEN);
     ClockDecode(&g_cur, &g_tg);
-    InvalidateState();
+    Refresh();
 }
 
 static void Apply(void)
@@ -703,7 +937,7 @@ static void Apply(void)
     SetMsg(TEXT("Keep, or it reverts"), C_AMBER);
     g_keepLeft = KEEP_SECONDS;
     SetTimer(g_hWnd, TIMER_KEEP, 1000, NULL);
-    InvalidateState();
+    Refresh();
 }
 
 static void ToggleLimits(void)
@@ -714,7 +948,7 @@ static void ToggleLimits(void)
             TEXT("CEtune"), MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
     g_limits = !g_limits;
     SetMsg(TEXT(""), C_DIM);
-    InvalidateBand(0, Y_GAUGE);
+    Refresh();
 }
 
 static void Help(void)
@@ -754,7 +988,7 @@ static void Click(int x, int y)
         PlusRect(i, &r); r.right += 3; r.top -= 2; r.bottom += 2;
         if (Hit(&r, x, y)) { g_downRow = i; g_downDir = 1; }
         if (g_downRow == i) { g_repeats = 0; Step(i, g_downDir, 0); SetTimer(g_hWnd, TIMER_REPEAT, 400, NULL); }
-        else if (g_sel != i) { g_sel = i; SetMsg(TEXT(""), C_DIM); InvalidateBand(Y_ROWS, Y_WAIT); }
+        else if (g_sel != i) { g_sel = i; SetMsg(TEXT(""), C_DIM); Refresh(); }
         return;
     }
     ChipRect(3, &r);
@@ -765,7 +999,7 @@ static void Click(int x, int y)
         over = g_limits ? ClockOverLimit(&c, g_cpclkLimit) : 0;
         if (over) { TCHAR text[40]; wsprintf(text, TEXT("%s > %u MHz"), g_rowName[over], g_cpclkLimit[over] / 1000000u); SetMsg(text, C_RED); }
         else      { g_tg = c; SetMsg(TEXT(""), C_DIM); }
-        InvalidateState();
+        Refresh();
         return;
     }
     for (i = 0; i < 5; i++) {
@@ -799,7 +1033,7 @@ static void Release(int x, int y)
             int over = g_limits ? ClockOverLimit(&g_preset[g_downPreset], g_cpclkLimit) : 0;
             if (over) { TCHAR text[40]; wsprintf(text, TEXT("%s > %u MHz"), g_rowName[over], g_cpclkLimit[over] / 1000000u); SetMsg(text, C_RED); }
             else      { g_tg = g_preset[g_downPreset]; SetMsg(TEXT(""), C_DIM); }
-            InvalidateState();
+            Refresh();
         }
         g_downPreset = -1;
     }
@@ -811,14 +1045,14 @@ static void OnTimer(WPARAM id)
 
     if (id == TIMER_KEEP) {
         if (--g_keepLeft <= 0) Revert();
-        else InvalidateBand(g_cy - H_ACTION, g_cy);
+        else Refresh();
     } else if (id == TIMER_HOLD) {
         KillTimer(g_hWnd, TIMER_HOLD);
         if (g_downPreset > 0) {
             g_preset[g_downPreset] = g_tg;
             wsprintf(text, TEXT("stored in F%d"), g_downPreset + 1);
             SetMsg(text, C_GREEN);
-            InvalidateBand(Y_PRESET, Y_REGS);
+            Refresh();
             g_downPreset = -1;
         }
     } else if (id == TIMER_REPEAT) {
@@ -832,12 +1066,12 @@ static void OnTimer(WPARAM id)
 static void OnKey(WPARAM vk)
 {
     switch (vk) {
-    case VK_UP:     if (g_sel > 0) { g_sel--; SetMsg(TEXT(""), C_DIM); InvalidateBand(Y_ROWS, Y_WAIT); } break;
-    case VK_DOWN:   if (g_sel < 5) { g_sel++; SetMsg(TEXT(""), C_DIM); InvalidateBand(Y_ROWS, Y_WAIT); } break;
+    case VK_UP:     if (g_sel > 0) { g_sel--; SetMsg(TEXT(""), C_DIM); Refresh(); } break;
+    case VK_DOWN:   if (g_sel < 5) { g_sel++; SetMsg(TEXT(""), C_DIM); Refresh(); } break;
     case VK_LEFT:   Step(g_sel, -1, 0); break;
     case VK_RIGHT:  Step(g_sel, 1, 0); break;
     case VK_RETURN: if (g_keepLeft > 0) { StopKeep(); SetMsg(TEXT("kept"), C_GREEN); } else Apply(); break;
-    case VK_ESCAPE: if (g_keepLeft > 0) Revert(); else { ClockDecode(&g_cur, &g_tg); SetMsg(TEXT(""), C_DIM); InvalidateState(); } break;
+    case VK_ESCAPE: if (g_keepLeft > 0) Revert(); else { ClockDecode(&g_cur, &g_tg); SetMsg(TEXT(""), C_DIM); Refresh(); } break;
     }
 }
 
@@ -873,6 +1107,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPWSTR lpCmdLine, int n
     DefaultPresets();
     LoadPresets();
     ClockDecode(&g_cur, &g_tg);
+    Snapshot(&g_shown);                         // the first WM_PAINT draws everything as it is now
     wcscpy(g_bench, TEXT("tap Bench or MemTest"));
     RETAILMSG(1, (TEXT("CETUNE: %s, FLLFRQ=%08x FRQCR=%08x\r\n"), g_haveOal ? TEXT("OAL clock control") : TEXT("demo (no clock IOCTL)"), g_cur.fllfrq, g_cur.frqcr));
 

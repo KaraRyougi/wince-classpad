@@ -634,6 +634,24 @@ ICCL/ICCH 写死 Casio/gint 的 0x29/0x22，每个阶段读 64 次 ICSR 后 `Sle
   按节拍计数的时限（CPU 变快时读次数变多，时限不变；正常事务不问时间）、
   失败后恢复，以及计数换算。LCD 时序仍未跟随 Pphi。
 
+**CEtune 重绘与 benchmark（2026-11-14，未在 VM 构建，未上模拟器和真机）。**
+- 重绘：原来每次步进失效两块区域，而绘制按失效区域的外接矩形判断，等于整窗重画
+  （约 690 次 GDI 调用）。现在 `Refresh` 把屏幕上已显示的值（`g_shown`）和应显示
+  的值逐项比较，只失效变化的格子（一行里数值/进度条/MHz 与名称和按钮分开，预设
+  按钮、等待周期小块、Apply 按钮各自独立）；`Paint` 用 `GetUpdateRgn` +
+  `GetRegionData` 取出更新区域的矩形，只画落在其中的格子；方块两次填充，弧一个
+  多边形，颜色只在变化时设置。PLL 步进约 690 -> 170 次调用。主机上用假 GDI 对拍：
+  26 种操作后局部重绘与整窗重绘一致。
+- Benchmark 换成 Xtune 的（`src/benchmark/benchmark.c`）：CPU（空计数循环 100 ms
+  的次数 / 100）、ROM/RAM/I/O（179 次非缓存长字读，50 ms，地址 0xA0150000 /
+  0xAC150000 / 0xA4150000），两个循环照搬 Xtune 的汇编（`bench.src`）；dupdate 由
+  显示驱动整屏推送一次计时（新 escape `DRVESC_CLASSPAD_PUSHFRAME`，对应 gint 的
+  `dupdate()`）；INT 是 Dhrystone 2.1 跑 10000 次（`dhry.c`；Xtune 用的 cBench 库
+  源码拿不到，这里是标准 2.1，结束值自检通过）；保留 Xtune 的展频修正。Xtune 用
+  定时器中断停循环，这里用高一级优先级的线程 Sleep 后清标志，并按性能计数器量到
+  的实际时长换算。数值经过翻译器和 CE 的线程调度，会低于 Ptune4。
+  `bench.src` 的汇编语法没有经过 shasm 检验。
+
 **键盘只轮询，键盘和触摸共用一个节拍（2026-11-12，未在 VM 构建，未上模拟器和真机）。**
 照 gint 的 `keysc_tick`（定时器回调里读六个数据字，同一个 tick 里采样触摸）：
 

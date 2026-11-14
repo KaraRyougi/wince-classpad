@@ -24,6 +24,10 @@
 
 #define DRVESC_CLASSPAD_GETBRIGHTNESS   100500
 #define DRVESC_CLASSPAD_SETBRIGHTNESS   100501
+// Not the backlight's, but the driver's third escape and numbered with them:
+// the whole frame to the panel, now, returning when it is there. What gint's
+// dupdate() does; CEtune times it for the "dupdate" line of its benchmark.
+#define DRVESC_CLASSPAD_PUSHFRAME       100502
 
 #define CLASSPAD_BKL_LEVELS     21
 #define CLASSPAD_BKL_MIN        1

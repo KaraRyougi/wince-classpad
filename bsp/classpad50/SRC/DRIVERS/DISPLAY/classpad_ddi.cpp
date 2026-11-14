@@ -269,6 +269,7 @@ ULONG ClasspadGPE::DrvEscape(SURFOBJ *pso, ULONG code, ULONG inSize,
         DWORD query = *(DWORD *)in;
         if (query == DRVESC_GETSCREENROTATION || query == DRVESC_SETSCREENROTATION) return 1;
         if ((query == DRVESC_CLASSPAD_GETBRIGHTNESS || query == DRVESC_CLASSPAD_SETBRIGHTNESS) && m_panel == LCD_PANEL_DCS) return 1;
+        if (query == DRVESC_CLASSPAD_PUSHFRAME) return 1;
         return GPE::DrvEscape(pso, code, inSize, in, outSize, out);
     }
     if (code == DRVESC_GETSCREENROTATION) {
@@ -285,6 +286,13 @@ ULONG ClasspadGPE::DrvEscape(SURFOBJ *pso, ULONG code, ULONG inSize,
         return DISP_CHANGE_SUCCESSFUL;
     }
     if (code == DRVESC_SETSCREENROTATION) return RotateDisplay((int)inSize);
+    // The whole frame to the panel, synchronously (classpad_bkl.h): CEtune's dupdate timing
+    if (code == DRVESC_CLASSPAD_PUSHFRAME) {
+        EnterCriticalSection(&m_csLcd);
+        PushRows(0, m_nScreenHeight);
+        LeaveCriticalSection(&m_csLcd);
+        return 1;
+    }
     // Backlight level (classpad_bkl.h). The value is also what a resume puts back.
     if (code == DRVESC_CLASSPAD_GETBRIGHTNESS && m_panel == LCD_PANEL_DCS) {
         if (!out || outSize < sizeof(int)) return 0;

@@ -14,4 +14,7 @@ TARGETLIBS= \
     $(_PROJECTROOT)\cesysgen\sdk\lib\$(_CPUINDPATH)\coredll.lib
 SOURCES= \
     cetune.c \
+    dhry.c \
     cetune.rc
+SH_SOURCES= \
+    bench.src

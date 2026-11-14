@@ -16,6 +16,13 @@ extern const nkwindow nk_windows[];
 extern const int nk_nwindows;
 
 extern char nk_last[48];                         /* the last line, e.g. why a step failed */
+/* A window that neither is blank nor shows our image is not erased: the
+ * write stops before the first erase with nk_refused set. That is also what
+ * a flash of ours looks like when it was cut off (a reset or the batteries
+ * during the erase: the marker sector may be gone while later sectors still
+ * hold the old image), so the caller may ask the user and try again with
+ * nk_force set: every sector of the window's span is then erased. */
+extern int nk_refused, nk_force;
 extern volatile int nk_abort;                    /* set (from nk_progress): nkflash_compare stops, returns -2 */
 /* progress of the step running: compare and write in bytes, erase in
  * sectors, record = the record being written (1-based) */

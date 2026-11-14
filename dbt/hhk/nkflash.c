@@ -16,7 +16,11 @@
  * inside its own bounds, and a sector in it is erased only when it is still
  * blank, the window already holds a CE image of ours ("ECEC" at +0x40 or a
  * B000FF header) or the window is the eActivity area (*_WINDOW_EACT);
- * anything else stops before the first erase.
+ * anything else stops before the first erase (nk_refused), unless the
+ * caller sets nk_force after asking the user. The sectors are erased from
+ * the last to the first, so the first sector, the one with the marker that
+ * says the window is ours, goes last: an erase that is cut off leaves a
+ * window the next start still recognises and erases again.
  *
  * Used by wince.hh3 (hhk/loader.c), a gint program: it calls nkflash_open /
  * compare / write per window and follows nk_progress; nk_say's lines are
@@ -275,25 +279,31 @@ int nkflash_compare(void)
     return compare_stream(WIN_LO, nk.size);
 }
 
+int nk_refused, nk_force;
+
 /* erase the sectors covering [lo, hi) after checking each is ours to erase */
 static int erase_span(u32 lo, u32 hi)
 {
-    u32 s, first = lo & ~(NOR_SECTOR - 1), n = (hi - first + NOR_SECTOR - 1) / NOR_SECTOR, i = 0;
-    int ours = window_has_our_image(nk.w) || nk.w->eact;
+    u32 s, first = lo & ~(NOR_SECTOR - 1), n = (hi - first + NOR_SECTOR - 1) / NOR_SECTOR, i = 0, k;
+    int ours = window_has_our_image(nk.w) || nk.w->eact || nk_force;
+    nk_refused = 0;
     PROGRESS(NKP_ERASE, 0, n, NOR_P1 + first);
     /* a window that is not known to be ours must be blank; one that is needs
      * no look (reading every sector through the uncached alias took seconds
      * before the first sector showed on the screen) */
     for (s = first; s < hi && !ours; s += NOR_SECTOR) {
-        if (!nor_sector_erased(s))
+        if (!nor_sector_erased(s)) {
+            nk_refused = 1;
             return fail("sector at %08x is in use", NOR_P1 + s);
+        }
     }
-    for (s = first; s < hi; s += NOR_SECTOR) {
+    for (k = n; k-- > 0; ) {                        /* last sector first: see the top of the file */
+        s = first + k * NOR_SECTOR;
         PROGRESS(NKP_ERASE, i, n, NOR_P1 + s);
         nk_say("erasing sector %u/%u at %08x", ++i, n, NOR_P1 + s);
         if (nor_erase_sector(s)) return fail("erase at %08x", NOR_P1 + s);
     }
-    PROGRESS(NKP_ERASE, n, n, NOR_P1 + s);
+    PROGRESS(NKP_ERASE, n, n, NOR_P1 + first);
     return 0;
 }
 
