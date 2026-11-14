@@ -113,7 +113,7 @@ exercised.
 | `SRC\OAL\KERN` | `kern.exe`: nk.lib + oal.lib + the KITL stubs |
 | `SRC\INC` | `bsp.h`, register maps, `classpad_mmio.h` (pre-swapped MMIO, plain P4), `classpad_hc.h` (hypercalls), `ioctl_tab.h`, `image_cfg.h`, `classpad_extrom.h` |
 | `SRC\DRIVERS` | display (GPE, DCS panel), keyboard (Layout Manager + KEYSC), touch (tchmain + IIC0 sensor): the CE 6.0 sources |
-| `SRC\APPS` | rotate, rotatekey, SH3CRT.dll, DocList.dll, Plotter-Z, CEtune (clock tuner; the OAL's clock IOCTLs, docs/08) (`dirs`); hello and officetest kept but not built |
+| `SRC\APPS` | rotate (not in release images), rotatekey (the strip icons; puts windows back on the screen after a rotation), ITaskMgr (task manager, the strip's Swap icon), SH3CRT.dll, DocList.dll, Plotter-Z, CEtune (clock tuner; the OAL's clock IOCTLs, docs/08) (`dirs`); hello and officetest kept but not built |
 | `FILES` | `config.bib` (NK in the eActivity area, EXT in the hole), `platform.bib/reg/dat/db`, `PostFmergeBib.bat` + `romexclude.txt` (drops the network stack and the .wav files at makeimg time; the hook exists in CE 5.0's makeimg too), `legacy-mfc` (mfcce300.dll), `xpander` (README, link; binaries staged from the cab) |
 
 For the hardware facts, the drivers' behaviour, the touch and power

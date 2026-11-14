@@ -3,6 +3,7 @@ DIRS=\
     BKLCPL \
     ROTATE \
     ROTATEKEY \
+    ITASKMGR \
     SH3CRT \
     doclist \
     PLOTTERZ \

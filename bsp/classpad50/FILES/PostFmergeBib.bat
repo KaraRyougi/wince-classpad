@@ -15,6 +15,9 @@ rem        stays now that the image has TCP/IP and PPP [classpad.bat], and
 rem        extmove.txt sends the network modules to the EXT region.
 rem      - the standard .wav files: the Control Panel item forces them in and
 rem        the image has no audio driver.
+rem      - classpad_rotate.exe [SRC\APPS\ROTATE], since 2026-11-12: the manual
+rem        orientation tool and touch test; the strip's Rotate icon does the
+rem        work. tools/test_rotation_emulator.py needs an image with it.
 rem     To keep everything: delete romexclude.txt from the release directory.
 rem
 rem  2. Take the EXT region's entries [platform.bib lines with EXT in the

@@ -64,15 +64,15 @@ static INT      g_iconArmed = -1;               // icon under the pen since the 
 // coordinates (independent of desktop rotation): Settings, Menu, Main,
 // Resize, Swap, Rotate, Esc, 320/7 pixels each (casio-emu's panel and
 // CASIO's fx-CP400 guide). A release on the icon the pen went down on sets
-// its named event; classpad_rotatekey.exe acts on it outside GWES. Resize and
-// Swap have none.
+// its named event; classpad_rotatekey.exe acts on it outside GWES. Resize
+// has none.
 #define STRIP_X(px)     (0x20B + (px)*0x9B6/256)
 #define STRIP_Y(py)     (0xF4 + (py)*0x66F/256)
 #define STRIP_ICONS     7
 static const INT     g_iconLeft[STRIP_ICONS + 1] = { 0, 46, 91, 137, 183, 229, 274, 320 };
 static const LPCTSTR g_iconEventName[STRIP_ICONS] = {
     TEXT("ClassPadIconSettings"), TEXT("ClassPadIconMenu"), TEXT("ClassPadIconMain"),
-    NULL, NULL, TEXT("ClassPadRotateKey"), TEXT("ClassPadIconEsc")
+    NULL, TEXT("ClassPadIconSwap"), TEXT("ClassPadRotateKey"), TEXT("ClassPadIconEsc")
 };
 static const LPCTSTR g_iconName[STRIP_ICONS] = {
     TEXT("Settings"), TEXT("Menu"), TEXT("Main"), TEXT("Resize"), TEXT("Swap"), TEXT("Rotate"), TEXT("Esc")

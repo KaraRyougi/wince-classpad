@@ -17,6 +17,8 @@ Directory("\Windows\Programs"):-File("Battery.lnk", "\Windows\battery.lnk")
 Directory("\Windows\Programs"):-File("CEtune.lnk", "\Windows\cetune.lnk")
 ; PPP over the USB serial port (SRC\APPS\USBNET, in NK)
 Directory("\Windows\Programs"):-File("USB Network.lnk", "\Windows\usbnet.lnk")
+; ITaskMgr (SRC\APPS\ITASKMGR, in NK)
+Directory("\Windows\Programs"):-File("Task Manager.lnk", "\Windows\itaskmgr.lnk")
 
 ; Help Contents (Start > Help): the viewer lists the shortcuts in \Windows\Help,
 ; named as Microsoft's wceshellfe.dat / wceappsfe.dat name them. WordPad's and
