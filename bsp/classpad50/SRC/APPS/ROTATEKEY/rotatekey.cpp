@@ -12,7 +12,11 @@
 //             (Alt) when there is none
 //   Esc       ESC: VK_ESCAPE
 //   Rotate    portrait <-> landscape (ChangeDisplaySettingsEx)
-// Resize and Swap have no event. The fx-CP400 Keyboard key shows Math
+// Swap is this image's own: it starts the task manager (\Windows\ITaskMgr.exe,
+// SRC\APPS\ITASKMGR; a second start brings the running one to the front), the
+// way out when a program's close button cannot be reached. Without that
+// program in the image it opens the shell's Task Manager dialog, which
+// otherwise needs Alt+Tab. Resize has no event. The fx-CP400 Keyboard key shows Math
 // Xpander's math keyboard (MathKeyPad, a SIP input method registered in
 // platform.reg), or hides it when it is the one showing.
 //
@@ -23,19 +27,100 @@
 #include <sipapi.h>
 #include <stdlib.h>
 
-enum { EV_ROTATE, EV_MENU, EV_MAIN, EV_ESC, EV_SETTINGS, EV_KEYBOARD, EV_COUNT };
+enum { EV_ROTATE, EV_MENU, EV_MAIN, EV_ESC, EV_SETTINGS, EV_KEYBOARD, EV_SWAP, EV_COUNT };
 
 static const LPCTSTR g_eventName[EV_COUNT] = {
     TEXT("ClassPadRotateKey"), TEXT("ClassPadIconMenu"), TEXT("ClassPadIconMain"),
-    TEXT("ClassPadIconEsc"), TEXT("ClassPadIconSettings"), TEXT("ClassPadKeyboardKey")
+    TEXT("ClassPadIconEsc"), TEXT("ClassPadIconSettings"), TEXT("ClassPadKeyboardKey"),
+    TEXT("ClassPadIconSwap")
 };
 
 // MathKeyPad.dll's input method (its DllRegisterServer's CLSID)
 static CLSID g_clsidMathKeyPad =
     { 0xD8183B68, 0x05D1, 0x11D4, { 0x80, 0xD9, 0x00, 0x10, 0x83, 0x02, 0x30, 0x57 } };
 
+// GWES only broadcasts WM_SETTINGCHANGE after a rotation; it moves no window.
+// Programs written for one screen shape ignore it and keep their old
+// rectangle, with the close button past the new right edge. So after a
+// rotation every visible top-level window that sticks out of the new screen
+// is put back: one that filled the old work area (or the old screen) fills
+// the new one, anything else (a dialog) keeps its size and is moved so that
+// its top right corner, where the close button is, is on the screen.
+struct REFIT { RECT oldScreen, oldWork, screen, work; int count; };
+
+static BOOL IsToolbarClass(LPCTSTR cls)
+{
+    return !wcscmp(cls, TEXT("ToolbarWindow32")) || !wcscmp(cls, TEXT("CommandBar"));
+}
+
+static BOOL Covers(const RECT *r, const RECT *area)
+{
+    return r->left <= area->left && r->top <= area->top && r->right >= area->right && r->bottom >= area->bottom;
+}
+
+static BOOL CALLBACK RefitWindow(HWND hwnd, LPARAM lParam)
+{
+    REFIT *f = (REFIT *)lParam;
+    RECT r; TCHAR cls[32];
+    if (!IsWindowVisible(hwnd) || !GetWindowRect(hwnd, &r) || r.right <= r.left || r.bottom <= r.top) return TRUE;
+    // the shell and the SIP place themselves
+    if (GetClassName(hwnd, cls, 32) && (!wcscmp(cls, TEXT("HHTaskBar")) || !wcscmp(cls, TEXT("DesktopExplorerWindow"))
+        || !wcscmp(cls, TEXT("SipWndClass")) || !wcscmp(cls, TEXT("SipBackDropWndClass"))))
+        return TRUE;
+    if (r.left >= f->screen.left && r.top >= f->screen.top && r.right <= f->screen.right && r.bottom <= f->screen.bottom)
+        return TRUE;
+    int x = r.left, y = r.top, w = r.right - r.left, h = r.bottom - r.top;
+    if (Covers(&r, &f->oldWork)) {
+        const RECT *to = Covers(&r, &f->oldScreen) ? &f->screen : &f->work;
+        x = to->left; y = to->top; w = to->right - to->left; h = to->bottom - to->top;
+    } else {
+        if (x + w > f->work.right) x = f->work.right - w;
+        if (x < f->work.left && w <= f->work.right - f->work.left) x = f->work.left;
+        if (y + h > f->work.bottom) y = f->work.bottom - h;
+        if (y < f->work.top) y = f->work.top;
+    }
+    SetWindowPos(hwnd, NULL, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+    // A command bar follows its parent only when told to, which such programs
+    // do not do: TB_AUTOSIZE gives it the parent's width, then
+    // CommandBar_AlignAdornments moves the close/OK/help buttons to its right
+    // end. That function is only toolbar messages to the bar (it widens the
+    // separator before the adornments with TB_SETBUTTONINFO; CE 5.0
+    // commctrl.lib, disassembled), so it works on another process's bar, and
+    // does nothing on a toolbar without adornments.
+    for (HWND c = GetWindow(hwnd, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT))
+        if (GetClassName(c, cls, 32) && IsToolbarClass(cls)) {
+            SendMessage(c, TB_AUTOSIZE, 0, 0);
+            CommandBar_AlignAdornments(c);
+        }
+    f->count++;
+    return TRUE;
+}
+
+static void RefitWindows(const RECT *oldScreen, const RECT *oldWork)
+{
+    REFIT f; int i;
+    f.oldScreen = *oldScreen; f.oldWork = *oldWork; f.count = 0;
+    SetRect(&f.screen, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+    // Let the programs that do follow the rotation move first, and wait for
+    // the taskbar to set the new work area (the old one does not fit the
+    // turned screen).
+    Sleep(500);
+    for (i = 0; i < 30; i++) {
+        if (SystemParametersInfo(SPI_GETWORKAREA, 0, &f.work, 0) && f.work.right > f.work.left && f.work.bottom > f.work.top
+            && f.work.right <= f.screen.right && f.work.bottom <= f.screen.bottom)
+            break;
+        Sleep(100);
+    }
+    if (i == 30) f.work = f.screen;
+    EnumWindows(RefitWindow, (LPARAM)&f);
+    RETAILMSG(1, (TEXT("ROTATEKEY: %d windows put back on the screen\r\n"), f.count));
+}
+
 static void Rotate(void)
 {
+    RECT oldScreen, oldWork;
+    SetRect(&oldScreen, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+    if (!SystemParametersInfo(SPI_GETWORKAREA, 0, &oldWork, 0)) oldWork = oldScreen;
     DEVMODE dm; ZeroMemory(&dm, sizeof dm); dm.dmSize = sizeof dm;
     dm.dmFields = DM_DISPLAYORIENTATION;
     LONG rc = ChangeDisplaySettingsEx(NULL, &dm, NULL, CDS_TEST, NULL);
@@ -47,6 +132,7 @@ static void Rotate(void)
     rc = ChangeDisplaySettingsEx(NULL, &dm, NULL, 0, NULL);
     RETAILMSG(1, (TEXT("ROTATEKEY: mode=%d result=%d size=%dx%d\r\n"), dm.dmDisplayOrientation, rc,
         GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)));
+    if (rc == DISP_CHANGE_SUCCESSFUL) RefitWindows(&oldScreen, &oldWork);
 }
 
 static void Key(BYTE vk)
@@ -85,6 +171,23 @@ static void MathXpander(void)
     }
 }
 
+// ITaskMgr; else the Task Manager dialog of the shell's taskbar (explorer's
+// IDM_TASKBAR_TASKMAN, the command of its Alt+Tab and of the taskbar's menu).
+static void TaskManager(void)
+{
+    PROCESS_INFORMATION pi;
+    if (CreateProcess(TEXT("\\Windows\\ITaskMgr.exe"), NULL, NULL, NULL, FALSE, 0, NULL, NULL, NULL, &pi)) {
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        RETAILMSG(1, (TEXT("ROTATEKEY: task manager started\r\n")));
+        return;
+    }
+    DWORD err = GetLastError();
+    HWND taskbar = FindWindow(TEXT("HHTaskBar"), NULL);
+    if (taskbar) PostMessage(taskbar, WM_COMMAND, 3302, 0);
+    RETAILMSG(1, (TEXT("ROTATEKEY: cannot start ITaskMgr: %d, shell task manager %s\r\n"), err,
+        taskbar ? TEXT("opened") : TEXT("not found")));
+}
+
 // A stylus tap at the centre of a toolbar's first button, in screen coordinates.
 static BOOL TapFirstButton(HWND tb)
 {
@@ -107,7 +210,7 @@ static HWND FindToolbar(HWND w, int depth)
 {
     TCHAR cls[32];
     for (HWND c = GetWindow(w, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) {
-        if (GetClassName(c, cls, 32) && (!wcscmp(cls, TEXT("ToolbarWindow32")) || !wcscmp(cls, TEXT("CommandBar")))
+        if (GetClassName(c, cls, 32) && IsToolbarClass(cls)
             && IsWindowVisible(c) && SendMessage(c, TB_BUTTONCOUNT, 0, 0) > 0)
             return c;
         if (depth > 0) {
@@ -181,6 +284,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPTSTR command, int)
         case EV_ESC:      Key(VK_ESCAPE); break;
         case EV_SETTINGS: OpenMenuBar(); break;
         case EV_KEYBOARD: MathKeyboard(); break;
+        case EV_SWAP:     TaskManager(); break;
         }
     }
     for (i = 0; i < EV_COUNT; i++) CloseHandle(events[i]);

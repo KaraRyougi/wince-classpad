@@ -93,6 +93,16 @@ FILES
 MODULES
     classpad_rotatekey.exe $(_FLATRELEASEDIR)\classpad_rotatekey.exe NK  S
 
+; ITaskMgr (SRC\APPS\ITASKMGR; Programs > Task Manager and the Swap icon of
+; the touch strip): needs toolhelp.dll (classpad.bat SYSGEN_TOOLHELP, in NK
+; through common.bib). In NK so that it is there without the EXT region.
+; @CESYSGEN IF CE_MODULES_TOOLHELP
+MODULES
+    ITaskMgr.exe        $(_FLATRELEASEDIR)\ITaskMgr.exe        NK  S
+FILES
+    itaskmgr.lnk        $(_WINCEROOT)\PLATFORM\CLASSPAD\FILES\itaskmgr.lnk     NK   S
+; @CESYSGEN ENDIF CE_MODULES_TOOLHELP
+
 ; SH-3 floating point for the Pocket PC SH-3 binaries below (SRC\APPS\SH3CRT):
 ; coredll's helpers and double C functions with the SH-3 calling convention;
 ; stage.py points their imports here (tools/sh3imports.py).

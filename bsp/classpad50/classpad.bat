@@ -47,6 +47,10 @@ REM device (SYSGEN_CONSOLE needs a Courier font the flash has no room for).
 REM FILES\extmove.txt sends the three modules to the EXT region. Sysgen again
 REM after adding this.
 set SYSGEN_TELNETD=1
+REM The task manager (SRC\APPS\ITASKMGR) lists processes and their heaps with
+REM the Toolhelp API: toolhelp.dll and its import library. Sysgen again after
+REM adding this.
+set SYSGEN_TOOLHELP=1
 set IMGNOKITL=1
 set IMGNODEBUGGER=1
 set IMGNOSHAREETH=1

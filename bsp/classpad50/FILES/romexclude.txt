@@ -19,3 +19,4 @@
 ^ *windmin\.wav[ ]
 ^ *recstart\.wav[ ]
 ^ *recend\.wav[ ]
+^ *classpad_rotate\.exe[ ]

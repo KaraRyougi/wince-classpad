@@ -1509,3 +1509,45 @@ left to chance was whether GWES tries a key click or a tap click when the
 Volume key is absent (each try would be a call into an API set nobody
 serves). platform.reg now says it outright: Key 0, Screen 0, Mute 0,
 Volume 0. Needs the next image build.
+
+### Windows after a rotation; a task manager (2026-11-12)
+
+Reported: after the strip's Rotate icon a program often keeps its old
+rectangle, and its close button is then past the right edge of the screen.
+GWES only broadcasts WM_SETTINGCHANGE after a rotation and moves no window;
+programs written for one screen shape (the Pocket PC ones, most CE programs
+with a command bar) ignore it.
+
+`classpad_rotatekey.exe` now puts the windows back itself after a rotation
+that succeeded (`RefitWindows`): it waits for the taskbar's new work area,
+then every visible top-level window that sticks out of the new screen is
+resized to the new work area (new screen) if it filled the old one, else
+moved, size unchanged, so that its top right corner is on the screen. The
+taskbar, the desktop and the SIP are left alone. The command bars of a
+resized window get TB_AUTOSIZE and `CommandBar_AlignAdornments`. CE 5.0 has
+no source for commctrl; disassembling the function in commctrl.lib shows it
+is toolbar messages only (TB_BUTTONCOUNT, TB_GETBUTTON to find the buttons
+with the IDs WM_CLOSE, IDOK and WM_HELP, TB_GETITEMRECT, then TB_SETBUTTONINFO
+with a new width for the separator before them), so calling it on another
+process's bar works like the TB_GETITEMRECT this program already sends.
+Serial log: `ROTATEKEY: N windows put back on the screen`. Only this path:
+`classpad_rotate.exe` does not do it, and is no longer in release images
+(romexclude.txt; `tools/test_rotation_emulator.py` needs an image with it).
+
+The shell's Task Manager is in the image (explorer's taskmandlg.cpp) but
+every way to it needs Alt, which the keyboard does not have: Alt+Tab,
+Ctrl+Alt+Del/Backspace, Alt+tap on the taskbar for its menu. It also opens
+on WM_COMMAND 3302 (IDM_TASKBAR_TASKMAN) posted to the `HHTaskBar` window.
+
+ITaskMgr 1.0 (Yuichiro Ishitani, BSD; `SRC\APPS\ITASKMGR`, its README lists
+the changes) is the task manager of the image: CPU and memory graph,
+processes with Terminate, windows with Switch and Close. The strip's Swap
+icon (event `ClassPadIconSwap`) starts it, as does Programs > Task Manager;
+if it cannot be started the icon opens the shell's dialog instead. It needs
+Toolhelp (`SYSGEN_TOOLHELP` in classpad.bat: sysgen again). Upstream measures
+the load with an idle-priority thread that spins for ever, which here would
+keep OEMIdle from ever being entered; this build reads `GetIdleTime()`, the
+OAL's idle counter, instead. In NK (the exe and toolhelp.dll; NK.bin was
+4.55 of 5 MiB before).
+
+None of this has been built or run.

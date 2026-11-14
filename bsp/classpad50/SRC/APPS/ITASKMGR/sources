@@ -1,0 +1,26 @@
+!if 0
+ITaskMgr.exe - ITaskMgr 1.0, a task manager for Windows CE (Yuichiro Ishitani,
+BSD license, LICENSE.txt; github.com/WinCEsoft/UTIL-PROCESS-ITaskMgr): CPU and
+memory graph, processes (Terminate), windows (Switch, Close). The Swap icon
+of the touch strip starts it (SRC\APPS\ROTATEKEY). README.md lists what was
+changed for this image. Needs toolhelp.dll (classpad.bat SYSGEN_TOOLHELP).
+!endif
+!INCLUDE $(_TARGETPLATROOT)\sources.cmn
+TARGETNAME=ITaskMgr
+TARGETTYPE=PROGRAM
+RELEASETYPE=PLATFORM
+WINCEOEM=1
+EXEENTRY=WinMainCRTStartup
+# third-party code written for eVC 3/4: its warnings are not ours to fail on
+WARNISERROR=
+INCLUDES=$(INCLUDES);.;$(_WINCEROOT)\public\common\sdk\inc
+TARGETLIBS= \
+    $(_PROJECTROOT)\cesysgen\sdk\lib\$(_CPUINDPATH)\coredll.lib \
+    $(_PROJECTROOT)\cesysgen\sdk\lib\$(_CPUINDPATH)\commctrl.lib \
+    $(_PROJECTROOT)\cesysgen\sdk\lib\$(_CPUINDPATH)\toolhelp.lib
+SOURCES= \
+    ITaskMgr.cpp \
+    cpu.cpp \
+    process.cpp \
+    tasklist.cpp \
+    ITaskMgr.rc
