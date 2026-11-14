@@ -7,13 +7,12 @@
 ;;  Both run until the long at the flag's address reads zero (another thread
 ;;  clears it) and return the number of passes in r0.
 ;;-----------------------------------------------------------------------------
-        .section .text, code
-        .export _tick_count
-        .export _mem_bench
+        .list   OFF
+        .include "kxshx.h"
+        .list   ON
 
 ;;  DWORD tick_count(volatile DWORD *flag): r4 = flag
-        .align  4
-_tick_count:
+        LEAF_ENTRY _tick_count
         mov     #-1, r0
 tl00:
         add     #1, r0
@@ -22,11 +21,11 @@ tl00:
         bf      tl00
         rts
         nop
+        ENTRY_END _tick_count
 
 ;;  DWORD mem_bench(DWORD *area, volatile DWORD *flag): r4 = the address
 ;;  read, r5 = flag. One pass is 3 + 8 x 22 = 179 long reads of the address.
-        .align  4
-_mem_bench:
+        LEAF_ENTRY _mem_bench
         mov     #-1, r0
 ml00:
         add     #1, r0
@@ -68,5 +67,6 @@ ml02:
         bf      ml00
         rts
         nop
+        ENTRY_END _mem_bench
 
         .end
