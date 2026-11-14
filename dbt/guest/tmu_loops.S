@@ -208,6 +208,86 @@ _loop_jsrslot:
         lds.l   @r15+, pr
         TAIL
 
+/* fmov.s between memory and FR registers, which the translator does in
+ * line (tr_fpu_inline): the post-increment and the pre-decrement must
+ * happen exactly once whatever point an interrupt lands on. FPU opcodes as
+ * words (the guest is built with -m4-nofpu). */
+        .global _loop_fmovld                   /* post-increment load */
+_loop_fmovld:
+        HEAD
+        mov     #0, r0
+        .word   0x406A                         /* lds r0,fpscr: SZ=0 */
+1:      BODY
+        mov.l   r1, @r5
+        .word   0xF159                         /* fmov.s @r5+,fr1 */
+        add     #-4, r5
+        .word   0xF11D                         /* flds fr1,fpul */
+        .word   0x065A                         /* sts fpul,r6 */
+        add     r6, r2
+        dt      r4
+        bf      1b
+        TAIL
+
+        .global _loop_fmovst                   /* pre-decrement store */
+_loop_fmovst:
+        HEAD
+        mov     #0, r0
+        .word   0x406A
+        add     #8, r5
+1:      BODY
+        .word   0x415A                         /* lds r1,fpul */
+        .word   0xF20D                         /* fsts fpul,fr2 */
+        .word   0xF52B                         /* fmov.s fr2,@-r5 */
+        mov.l   @r5+, r6
+        xor     r6, r2
+        dt      r4
+        bf      1b
+        TAIL
+
+        .global _loop_fmovidx                  /* r0-indexed store and load */
+_loop_fmovidx:
+        HEAD
+        mov     #0, r0
+        .word   0x406A
+1:      BODY
+        mov     r7, r0
+        and     #12, r0
+        .word   0x435A                         /* lds r3,fpul */
+        .word   0xF30D                         /* fsts fpul,fr3 */
+        .word   0xF537                         /* fmov.s fr3,@(r0,r5) */
+        .word   0xF456                         /* fmov.s @(r0,r5),fr4 */
+        .word   0xF41D                         /* flds fr4,fpul */
+        .word   0x065A                         /* sts fpul,r6 */
+        add     r6, r1
+        dt      r4
+        bf      1b
+        TAIL
+
+        .global _loop_fmovslot                 /* store in the slot of jsr, post-increment load in the slot of bf/s */
+_loop_fmovslot:
+        sts.l   pr, @-r15
+        HEAD
+        mov     #0, r0
+        .word   0x406A
+        mov.l   r1, @r5
+        .word   0xF158                         /* fmov.s @r5,fr1 */
+        add     #4, r5
+1:      add     #-4, r5
+        .word   0xF11D                         /* flds fr1,fpul */
+        .word   0x065A                         /* sts fpul,r6 */
+        add     r6, r2
+        BODY
+        .word   0x415A                         /* lds r1,fpul */
+        .word   0xF20D                         /* fsts fpul,fr2 */
+        mov.l   .Lsub, r6
+        jsr     @r6
+        .word   0xF52A                         /* fmov.s fr2,@r5 (slot) */
+        dt      r4
+        bf/s    1b
+        .word   0xF159                         /* fmov.s @r5+,fr1 (slot) */
+        lds.l   @r15+, pr
+        TAIL
+
         .global _loop_jsrtgt                   /* jsr @r3 whose slot store swaps through r3, its lowest free scratch */
 _loop_jsrtgt:
         sts.l   pr, @-r15

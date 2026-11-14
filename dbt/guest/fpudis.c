@@ -91,6 +91,23 @@ void guest_main(void)
     check("four FPU instructions: one exception, at the first", faults == f + 1 && last_expevt == 0x800 && last_spc == (unsigned)fpudis_fsts_site);
     check("value went through fr0 (fsts/flds ran with FD clear)", r == 21);
 
+    {
+        /* a memory fmov.s: the fast path's post-increment must not run when
+         * the exception is raised, and must run once after the retry */
+        static volatile unsigned word[2] = { 0x40490FDBu, 0x11111111u };
+        extern unsigned fpudis_fmovpost(volatile unsigned *);
+        extern char fpudis_fmovpost_site[];
+        register unsigned r1 __asm__("r1");
+        unsigned after;
+        set_fd(1); f = faults;
+        r = fpudis_fmovpost(word);
+        after = r1;
+        check("fmov.s @r4+: EXPEVT 0x800 at the fmov", faults == f + 1 && last_expevt == 0x800 && last_spc == (unsigned)fpudis_fmovpost_site);
+        check("fmov.s @r4+: value loaded, pointer advanced once", r == 0x40490FDBu && after == (unsigned)word + 4);
+        f = faults;
+        r = fpudis_fmovpost(word + 1);
+        check("fmov.s @r4+ with FD clear: no exception", faults == f && r == 0x11111111u);
+    }
     check("translator counted the FPU-disable exceptions", hc_getstat(8) == faults);
     hc_stats();
     hc_puts(fails ? "RESULT: FAIL\n" : "RESULT: PASS\n");

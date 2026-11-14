@@ -1100,6 +1100,61 @@ int main(void)
         expect("spill search matches scalar for all table sizes and bounded output", ok);
     }
 #endif
+    /* fmov.s between memory and FR registers in line (tr_fpu_inline, with
+     * the runtime's register file known): one raw access and a swap. The
+     * forms that change a guest register or memory commit there; T must be
+     * back before the commit (in the slot of bt/s or bf/s the next range
+     * decides by SSR.T before the pending spills are undone), and the
+     * helper call for FD/SZ sits in a second range of the same instruction. */
+    {
+        static const struct { sf_u32 op, access; int commits; const char *name; } f[] = {
+            { 0xF158, 0x6052, 0, "fmov.s @r5,fr1" },     { 0xF159, 0x7504, 1, "fmov.s @r5+,fr1" },
+            { 0xF156, 0x005E, 0, "fmov.s @(r0,r5),fr1" }, { 0xF52A, 0x2502, 1, "fmov.s fr2,@r5" },
+            { 0xF52B, 0x2506, 1, "fmov.s fr2,@-r5" },    { 0xF527, 0x0506, 1, "fmov.s fr2,@(r0,r5)" },
+        };
+        unsigned k, i;
+        sf_u32 fr = env.fpu_fr, fs = env.fpu_fpscr, fu = env.fpu_fpul;
+        env.fpu_fr = 0x8C8F0000u; env.fpu_fpscr = 0x8C8F0080u; env.fpu_fpul = 0x8C8F0084u;
+        for (k = 0; k < sizeof f / sizeof f[0]; k++) {
+            /* alone, and in the slot of bf/s */
+            int form;
+            for (form = 0; form < 2; form++) {
+                sf_u32 ops[4]; int n = 0, r, found = 0, ranges = 0, ok = 1;
+                sf_u32 commit_off = 0;
+                if (form) ops[n++] = 0x8F02;                    /* bf/s +8 */
+                ops[n++] = f[k].op; ops[n++] = 0x0009; ops[n++] = 0x0009;
+                r = translate(ops, n, form ? 1 : 1);
+                if (r != DBT_OK) ok = 0;
+                for (i = 0; ok && i < blk.nmeta; i++) {
+                    const dbt_imeta *m = &blk.meta[i];
+                    if (m->kind == META_INSN && m->guest_off == 0) {
+                        ranges++;
+                        if (ranges == 1 && m->commit_rel != 0xFF) { found = 1; commit_off = (sf_u32)m->host_off + m->commit_rel; }
+                    }
+                }
+                if (ok && ranges != 2) ok = 0;                  /* fast path, helper path */
+                if (ok && found != f[k].commits) ok = 0;
+                if (ok && found) {
+                    /* the commit word is the access (or the post-increment), with T restored before it */
+                    sf_u32 w = hbuf[commit_off / 2];
+                    if (f[k].op == 0xF159) { if (w != 0x7504) ok = 0; }
+                    else if ((w & 0xFF0F) != (f[k].access & 0xFF0F)) ok = 0;
+                    for (i = 0; i < blk.nspills; i++)
+                        if (blk.spills[i].gpr == DBT_SPILL_T && blk.spills[i].start < commit_off && blk.spills[i].end > commit_off) ok = 0;
+                }
+                if (ok && !found) {
+                    /* the raw load is there */
+                    int seen = 0;
+                    for (i = 0; i < (unsigned)blk.host_len / 2; i++) if ((hbuf[i] & 0xF0FF) == (f[k].access & 0xF0FF)) seen = 1;
+                    if (!seen) ok = 0;
+                }
+                checks++;
+                if (!ok) { failures++; printf("FAIL in-line %s%s (r=%d ranges=%d commit=%d)\n", f[k].name, form ? " in a bf/s slot" : "", r, ranges, found); }
+            }
+        }
+        env.fpu_fr = fr; env.fpu_fpscr = fs; env.fpu_fpul = fu;
+    }
+
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

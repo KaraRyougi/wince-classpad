@@ -38,7 +38,9 @@ unsigned loop_trapa(unsigned, volatile unsigned *), loop_alu(unsigned, volatile 
          loop_st(unsigned, volatile unsigned *), loop_stpre(unsigned, volatile unsigned *), loop_r0idx(unsigned, volatile unsigned *),
          loop_r0disp(unsigned, volatile unsigned *), loop_rmw(unsigned, volatile unsigned *), loop_pcrel(unsigned, volatile unsigned *),
          loop_jsr(unsigned, volatile unsigned *), loop_jsrslot(unsigned, volatile unsigned *), loop_pushpop(unsigned, volatile unsigned *),
-         loop_ldcsr_md(unsigned, volatile unsigned *), loop_ldcsr(unsigned, volatile unsigned *), loop_jsrtgt(unsigned, volatile unsigned *);
+         loop_ldcsr_md(unsigned, volatile unsigned *), loop_ldcsr(unsigned, volatile unsigned *), loop_jsrtgt(unsigned, volatile unsigned *),
+         loop_fmovld(unsigned, volatile unsigned *), loop_fmovst(unsigned, volatile unsigned *), loop_fmovidx(unsigned, volatile unsigned *),
+         loop_fmovslot(unsigned, volatile unsigned *);
 extern unsigned loop_same_asid_pteh(unsigned, unsigned);
 extern unsigned loop_fast_ldtlb(unsigned);
 extern void ldtlb_change_asid(unsigned);
@@ -313,6 +315,8 @@ void guest_main(void)
             { "store", loop_st }, { "pre-decrement store", loop_stpre }, { "r0-indexed store", loop_r0idx },
             { "r0 data store", loop_r0disp }, { "load-modify-store", loop_rmw }, { "pc-relative", loop_pcrel },
             { "jsr/rts", loop_jsr }, { "jsr with store in slot", loop_jsrslot }, { "push/pop pr and regs", loop_pushpop },
+            { "fmov.s post-increment load", loop_fmovld }, { "fmov.s pre-decrement store", loop_fmovst },
+            { "fmov.s r0-indexed", loop_fmovidx }, { "fmov.s in jsr and bf/s slots", loop_fmovslot },
         };
         unsigned n = sizeof loops / sizeof loops[0], k;
         for (k = 0; k < n; k++) {
@@ -325,6 +329,30 @@ void guest_main(void)
             if (got != expect) { hc_puts("  expect "); hc_puthex(expect); hc_puts(" got "); hc_puthex(got); hc_putc('\n'); }
             check(loops[k].name, got == expect && ticks > before + 1);
         }
+    }
+    {
+        /* The in-line fmov.s paths again with other timer periods (the tick
+         * is an instruction count, so one period meets a loop at few
+         * phases): an interrupt after the post-increment or the store must
+         * not run the instruction again, one before it must. */
+        static unsigned (*const fl[])(unsigned, volatile unsigned *) = { loop_fmovld, loop_fmovst, loop_fmovidx, loop_fmovslot };
+        static const unsigned short periods[] = { 611, 977, 1409 };
+        unsigned k, q, ok = 1;
+        for (k = 0; k < 4; k++) {
+            irq_disable();
+            expect = fl[k](60000, scratch);
+            for (q = 0; q < 3; q++) {
+                tmu_period(periods[q]);
+                irq_enable();
+                before = ticks;
+                got = fl[k](60000, scratch);
+                irq_disable();
+                if (got != expect || ticks < before + 100) { ok = 0; hc_puthex(k * 16 + q); hc_putc('\n'); }
+            }
+        }
+        check("fmov.s loops, other periods", ok);
+        tmu_period(PERIOD);
+        irq_enable();
     }
     /* a helper call per iteration: interrupts land in the helper's prologue
      * window (before it masks them), in its exit tail and in the call
