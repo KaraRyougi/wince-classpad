@@ -3317,6 +3317,113 @@ address-space switch), not at the `jsr` sites. A heartbeat phase of ~400
 samples resolves nothing under about 10%; compare counters or longer
 windows.
 
+### Metadata on demand by default, and the layout it allows (2026-11-10)
+
+**Who needs a block's recovery metadata.** Counters in a scratch copy of
+rt.c (one bit set per block life and cause; boot of the 2026-11-10 CE 5.0
+image, My Device opened, Start > Programs, casio-emu fx-cp400):
+
+| | block lives | share of 58.6k translations |
+| --- | ---: | ---: |
+| needed its metadata at all | 1638 | 2.8% |
+| ... because of an interrupt (in the block or in a helper stub it called) | 1596 | |
+| ... because of anything synchronous (a TLB miss the guest gets, a helper fault, FPU disable) | 61 | 0.1% |
+
+The 38% of 2026-11-06 ("Metadata on demand, second chance") dates from
+before the translator refilled the TLB itself: 15.7k misses of a boot are
+now refilled without looking at the block. The first count of this round
+said 9-11% and was wrong in the same direction: it included interrupts
+taken at a block's entry.
+
+**Block entries need no metadata.** An interrupt usually arrives while the
+translator runs masked (a lookup in C, a translation) and is taken in the
+stub tail that is about to jump to the block's first instruction, or at
+that instruction. `guest_pc_of_host` and the in-block path of `exc_c_body`
+now answer those from the header (`host == host_base`: the guest pc is the
+block's, nothing is spilled) instead of going through `resume_pc`, which
+under `LAZY_META` rebuilt the metadata for it. Rebuilds over the scenario
+above: 6536 before, 1748 with this.
+
+**An interrupt in a dead block's redirect was resumed from the dead
+block's metadata** (a bug since the lazy detach of 2026-11-09, found
+because `LAZY_META` halted on it: "metadata rebuild diverged", twice in
+seven boots). `invalidate_block` overwrites the entry of a dead block with
+eight instructions that take stale links, ICs and hash entries to the
+lookup stub. `block_of_host` still finds the dead header for a host pc in
+there, and the exception path then applied the block's own metadata to
+offsets 2-12 of code that is no longer the block: the guest resumed up to
+six instructions into the block without having run them, with r1 holding
+the redirect's scratch value. Such an exception now resumes at the block's
+guest pc with r1 taken back from Y0 (`DEAD_REDIRECT_CODE`), and a rebuild
+for a dead block does not compare the redirect's 28 bytes. No guest covers
+this; seven boots after the fix had no halt.
+
+**`LAZY_META=1` is the default**, and `lazy_eligible` accepts the EXT
+region as well as NK (Math Xpander, SpreadCE and WordPad run from there;
+they would otherwise keep ~150 bytes of metadata per block in an arena now
+sized for ~46).
+
+**Layout.** With metadata on demand a block's arena share is its links and
+relocation record: 34-36 bytes when a bank fills, against ~150. Within the
+same 8 MiB:
+
+| | until 2026-11-10 | now |
+| --- | ---: | ---: |
+| code cache | 3.25 MiB | 4.0625 MiB at 0x8CBF0000 |
+| block headers | 19200 | 25680 |
+| metadata arena | 2900 KiB | 1200 KiB |
+| lookup hash entries | 32768 | 65536 |
+
+Per block: ~165 bytes of code, ~46 of arena, 63 of header and side tables.
+The hash was doubled rather than left at 32768 for a few more headers:
+with 25680 blocks in 32768 direct-mapped slots about a third of the blocks
+would be out of the hash at any time, against a sixth now (a quarter with
+the old layout). `print_stats` now always says what filled the banks. Two
+boots through the scenario: 24-25 banks filled, 14-15 by headers and 9-10
+by code (both can hold), none by the arena; a full bank held 2102 of 2140
+headers, 336 of 347 KiB of code and 75 of 100 KiB of arena. The scenario
+took 13 bank recycles and 44-48k translations (stats every 4000), against
+33 and 57-59k with the old layout. Rebuilds 1550-1570 (overflow buffer
+19-49 times), 1000 blocks resident by the hint.
+
+No time was measured, on the user's instruction: the figures above are
+counts. The image ends near 0x8CBC9C00, 25 KiB below the stack's reserve; `make
+DEVICE=1 hhk` links. All guests pass as before (`interior` fails the same
+two reuse checks with and without the change); `flush` translates more
+before the cache is full and needs more than the default 20 s of emulator
+time when other emulators run beside it.
+
+**What this costs.** Code that is not in a ROM region keeps its metadata
+(RAM can change under a block). The arena now holds about 670 such blocks
+per bank where it held 1600, so a program loaded into RAM from a storage
+card or the object store gets about 8000 blocks, not 19200. Nothing in the
+image runs from RAM today. `LAZY_META=0` with the old layout (the Makefile
+comment has the values) is the way back; letting metadata and code share a
+bank's memory would remove the fixed split.
+
+**Deferred interrupts (prototype, not adopted).** The other consumer of
+metadata, an interrupt inside a block, can be delivered at the block's
+exit instead: mask interrupts (SSR.IMASK = 15), unchain the block's links,
+empty its IC, point its pool literals for `dbt_lookup_link` and
+`dbt_lookup_ic` at a `trapa`, and deliver the interrupt from that trap
+with the guest state canonical. Blocks that read or write SR, `sleep` or
+`trapa` are not deferred, nor is an interrupt inside a link's patch window
+or the IC sequence. It passes all guests (the first version, which
+unmasked at the exit and waited for the request to fire again, failed
+seven tmu loops: the interrupt was not taken there and was deferred again
+and again) and boots CE; rebuilds fell from 1748 to 685. It is not in the
+tree: the remaining gain is small, it adds 8 bytes to the IL memory
+(4080 of 4096) for reloading SPC and SSR on the resume path, and in two
+boots one tap each got 2 and 10 touch samples where 22-37 is usual, which
+was not explained. The patch is `notes/defer-irq-prototype.patch`
+(against d0513e3, with the census counters).
+
+**Test recipe.** The double tap that opens My Device, `35,40,700000,3000;
+35,40,706000,3000`, only counted as a double click when the first tap was
+processed late: it usually opened the folder with the old layout and
+never in five boots with the new one, although the touch driver reported
+both taps. `35,40,700000,1200;35,40,702400,1200` opened it in two of two.
+
 ### fmov.s between memory and FR registers in line (2026-11-14)
 
 The item left open above. `tr_fpu_inline` now also translates the six

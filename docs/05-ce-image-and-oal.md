@@ -63,8 +63,8 @@ bytes before handing it to `HLE_OSROM`.
 | 0x80EE0000-0x813DFFFF | NOR: the NK region, executed in place (XIP), in the hole inside Casio's OS image since 2026-11-09 (docs/03; the eActivity area 0x83860000 from 2026-11-05 to then, 0x81000000 with 3.875 MiB before) | 7.625 MiB |
 | 0x83860000-0x83FFFFFF | NOR: the EXT region (XIP, Math Xpander and mfcce300), the eActivity area since 2026-11-09 (the hole before), chained by the OAL (docs/03) | 7.625 MiB |
 | 0x8C000000-0x8C7FFFFF | guest: CE RAM (the whole window, BOOTARGS page first, debug ring last; a RAMIMAGE build puts its image here too). Until 2026-11-06 the first MiB was left to the launcher / Casio OS workspace (Casio's VRAM on the device) and CE had 0x8C100000-0x8C8FFFFF; nothing uses that MiB after the no-return handoff. On 2026-11-06 the window briefly ran to 0x8CB4FFFF (11.3 MiB, with a 2 MiB cache, 9600 headers and a 1752 KiB arena) | 8 MiB |
-| 0x8C800000-0x8CCBFFFF | translator text/data/bss (19200 block headers, 2900 KiB metadata arena, 32768-entry lookup hash) + 128 KiB C stack; 14400 / 2624 KiB with a 4 MiB cache on 2026-11-06 | 4.75 MiB |
-| 0x8CCC0000-0x8CFFFFFF | code cache (4 MiB on 2026-11-06, 3 MiB from 2026-11-05; since 2026-11-07 sized by what fills a bank, docs/04) | 3.25 MiB |
+| 0x8C800000-0x8CBEFFFF | translator text/data/bss (25680 block headers, 1200 KiB metadata arena, 65536-entry lookup hash) + 128 KiB C stack; 19200 / 2900 KiB / 32768 with a 3.25 MiB cache until 2026-11-10, 14400 / 2624 KiB with a 4 MiB cache on 2026-11-06 | 3.9375 MiB |
+| 0x8CBF0000-0x8CFFFFFF | code cache (3.25 MiB from 2026-11-07, 4 MiB on 2026-11-06, 3 MiB from 2026-11-05; since 2026-11-10 sized for metadata on demand, docs/04) | 4.0625 MiB |
 
 The layout is defined once in `dbt/Makefile` (`GUEST_RAM_*`, `IMAGE_BASE`,
 `CACHE_*`) and reaches the C code, the launcher and the linker script from

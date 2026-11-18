@@ -13,10 +13,15 @@ BUILD    ?= build
 # RAM layout (16 MiB at 0x8C000000), the single place these addresses live:
 #   0x8C000000-0x8C7FFFFF  guest window: 8 MiB (config.bib BOOTARGS/RAM/DBGRING;
 #                          test guests are linked at GUEST_LINK 0x8C100000)
-#   0x8C800000-0x8CCBFFFF  translator image (19200 headers, 2900 KiB arena,
-#                          32768-entry lookup hash) and its 128 KiB C stack
+#   0x8C800000-0x8CBEFFFF  translator image (25680 headers, 1200 KiB arena,
+#                          65536-entry lookup hash) and its 128 KiB C stack
 #                          below the top
-#   0x8CCC0000-0x8CFFFFFF  code cache, 3.25 MiB
+#   0x8CBF0000-0x8CFFFFFF  code cache, 4.0625 MiB
+# Since 2026-11-10 recovery metadata is built on demand (LAZY_META=1), so a
+# block's arena share fell from ~150 to ~34 bytes (links and the relocation
+# record) and the arena shrank from 2900 to 1200 KiB; the 1.7 MiB went to a
+# third more headers with the code space for them, and to the 65536-entry
+# hash that did not fit before (docs/04 "Metadata on demand by default").
 # Since 2026-11-07 the split follows what fills a cache bank: with 4 MiB /
 # 14400 / 2624 KiB, 33 of 34 banks recycled during a My Device load ran out
 # of headers with only 56% of their code space used (a block averages ~160
@@ -42,11 +47,11 @@ GUEST_RAM_LO ?= 0x8C000000
 GUEST_RAM_HI ?= 0x8C800000
 GUEST_LINK   := 0x8C100000
 IMAGE_BASE   ?= 0x8C800000
-IMAGE_STACK  ?= 0x8CCC0000
-CACHE_BASE   ?= 0x8CCC0000
-CACHE_SIZE   ?= 0x00340000
-BLOCKS       ?= 19200
-ARENA_KB     ?= 2900
+IMAGE_STACK  ?= 0x8CBF0000
+CACHE_BASE   ?= 0x8CBF0000
+CACHE_SIZE   ?= 0x00410000
+BLOCKS       ?= 25680
+ARENA_KB     ?= 1200
 LAYOUT_DEFS  := -DGUEST_RAM_LO=$(GUEST_RAM_LO)u -DGUEST_RAM_HI=$(GUEST_RAM_HI)u -DGUEST_LINK=$(GUEST_LINK)u -DIMAGE_BASE=$(IMAGE_BASE) \
                 -DCACHE_BASE=$(CACHE_BASE)u -DCACHE_SIZE=$(CACHE_SIZE)u -DMAX_BLOCKS=$(BLOCKS) -DMETA_ARENA_BYTES=$(ARENA_KB)*1024u
 LAYOUT_LD    := -Wl,--defsym,IMAGE_BASE=$(IMAGE_BASE) -Wl,--defsym,_image_stack_top=$(IMAGE_STACK) -Wl,--defsym,GUEST_RAM_LO=$(GUEST_RAM_LO)
@@ -148,10 +153,13 @@ HOST_CFLAGS  += $(if $(filter 1,$(STANDBY_SEARCH)),-DDBT_STANDBY_SEARCH,)
 MARQUEE ?= 1
 HOST_CFLAGS  += $(if $(filter 1,$(DEVICE)),-DDBT_NO_DEBUG_PORT -DDBT_IRQPIN_GUARD $(if $(filter 1,$(MARQUEE)),-DDBT_BOOT_MARQUEE,) $(if $(filter 1,$(CONSOLE)),-DDBT_LCD_CONSOLE,) $(if $(filter 1,$(FLASHLOG)),-DDBT_FLASH_LOG,),)
 # Code cache policy (docs/04 "Metadata on demand, second chance"):
-# LAZY_META=1 keeps no recovery metadata for ROM blocks until an exception
-# lands in one (the block is translated again to rebuild it); SECOND_CHANCE=1
-# keeps the blocks used while their bank waited for reuse, moved to its start.
-LAZY_META     ?= 0
+# LAZY_META=1 (default since 2026-11-10) keeps no recovery metadata for ROM
+# blocks until an exception lands in one (the block is translated again to
+# rebuild it); LAZY_META=0 keeps it for every block and needs the old layout
+# (CACHE_BASE=IMAGE_STACK=0x8CCC0000 CACHE_SIZE=0x00340000 BLOCKS=19200
+# ARENA_KB=2900 HASH_ENTRIES=32768). SECOND_CHANCE=1 keeps the blocks used
+# while their bank waited for reuse, moved to its start.
+LAZY_META     ?= 1
 SECOND_CHANCE ?= 1
 HOST_CFLAGS  += $(if $(filter 1,$(LAZY_META)),-DDBT_LAZY_META,) $(if $(filter 1,$(SECOND_CHANCE)),-DDBT_SECOND_CHANCE,)
 # KDEV=1: only the kernel functions listed in rt/kernel_dev.h (CE 6.0
@@ -168,13 +176,14 @@ HOST_CFLAGS  += $(if $(filter 1,$(KDEV)),-DDBT_KDEV,)
 # switch no longer empties the user entries (72% of the C lookups that found
 # their block outside the hash), and an IC miss on a user target is served
 # from the hash in the stub instead of in C. HASH_ENTRIES: lookup hash size
-# (12 bytes each; 32768 since the 19200-header layout, docs/04).
+# (12 bytes each; 32768 with the 19200-header layout, 65536 since the
+# 25680-header one of 2026-11-10, docs/04).
 HASH_TAG      ?= 1
 # USER_IC_REFILL=1 (with HASH_TAG=1): such a hash hit also refills the site's
 # inline cache, so the next jump from there stays in translated code. Without
 # it a user IC emptied by an address-space switch was never filled again.
 USER_IC_REFILL ?= 1
-HASH_ENTRIES  ?= 32768
+HASH_ENTRIES  ?= 65536
 # TLB_REFILL=1: UTLB misses in translated code are refilled by the translator
 # with the kernel's own page-table walk (rt.c tlb_refill: CE 6.0's page
 # directories, or CE 5.0's SectionTable/MEMBLOCK walk) instead of an
