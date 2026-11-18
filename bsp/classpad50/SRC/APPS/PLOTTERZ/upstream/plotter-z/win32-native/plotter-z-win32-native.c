@@ -1241,6 +1241,28 @@ static int getDlgInt(HWND hDlg, int id) {
     return (int)Utils_Atoi(szBuf);
 }
 
+/* Clamp one grid field to [5, iMax]. A value that had to change is written
+ * back into the edit box and described in szMsg, so OK never silently
+ * keeps a different number from the one that was typed. */
+static int checkGridField(HWND hDlg, int id, const TCHAR* szName, int iMax,
+                          TCHAR* szMsg, int* pbFixed) {
+    int iGrid = getDlgInt(hDlg, id);
+    int iNew = iGrid;
+    if (iNew < 5) iNew = 5;
+    if (iNew > iMax) iNew = iMax;
+    if (iNew != iGrid) {
+        TCHAR szLine[96];
+        TCHAR szNum[16];
+        wsprintf(szLine, TEXT("The value for %s must be between 5 and %d. It has been changed to %d.\n"),
+                 szName, iMax, iNew);
+        lstrcat(szMsg, szLine);
+        wsprintf(szNum, TEXT("%d"), iNew);
+        SetDlgItemText(hDlg, id, szNum);
+        *pbFixed = 1;
+    }
+    return iNew;
+}
+
 /*====================================================
  * Window Editor dialog procedure
  *   Edit Camera x/y/z bounds and grid resolution.
@@ -1276,8 +1298,24 @@ static LRESULT CALLBACK WindowEditorDlgProc(HWND hDlg, UINT message, WPARAM wPar
             switch (LOWORD(wParam)) {
                 case IDOK: {
                     HWND hWndParent;
-                    int iGrid;
+                    int iXGrid, iYGrid, iUGrid, iVGrid;
+                    int bFixed = 0;
+                    TCHAR szMsg[512];
                     hWndParent = GetParent(hDlg);
+
+                    /* Check the grids first: if one is out of range, show
+                     * the corrected values and let the user confirm with
+                     * another OK; nothing is applied until then. */
+                    szMsg[0] = TEXT('\0');
+                    iXGrid = checkGridField(hDlg, IDC_WIN_XGRID, TEXT("X Grid"), X_GRID_MAX, szMsg, &bFixed);
+                    iYGrid = checkGridField(hDlg, IDC_WIN_YGRID, TEXT("Y Grid"), Y_GRID_MAX, szMsg, &bFixed);
+                    iUGrid = checkGridField(hDlg, IDC_WIN_UGRID, TEXT("U Grid"), U_GRID_MAX, szMsg, &bFixed);
+                    iVGrid = checkGridField(hDlg, IDC_WIN_VGRID, TEXT("V Grid"), V_GRID_MAX, szMsg, &bFixed);
+                    if (bFixed) {
+                        lstrcat(szMsg, TEXT("\nCheck the values, and then click OK again."));
+                        MessageBox(hDlg, szMsg, TEXT("Plotter-Z"), MB_OK | MB_ICONEXCLAMATION);
+                        return TRUE;
+                    }
 
                     Camera.xMin = getDlgFloat(hDlg, IDC_WIN_XMIN);
                     Camera.xMax = getDlgFloat(hDlg, IDC_WIN_XMAX);
@@ -1290,25 +1328,10 @@ static LRESULT CALLBACK WindowEditorDlgProc(HWND hDlg, UINT message, WPARAM wPar
                     Camera.vMin = getDlgFloat(hDlg, IDC_WIN_VMIN);
                     Camera.vMax = getDlgFloat(hDlg, IDC_WIN_VMAX);
 
-                    iGrid = getDlgInt(hDlg, IDC_WIN_XGRID);
-                    if (iGrid < 5) iGrid = 5;
-                    if (iGrid > X_GRID_MAX) iGrid = X_GRID_MAX;
-                    Camera.xGrid = iGrid;
-
-                    iGrid = getDlgInt(hDlg, IDC_WIN_YGRID);
-                    if (iGrid < 5) iGrid = 5;
-                    if (iGrid > Y_GRID_MAX) iGrid = Y_GRID_MAX;
-                    Camera.yGrid = iGrid;
-
-                    iGrid = getDlgInt(hDlg, IDC_WIN_UGRID);
-                    if (iGrid < 5) iGrid = 5;
-                    if (iGrid > U_GRID_MAX) iGrid = U_GRID_MAX;
-                    Camera.uGrid = iGrid;
-
-                    iGrid = getDlgInt(hDlg, IDC_WIN_VGRID);
-                    if (iGrid < 5) iGrid = 5;
-                    if (iGrid > V_GRID_MAX) iGrid = V_GRID_MAX;
-                    Camera.vGrid = iGrid;
+                    Camera.xGrid = iXGrid;
+                    Camera.yGrid = iYGrid;
+                    Camera.uGrid = iUGrid;
+                    Camera.vGrid = iVGrid;
 
                     EndDialog(hDlg, IDOK);
                     return TRUE;
@@ -2002,8 +2025,8 @@ static BOOL LoadSession(HWND hWnd) {
         Camera.vMax = (PZ_FLOAT)Utils_Atof(PineIni_Section_GetString(pSec, "vmax", "6.2832"));
         Camera.xGrid = PineIni_Section_GetInt(pSec, "xgrid", SAMPLE_DEFAULT_GRID);
         Camera.yGrid = PineIni_Section_GetInt(pSec, "ygrid", SAMPLE_DEFAULT_GRID);
-        Camera.xGrid = PineIni_Section_GetInt(pSec, "ugrid", SAMPLE_DEFAULT_GRID);
-        Camera.yGrid = PineIni_Section_GetInt(pSec, "vgrid", SAMPLE_DEFAULT_GRID);
+        Camera.uGrid = PineIni_Section_GetInt(pSec, "ugrid", SAMPLE_DEFAULT_GRID);
+        Camera.vGrid = PineIni_Section_GetInt(pSec, "vgrid", SAMPLE_DEFAULT_GRID);
         Camera.iZoomLevel = PineIni_Section_GetInt(pSec, "zoom", Camera.iZoomLevel);
         Camera.iFovLevel = PineIni_Section_GetInt(pSec, "fov", Camera.iFovLevel);
         Camera.iViewportX = PineIni_Section_GetInt(pSec, "viewx", Camera.iViewportX);
@@ -2230,7 +2253,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         Camera.xGrid = SAMPLE_DEFAULT_GRID;
                         Camera.yGrid = SAMPLE_DEFAULT_GRID;
                         Camera.uGrid = SAMPLE_DEFAULT_GRID;
-                        Camera.uGrid = SAMPLE_DEFAULT_GRID;
+                        Camera.vGrid = SAMPLE_DEFAULT_GRID;
                         switch (p->iFuncType) {
                             case FUNC_TYPE_CARTESIAN:
                                 Utils_StringCopy(g_szCartExpr, CART_EXPR_LENGTH, p->szExpr[0]);
