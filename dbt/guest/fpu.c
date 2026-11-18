@@ -161,6 +161,76 @@ static unsigned test_pair_move(unsigned *out)
     return r0;
 }
 
+/* fmov.s between memory and FR registers, the forms the translator does in
+ * line (tr_fpu_inline kinds 10-15): r4 = buf[8]. out[] gets the pointers
+ * after the post-increment and the pre-decrement. */
+static unsigned test_fmov_forms(unsigned *buf, unsigned *out)
+{
+    register unsigned *r4 __asm__("r4") = buf;
+    register unsigned r0 __asm__("r0");
+    register unsigned r1 __asm__("r1");
+    register unsigned r2 __asm__("r2");
+    register unsigned r3 __asm__("r3");
+    __asm__ volatile (
+        "mov r4, r1\n\t"
+        "sett\n\t"
+        ".word 0xF119\n\t"      /* fmov.s @r1+,fr1   : buf[0] */
+        ".word 0xF219\n\t"      /* fmov.s @r1+,fr2   : buf[1], r1 = buf+2 */
+        "movt r3\n\t"           /* T kept: 1 */
+        "mov r4, r2\n\t"
+        "add #16, r2\n\t"
+        ".word 0xF21B\n\t"      /* fmov.s fr1,@-r2   : buf[3] = buf[0], r2 = buf+3 */
+        ".word 0xF22A\n\t"      /* fmov.s fr2,@r2    : buf[3] = buf[1] */
+        "mov #20, r0\n\t"
+        ".word 0xF417\n\t"      /* fmov.s fr1,@(r0,r4): buf[5] = buf[0] */
+        "mov #4, r0\n\t"
+        ".word 0xF346\n\t"      /* fmov.s @(r0,r4),fr3: buf[1] */
+        ".word 0xFBFD\n\t"      /* frchg: bank 1 */
+        ".word 0xF148\n\t"      /* fmov.s @r4,fr1 (bank 1): buf[0] */
+        "mov #24, r0\n\t"
+        ".word 0xF417\n\t"      /* fmov.s fr1,@(r0,r4): buf[6] = buf[0], from bank 1 */
+        ".word 0xFBFD\n\t"      /* frchg: bank 0 */
+        "mov #28, r0\n\t"
+        ".word 0xF437\n\t"      /* fmov.s fr3,@(r0,r4): buf[7] = buf[1] */
+        ".word 0xF31D\n\t"      /* flds fr3,fpul */
+        ".word 0x005A"          /* sts fpul,r0 */
+        : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3) : "r"(r4) : "memory", "t");
+    out[0] = r1; out[1] = r2; out[2] = r3;
+    return r0;
+}
+
+/* SZ=1: the same opcodes move pairs, through the helper (the in-line
+ * path's slow range). r4 = buf[4]: dr0 <- buf[0..1], post-increment by 8,
+ * then dr0 -> @-r2. */
+static unsigned test_fmov_pair_mem(unsigned *buf, unsigned *out)
+{
+    register unsigned *r4 __asm__("r4") = buf;
+    register unsigned r0 __asm__("r0");
+    register unsigned r1 __asm__("r1");
+    register unsigned r2 __asm__("r2");
+    __asm__ volatile (
+        "mov.l 3f, r1\n\t"
+        ".word 0x416A\n\t"      /* lds r1,fpscr : SZ=1 */
+        "mov r4, r1\n\t"
+        ".word 0xF019\n\t"      /* fmov @r1+,dr0 : buf[0], buf[1]; r1 = buf+2 */
+        "mov r4, r2\n\t"
+        "add #16, r2\n\t"
+        ".word 0xF20B\n\t"      /* fmov dr0,@-r2 : buf[2], buf[3]; r2 = buf+2 */
+        "mov.l 1f, r0\n\t"
+        ".word 0x406A\n\t"      /* SZ=0 */
+        ".word 0xF01D\n\t"      /* flds fr0,fpul */
+        ".word 0x005A\n\t"      /* sts fpul,r0 */
+        "bra 2f\n\t"
+        "nop\n\t"
+        ".align 2\n"
+        "1: .long 0x00040000\n"
+        "3: .long 0x00140000\n"
+        "2:\n\t"
+        : "=r"(r0), "=r"(r1), "=r"(r2) : "r"(r4) : "memory", "t");
+    out[0] = r1; out[1] = r2;
+    return r0;
+}
+
 void guest_main(void)
 {
     unsigned buf[2] = { 0, 0 };
@@ -182,6 +252,22 @@ void guest_main(void)
         check("fmov/flds/fldi in line, banks, T kept", v == 0x3F800000u && o[0] == 0 && o[1] == 1 && o[2] == 0x3F800000u);
         v = test_pair_move(o);
         check("fmov pair with SZ=1", v == 0x3F800000u && o[0] == 0x3F800000u);
+        {
+            unsigned b[8] = { 0x40490FDBu, 0xC0000000u, 0, 0, 0, 0, 0, 0 }, p[3] = { 0, 0, 0 };
+            set_fpscr(0x00040000u);
+            v = test_fmov_forms(b, p);
+            check("fmov.s @rm+ twice: pointer +8, T kept", p[0] == (unsigned)(b + 2) && p[2] == 1);
+            check("fmov.s frm,@-rn then frm,@rn", p[1] == (unsigned)(b + 3) && b[3] == 0xC0000000u);
+            check("fmov.s indexed store and load", b[5] == 0x40490FDBu && v == 0xC0000000u && b[7] == 0xC0000000u);
+            check("fmov.s memory forms in bank 1", b[6] == 0x40490FDBu);
+            check("fmov.s left the other words alone", b[0] == 0x40490FDBu && b[1] == 0xC0000000u && b[2] == 0 && b[4] == 0);
+        }
+        {
+            unsigned b[4] = { 0x12345678u, 0x9ABCDEF0u, 0, 0 }, p[2] = { 0, 0 };
+            v = test_fmov_pair_mem(b, p);
+            check("fmov pair from/to memory with SZ=1 (helper)", v == 0x12345678u && p[0] == (unsigned)(b + 2) && p[1] == (unsigned)(b + 2)
+                  && b[2] == 0x12345678u && b[3] == 0x9ABCDEF0u);
+        }
         check("lds fpscr masks to 22 bits", set_fpscr(0xFFFFFFFFu) == 0x003FFFFFu);
         set_fpscr(0x00040000u);
     }

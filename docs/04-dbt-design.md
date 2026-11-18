@@ -3221,3 +3221,47 @@ about 350 instructions for one swapped 32-bit move. Translating those in
 line means driving `tr_mem` from `tr_fpu_inline` with a borrowed register;
 the slots and the fault recovery of that combination have not been worked
 out.
+
+### fmov.s between memory and FR registers in line (2026-11-14)
+
+The item left open above. `tr_fpu_inline` now also translates the six
+single-precision memory forms (`fmov.s @rm,frn`, `@rm+`, `@(r0,rm)`,
+`frm,@rn`, `@-rn`, `@(r0,rn)`; `-DDBT_NO_FPU_INLINE_MEM` turns it off):
+after the same SR.FD and FPSCR.SZ tests as the register move, one native
+access and a byte swap between guest memory and fpuemu's register file, as
+`tr_mem_plain` does for `mov.l`. It did not need `tr_mem`: the address
+register is a guest register the two scratches avoid (`d->touched`), and
+the access is a plain `mov.l`.
+
+Recovery, by the existing rules:
+
+- loads without a side effect have no commit point: nothing the guest can
+  see changes before the last word, so an exception anywhere, the load's
+  own TLB miss included, restarts the instruction;
+- `@rm+` loads into the register file first and commits at its `add #4`;
+  stores commit at the store (`mov.l v,@-rn` for the pre-decrement, which
+  leaves `rn` alone when it faults);
+- T is restored *before* the commit point. In the slot of `bt/s` or `bf/s`
+  the range after the slot is `META_COND`, whose resume pc is decided by
+  SSR.T before the pending spills are undone; a commit with T still
+  holding the FD/SZ/bank tests sent the branch the wrong way (found by the
+  tmu guest's loops below, once in three timer periods);
+- the helper call for FD = 1 or SZ = 1 is in a second `META_INSN` range of
+  the same instruction, as `tr_mem_dev`'s slow path: the call is that
+  range's commit, and `resume_pc` skips the range after the fast path's
+  commit.
+
+Tests: `test_translate` checks, for each form alone and in a `bf/s` slot,
+the two ranges, where the commit is and that no T spill is open across
+it; `fpu` runs the six forms, bank 1 and the SZ = 1 pair forms through the
+helper; `fpudis` takes the FPU-disable exception on `fmov.s @r4+` and
+checks one increment after the retry; `tmu` runs four loops (post-increment
+load, pre-decrement store, indexed, both in `jsr` and `bf/s` slots) under
+interrupts at four timer periods. All guests pass (`usbfn` fails its six
+bus checks with and without the change: no USB host in the emulator run).
+
+Measured on the 2026-11-14 CE 5.0 image, Plotter-Z's Ackley Function
+sample (exp, sqrt, cos per point; 20x20), emulated instructions from the
+Render tap to the final `Redraw`: 208M with `-DDBT_NO_FPU_INLINE_MEM`,
+158M in line (-24%); the two frames are identical pixel for pixel. Boot
+to the taskbar is unchanged (1306M / 1310M).

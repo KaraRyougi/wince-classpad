@@ -1299,7 +1299,9 @@ static int tr_fpu_inline(tctx *t, const sh_insn *d, int in_slot)
     emitter *e = &t->em;
     sf_u32 op = d->op;
     int n = (op >> 8) & 15, m = (op >> 4) & 15;
-    int kind, a, v, bf_fd, bf_sz = -1, bra_done, slow, done, skip;
+    int kind, a, v, bf_fd, bf_sz = -1, bra_done, slow, done, skip, t_restored = 0;
+    sf_u32 goff = t->gpc - t->blk->guest_pc;
+    dbt_imeta parent = *t->cur;                   /* a branch range when this is a delay slot */
     if (!t->env->fpu_fr) return 0;
     switch (op & 0xF0FFu) {
     case 0x405A: kind = 1; break;                 /* lds rm,fpul */
@@ -1312,6 +1314,18 @@ static int tr_fpu_inline(tctx *t, const sh_insn *d, int in_slot)
     case 0xF01D: kind = 8; break;                 /* flds frm,fpul */
     default:
         if ((op & 0xF00Fu) == 0xF00Cu) kind = 9;  /* fmov frm,frn */
+#ifndef DBT_NO_FPU_INLINE_MEM
+        /* fmov.s between memory and a register (FPSCR.SZ = 0): one native
+         * access and a byte swap, as tr_mem_plain does for mov.l. These were
+         * about 70% of the FPU instructions that still reached the helper
+         * (the CE compiler's loads, stores and register saves). */
+        else if ((op & 0xF00Fu) == 0xF008u) kind = 10;   /* fmov.s @rm,frn */
+        else if ((op & 0xF00Fu) == 0xF009u) kind = 11;   /* fmov.s @rm+,frn */
+        else if ((op & 0xF00Fu) == 0xF006u) kind = 12;   /* fmov.s @(r0,rm),frn */
+        else if ((op & 0xF00Fu) == 0xF00Au) kind = 13;   /* fmov.s frm,@rn */
+        else if ((op & 0xF00Fu) == 0xF00Bu) kind = 14;   /* fmov.s frm,@-rn */
+        else if ((op & 0xF00Fu) == 0xF007u) kind = 15;   /* fmov.s frm,@(r0,rn) */
+#endif
         else return 0;
     }
     if (t->blk->nspills + 6 > DBT_MAX_BLOCK_SPILLS) return 0;
@@ -1334,7 +1348,7 @@ static int tr_fpu_inline(tctx *t, const sh_insn *d, int in_slot)
     default:
         /* the bank: FPSCR.FR (bit 21) adds 64 bytes; fmov also needs SZ (bit 20) clear */
         emit_mov_lit(e, a, t->env->fpu_fpscr, TAG_NONE); emit16(e, OP_MOVL_LOAD(a, v));
-        if (kind == 9) {
+        if (kind >= 9) {
             emit_mov_lit(e, a, 0x00100000u, TAG_NONE); emit16(e, OP_TST_RR(a, v));
             bf_sz = emit_pos(e); emit16(e, OP_BF(0));
         }
@@ -1361,6 +1375,40 @@ static int tr_fpu_inline(tctx *t, const sh_insn *d, int in_slot)
             emit16(e, OP_MOVL_LOAD(a, a));
             emit_mov_lit(e, v, t->env->fpu_fpul, TAG_NONE); emit16(e, OP_MOVL_STORE(a, v));
             break;
+        case 10: case 11: case 12:                                                  /* fmov.s from memory to frn */
+            /* Nothing the guest can see changes before the last word, so
+             * an exception anywhere (the load's own TLB miss included)
+             * restarts the instruction once the spills are undone. The
+             * post-increment is the commit point: after it the instruction
+             * is complete and a resume goes on with the next range. T goes
+             * back before the commit: in the slot of bt/s or bf/s the next
+             * range decides by SSR.T, read before the spills are undone. */
+            emit_mov_lit(e, a, t->env->fpu_fr + 4u * n, TAG_NONE);
+            skip = emit_pos(e); emit16(e, OP_BT(0)); emit16(e, OP_ADD_IMM(64, a));
+            emit_patch16(e, skip, OP_BT((emit_pos(e) - skip - 4) / 2));
+            if (kind == 12) emit16(e, 0x000Eu | ((sf_u32)v << 8) | ((sf_u32)m << 4));  /* mov.l @(r0,rm),v */
+            else emit16(e, OP_MOVL_LOAD(m, v));
+            swap32(t, v, v);
+            emit16(e, OP_MOVL_STORE(v, a));
+            if (kind == 11) {
+                spill_t_restore(t, v); t_restored = 1;
+                commit(t, FIX_NONE, 0); emit16(e, OP_ADD_IMM(4, m));
+            }
+            break;
+        case 13: case 14: case 15:                                                  /* fmov.s frm to memory */
+            /* the store is the commit point, as for an integer store; T
+             * goes back before it (through a, free once v is loaded) */
+            emit_mov_lit(e, a, t->env->fpu_fr + 4u * m, TAG_NONE);
+            skip = emit_pos(e); emit16(e, OP_BT(0)); emit16(e, OP_ADD_IMM(64, a));
+            emit_patch16(e, skip, OP_BT((emit_pos(e) - skip - 4) / 2));
+            emit16(e, OP_MOVL_LOAD(a, v));
+            swap32(t, v, v);
+            spill_t_restore(t, a); t_restored = 1;
+            commit(t, FIX_NONE, 0);
+            if (kind == 13) emit16(e, OP_MOVL_STORE(v, n));
+            else if (kind == 14) emit16(e, OP_MOVL_PREDEC(v, n));
+            else emit16(e, 0x0006u | ((sf_u32)n << 8) | ((sf_u32)v << 4));           /* mov.l v,@(r0,rn) */
+            break;
         default:                                                                    /* fmov frm,frn, SZ = 0 */
             emit_mov_lit(e, a, t->env->fpu_fr + 4u * m, TAG_NONE);
             emit_mov_lit(e, v, t->env->fpu_fr + 4u * n, TAG_NONE);
@@ -1371,19 +1419,25 @@ static int tr_fpu_inline(tctx *t, const sh_insn *d, int in_slot)
         }
         break;
     }
-    spill_t_restore(t, v);
+    if (!t_restored) spill_t_restore(t, v);
     restore(t, v, SB(t)); restore(t, a, SA(t));
     bra_done = emit_pos(e); emit16(e, OP_BRA(0)); emit16(e, OP_NOP);
     /* slow: everything as the helper expects, then the helper */
     slow = emit_pos(e);
     emit_patch16(e, bf_fd, OP_BF((slow - bf_fd - 4) / 2));
     if (bf_sz >= 0) emit_patch16(e, bf_sz, OP_BF((slow - bf_sz - 4) / 2));
+    /* A fast path with a commit point needs the helper call in a range of
+     * its own (as tr_mem_dev's slow path): the call is that range's commit,
+     * and a resume after the fast path's commit skips it (resume_pc). */
+    if (kind >= 10) begin_meta_kind(t, META_INSN, goff, 0, 0);
     spill_reopen(t, a, SA(t)); spill_reopen(t, v, SB(t)); spill_reopen(t, DBT_SPILL_T, SC(t));
     spill_t_restore(t, v);
     restore(t, v, SB(t)); restore(t, a, SA(t));
     call_helper(t, t->env->rt_fpu, 0, 2, d->op | (in_slot ? 0x10000u : 0), d->touched);
     done = emit_pos(e);
     emit_patch16(e, bra_done, OP_BRA((done - bra_done - 4) / 2));
+    if (kind >= 10 && parent.kind != META_INSN)
+        begin_meta_kind(t, parent.kind, parent.guest_off, parent.target, parent.fallthrough);   /* inside a branch: keep its resume rule for what follows */
     return t->err == 0;
 }
 #endif

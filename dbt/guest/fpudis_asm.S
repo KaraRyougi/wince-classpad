@@ -67,6 +67,16 @@ _fpudis_stsfpscr_site:
         nop
 
         .align 2
+        .global _fpudis_fmovpost, _fpudis_fmovpost_site
+_fpudis_fmovpost:                      /* r4 = pointer: returns the word it points at, r1 = r4 afterwards */
+_fpudis_fmovpost_site:
+        .word   0xF049                 /* fmov.s @r4+,fr0 (in line when FD is clear, through the helper's range when set) */
+        .word   0xF01D                 /* flds fr0,fpul */
+        .word   0x005A                 /* sts fpul,r0 */
+        rts
+        mov     r4, r1
+
+        .align 2
         .global _fpudis_fsts, _fpudis_fsts_site
 _fpudis_fsts:                          /* r4 -> fpul -> fr0 -> fpul -> r0: four FPU instructions, the first one faults */
 _fpudis_fsts_site:
