@@ -18,8 +18,8 @@ handhelds. The image carries its Windows CE front end as
 Only what the CE program needs was copied: `common`, `formula-z`,
 `evaluator-z`, `renderer-z`, `plotter-z\utils` (font, samples),
 `plotter-z\win32-native` (the CE/Win32 front end, its resources and icon)
-and the two libraries upstream's `fetch-deps.sh` clones. None of the three
-repositories states a licence.
+and the two libraries upstream's `fetch-deps.sh` clones. Each of the three
+READMEs states the MIT License (no separate licence file was copied).
 
 **Local changes to `plotter-z-win32-native.c`** (each marked `ClassPad
 (2026-11-09)`; a recalculation of the Saddle Surface sample took 160 s under

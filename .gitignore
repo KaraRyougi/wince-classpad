@@ -1,4 +1,9 @@
+# Build output
 build/
+dbt/build/
+dbt/build-*/
+dbt/build-*.log
+/dbt/bench-integrated-normal/
 *.o
 *.elf
 *.bin
@@ -6,34 +11,38 @@ build/
 *.hh3
 *.nb0
 *.dSYM/
-__pycache__/
-.DS_Store
+
+# Host test programs (make test)
 fpuemu/tests/test_host
 dbt/tests/test_translate
-dbt/build/
-dbt/build-*/
+dbt/tests/test_translate_icrefill
+bsp/tests/test_touch_bus
+bsp/tests/test_timer
+bsp/tests/test_timer50
+bsp/tests/test_extrom
+bsp/tests/extrom-test.bin
+bsp/tests/test_peghelp
+bsp/tests/test_lcdrot
+bsp/tests/test_battery
+
+# Editor, OS and assistant state
+__pycache__/
+.DS_Store
+.claude/
+
+# Archives and material brought back from the Platform Builder VM:
+# only the text notes are kept
+*.7z
+*.zip
 notes/ce/*
 !notes/ce/*.md
 !notes/ce/*.txt
-*.7z
-*.zip
-
-bsp/tests/test_touch_bus
-
-bsp/tests/test_timer
-
-/dbt/bench-integrated-normal/
-bsp/tests/test_extrom
-bsp/tests/extrom-test.bin
 
 # Math Xpander binaries: copied into the VM package by stage.py, not committed
 bsp/classpad/FILES/xpander/*
 !bsp/classpad/FILES/xpander/README.md
 !bsp/classpad/FILES/xpander/mathxpander.lnk
-bsp/tests/test_peghelp
-dbt/tests/test_translate_icrefill
-bsp/tests/test_lcdrot
-bsp/tests/test_battery
+
 # SpreadCE (shareware, Bye Design): prepared by tools/sh3prep.py into the VM tree, not committed
 bsp/classpad50/FILES/spreadce/*
 !bsp/classpad50/FILES/spreadce/README.md
