@@ -169,6 +169,7 @@ typedef char check_bank_mask[(CACHE_BANKS <= 16) ? 1 : -1];
 typedef char check_bank_blocks[(MAX_BLOCKS % CACHE_BANKS == 0) ? 1 : -1];
 typedef char check_page_indices[(MAX_BLOCKS * 2 < 65535) ? 1 : -1];
 static unsigned g_bank, g_bank_count[CACHE_BANKS], g_allocated, g_bank_evictions;
+static sf_u32 g_bank_full[6];   /* banks that ran out of headers / code / arena; headers, code KiB and arena KiB those banks held, summed */
 #ifdef DBT_INTERIOR_CACHE
 #ifndef DBT_INTERIOR_ENTRY
 #error DBT_INTERIOR_CACHE requires DBT_INTERIOR_ENTRY
@@ -841,6 +842,10 @@ static void unchain(dbt_block *o, int k)
 #ifndef DBT_EAGER_DETACH
 #define DBT_LAZY_DETACH 1        /* -DDBT_EAGER_DETACH: detach after every kill, as before 2026-11-09 */
 #endif
+/* The redirect invalidate_block writes over a dead block's entry: eight
+ * instructions (the last one the jmp's delay slot) and three literals. */
+#define DEAD_REDIRECT_CODE  16u
+#define DEAD_REDIRECT_BYTES 28u
 #define PEND_RANGES 4                  /* beyond this the 32-byte map: pend_dead runs for every IC and link target in the span */
 static sf_u32 g_pend_lo[PEND_RANGES], g_pend_len[PEND_RANGES];
 static unsigned g_npend, g_pend_over, g_pend_banks;
@@ -1665,7 +1670,11 @@ static int lazy_eligible(sf_u32 gpc, sf_u32 phys, sf_u32 hi)
             if (utlb_translate(page, g_asid) != phys + (page - gpc)) return 0;
     }
 #ifndef DBT_LAZY_META_ALL
-    if (!g_cfg.rom_hi || phys < g_cfg.rom_lo || phys + (hi - gpc) > g_cfg.rom_hi) return 0;
+    /* either ROM region: the EXT one (Math Xpander, SpreadCE, WordPad) is
+     * as immutable as NK, and without it those programs' blocks kept ~150
+     * bytes of metadata each in an arena sized for ~46 */
+    if (!((g_cfg.rom_hi && phys >= g_cfg.rom_lo && phys + (hi - gpc) <= g_cfg.rom_hi) ||
+          (g_cfg.rom2_hi && phys >= g_cfg.rom2_lo && phys + (hi - gpc) <= g_cfg.rom2_hi))) return 0;
 #endif
     return 1;
 }
@@ -1730,11 +1739,37 @@ static void ensure_meta(const dbt_block *cb)
         if (g_scratch_links[k].jump_off != b->links[k].jump_off || g_scratch_links[k].lit_off != b->links[k].lit_off ||
             g_scratch_links[k].stub_off != b->links[k].stub_off)
             regen_diverged(b, "different links");
-    for (w = 0; w < (unsigned)b->code_len / 2; ++w) {
+    /* A dead block's entry holds invalidate_block's redirect, not its code:
+     * the rest is still the translation (an exception may land there when
+     * the block died under a helper it called). */
+    w = 0;
+#ifdef DBT_LAZY_DETACH
+    if (g_binfo[index].dead) w = DEAD_REDIRECT_BYTES / 2;
+#endif
+    for (; w < (unsigned)b->code_len / 2; ++w) {
         unsigned byte = w * 2;
         for (k = 0; k < b->nlinks; ++k)
             if (byte + 2 >= b->links[k].jump_off && byte < (unsigned)b->links[k].jump_off + 6) break;
-        if (k == b->nlinks && g_regen_code[w] != live[w]) regen_diverged(b, "different code");
+        if (k == b->nlinks && g_regen_code[w] != live[w]) {
+            unsigned i, lo = w > 6 ? w - 6 : 0, hi = w + 10 < (unsigned)b->code_len / 2 ? w + 10 : (unsigned)b->code_len / 2;
+            dbt_puts("[dbt] rebuild differs at host word "); dbt_puthex(w); dbt_puts(" of "); dbt_puthex((sf_u32)b->code_len / 2);
+            dbt_puts(" asid="); dbt_puthex(g_binfo[index].asid); dbt_puts(" now="); dbt_puthex(g_asid);
+            dbt_puts(" phys="); dbt_puthex(g_binfo[index].phys); dbt_puts(" guest_len="); dbt_puthex((sf_u32)b->guest_len);
+            dbt_puts(" ic_off="); dbt_puthex((sf_u32)b->ic_off); dbt_puts(" links:");
+            for (k = 0; k < b->nlinks; ++k) { dbt_puts(" "); dbt_puthex((sf_u32)b->links[k].jump_off); }
+            dbt_puts("\n[dbt]  live :");
+            for (i = lo; i < hi; ++i) { dbt_puts(i == w ? " >" : " "); dbt_puthex(live[i]); }
+            dbt_puts("\n[dbt]  built:");
+            for (i = lo; i < hi; ++i) { dbt_puts(i == w ? " >" : " "); dbt_puthex(g_regen_code[i]); }
+            dbt_puts("\n[dbt]  guest:");
+            for (i = 0; i < (unsigned)b->guest_len / 2 && i < 40; ++i) {
+                sf_u32 op = 0;
+                regen_fetch16(&rc, b->guest_pc + 2 * i, &op);
+                dbt_puts(" "); dbt_puthex(op);
+            }
+            dbt_puts("\n");
+            regen_diverged(b, "different code");
+        }
     }
     nm = dbt_pack_meta(g_lazy_pack, &g_regen);
     ns = (sf_u32)g_regen.nspills * sizeof(dbt_spill);
@@ -2201,6 +2236,15 @@ static dbt_block *translate_at(sf_u32 gpc)
     if (g_bank_count[g_bank] >= BANK_BLOCKS ||
         g_cache_used + DBT_BLOCK_WORDS * 2 > (g_bank + 1) * bank_code_bytes() ||
         g_arena_used + SCRATCH_ARENA_NEED > (g_bank + 1) * bank_arena_bytes()) {
+        /* why banks fill (several may hold), and what the full bank held:
+         * the layout is right when headers and code run out together and
+         * the arena never does (dbt/Makefile, docs/04) */
+        if (g_bank_count[g_bank] >= BANK_BLOCKS) ++g_bank_full[0];
+        if (g_cache_used + DBT_BLOCK_WORDS * 2 > (g_bank + 1) * bank_code_bytes()) ++g_bank_full[1];
+        if (g_arena_used + SCRATCH_ARENA_NEED > (g_bank + 1) * bank_arena_bytes()) ++g_bank_full[2];
+        g_bank_full[3] += g_bank_count[g_bank];
+        g_bank_full[4] += (g_cache_used - g_bank * bank_code_bytes()) >> 10;
+        g_bank_full[5] += (g_arena_used - g_bank * bank_arena_bytes()) >> 10;
 #ifdef DBT_HASH_DIAG
         /* why banks fill: 11 headers, 12 code, 13 metadata (several may hold) */
         if (g_bank_count[g_bank] >= BANK_BLOCKS) ++g_hash_diag[11];
@@ -2940,6 +2984,9 @@ static void print_stats(void)
     dbt_puts(" lcd_pixels="); dbt_puthex(dbt_stat.lcd_pixels);
     dbt_puts(" resumes="); dbt_puthex(dbt_stat.resumes);
     dbt_puts("/"); dbt_puthex(dbt_stat.resumes_committed);
+    dbt_puts("\n[dbt] banks full by headers="); dbt_puthex(g_bank_full[0]); dbt_puts(" code="); dbt_puthex(g_bank_full[1]);
+    dbt_puts(" arena="); dbt_puthex(g_bank_full[2]); dbt_puts(" held headers="); dbt_puthex(g_bank_full[3]);
+    dbt_puts(" codeKiB="); dbt_puthex(g_bank_full[4]); dbt_puts(" arenaKiB="); dbt_puthex(g_bank_full[5]);
 #ifdef DBT_LAZY_META
     dbt_puts("\n[dbt] meta rebuilt="); dbt_puthex(g_lazy_regens); dbt_puts(" kept="); dbt_puthex(g_lazy_kept);
     dbt_puts(" overflow="); dbt_puthex(g_lazy_transient); dbt_puts(" resident="); dbt_puthex(g_lazy_resident);
@@ -3974,6 +4021,11 @@ static sf_u32 guest_pc_of_host(sf_u32 host, const dbt_gctx *ctx)
     dbt_block *b = block_of_host(host);
     int idx, committed;
     if (!b) dbt_halt("stub target not in a block");
+    /* A block entry (a lookup that hit, or one that went through C): the
+     * guest pc is the block's and no metadata is needed. Most interrupts in
+     * the stub tails are of this kind, since they wait there for the end of
+     * a masked lookup or translation. */
+    if (host == b->host_base) return b->guest_pc;
     return resume_pc(b, host - b->host_base, ctx, &idx, &committed);
 }
 
@@ -4494,6 +4546,23 @@ static int exc_c_body(dbt_gctx *ctx)
         } else {
             sf_u32 off = ctx->host_spc - b->host_base;
             ref_mark((unsigned)(b - g_blocks));     /* exceptions and timer ticks are use too */
+#ifdef DBT_LAZY_DETACH
+            if (g_binfo[b - g_blocks].dead && off < DEAD_REDIRECT_CODE) {
+                /* In the redirect that invalidate_block wrote over a dead
+                 * block's entry (a stale link, IC or hash entry led here):
+                 * the guest state is that of the block's entry, with r1 in
+                 * Y0 once the first instruction has run. The block's own
+                 * metadata describes the code that used to be here: until
+                 * 2026-11-10 it was applied to these offsets, which resumed
+                 * the guest some instructions into the block without having
+                 * run them, r1 still holding the redirect's scratch value
+                 * (and with LAZY_META the rebuild did not match and halted). */
+                if (off) ctx->r[1] = ctx->slots[SLOT_Y0];
+                guest_pc = b->guest_pc;
+                where = 1;
+                trace_exc(ctx->host_spc, b->guest_pc, off, 0xDD, 0, guest_pc, ctx->vec_off, 1);
+            } else
+#endif
             if (off >= (sf_u32)b->code_len) {
                 /* exit stub of link k (runs once per link, before it is patched):
                  * r1 was saved to Y0 by its first instruction; resume = the link target */
@@ -4509,10 +4578,16 @@ static int exc_c_body(dbt_gctx *ctx)
                  * in a scratch, which the undo below takes back. The other
                  * register the pc can come from, META_TARGET_REG's, is never
                  * a scratch of its slot (translate.c slot_avoid). */
-                guest_pc = resume_pc(b, off, ctx, &idx, &committed);
-                apply_resume_state(b, idx, off, committed, ctx);
+                if (off == 0) {
+                    /* before the block's first instruction: nothing has run,
+                     * nothing is spilled, the guest pc is the block's */
+                    guest_pc = b->guest_pc; idx = 0; committed = 0;
+                } else {
+                    guest_pc = resume_pc(b, off, ctx, &idx, &committed);
+                    apply_resume_state(b, idx, off, committed, ctx);
+                }
                 where = 2;
-                trace_exc(ctx->host_spc, b->guest_pc, off, dbt_meta_kind(b, idx), (sf_u32)committed, guest_pc, ctx->vec_off, 2);
+                trace_exc(ctx->host_spc, b->guest_pc, off, off ? dbt_meta_kind(b, idx) : META_INSN, (sf_u32)committed, guest_pc, ctx->vec_off, 2);
                 if (ctx->vec_off == 0x100 && (ctx->expevt == 0x180 || ctx->expevt == 0x1A0)) {
                     /* an illegal instruction inside translated code is almost
                      * always the translator's own bug: say where */

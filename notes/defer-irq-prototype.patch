@@ -1,0 +1,379 @@
+diff --git a/dbt/rt/rt.c b/dbt/rt/rt.c
+--- a/dbt/rt/rt.c	2026-11-10 19:36:54
++++ b/dbt/rt/rt.c	2026-11-10 23:22:57
+@@ -355,6 +355,24 @@
+ static sf_u32 g_const_device_blocks;
+ #endif
+ static void print_stats(void);
++/* META CENSUS (measurement only): who needs a block's recovery metadata */
++enum { MC_IRQ, MC_TLB, MC_FAULT, MC_FPUDIS, MC_TRAP, MC_OTHER, MC_HELPER, MC_INTERIOR, MC_N };
++static sf_u32 g_mc_ev[MC_N], g_mc_life[MC_N], g_mc_any, g_mc_sync, g_mc_where[6][3], g_mc_total;
++static sf_u8 g_mc_bits[MAX_BLOCKS];
++static sf_u32 g_df_deferred, g_df_again, g_df_delivered, g_df_cancelled, g_df_unsafe, g_df_window, g_df_entry, g_df_nopatch;
++static void mc_print(void);
++static void mc_note_index(unsigned i, int why)
++{
++    sf_u8 bit = (sf_u8)(1u << why), old;
++    if (i >= MAX_BLOCKS) return;
++    old = g_mc_bits[i];
++    ++g_mc_ev[why];
++    if (!(old & bit)) ++g_mc_life[why];
++    if (!old) ++g_mc_any;
++    if (why != MC_IRQ && why != MC_INTERIOR && !(old & ~((1u << MC_IRQ) | (1u << MC_INTERIOR)))) ++g_mc_sync;
++    g_mc_bits[i] = (sf_u8)(old | bit);
++    if ((++g_mc_total & 8191u) == 0) mc_print();
++}
+ #ifdef DBT_DEV_SITES
+ static void print_dev_sites(void);
+ #endif
+@@ -1458,6 +1476,7 @@
+         if (gpc <= b->guest_pc || gpc >= b->guest_pc + b->guest_len) continue;
+         ensure_meta(b);
+ #endif
++        if (gpc > b->guest_pc && gpc < b->guest_pc + b->guest_len) mc_note_index(i, MC_INTERIOR);
+         off = dbt_block_entry(b, gpc);
+         if (off >= 0) {
+             ++g_interior_hits;
+@@ -1841,6 +1860,7 @@
+         }
+         g_blocks[j] = nb;
+         g_binfo[j] = g_binfo[i]; g_binfo[j].dead = 0;
++        g_mc_bits[j] = g_mc_bits[i];
+         g_link_banks[j] = 0;
+         g_ic_site[j] = nb.ic_off >= 0 ? base + (sf_u32)nb.ic_off : 0;
+         ref_clear(j);
+@@ -2249,6 +2269,7 @@
+         /* commit: block header into the table, used metadata into the arena */
+         sf_u32 nm, ns = (sf_u32)g_scratch.nspills * sizeof(dbt_spill);
+         *b = g_scratch;
++        g_mc_bits[index] = 0;
+ #if defined(DBT_CONST_DEVICE_ADDRESS) || defined(DBT_UNIFORM_STORE)
+         if (b->const_specialized) ++g_const_device_blocks;
+ #endif
+@@ -2903,8 +2924,25 @@
+     dbt_puts(" (bucket "); dbt_puthex(1u << g_sample.hist_shift); dbt_puts(")\n");
+ }
+ 
++static void mc_print(void)
++{
++    int i, j;
++    dbt_puts("\n[mc] xl="); dbt_puthex(dbt_stat.translations); dbt_puts(" exc="); dbt_puthex(dbt_stat.exceptions);
++    dbt_puts(" any="); dbt_puthex(g_mc_any); dbt_puts(" sync="); dbt_puthex(g_mc_sync);
++    dbt_puts(" ev");
++    for (i = 0; i < MC_N; ++i) { dbt_puts(" "); dbt_puthex(g_mc_ev[i]); }
++    dbt_puts(" life");
++    for (i = 0; i < MC_N; ++i) { dbt_puts(" "); dbt_puthex(g_mc_life[i]); }
++    dbt_puts(" where");
++    for (i = 1; i < 6; ++i) for (j = 0; j < 3; ++j) { dbt_puts(" "); dbt_puthex(g_mc_where[i][j]); }
++    dbt_puts(" defer "); dbt_puthex(g_df_deferred); dbt_puts(" "); dbt_puthex(g_df_again); dbt_puts(" "); dbt_puthex(g_df_delivered);
++    dbt_puts(" "); dbt_puthex(g_df_cancelled); dbt_puts(" "); dbt_puthex(g_df_unsafe); dbt_puts(" "); dbt_puthex(g_df_window);
++    dbt_puts(" "); dbt_puthex(g_df_entry); dbt_puts(" "); dbt_puthex(g_df_nopatch);
++    dbt_puts("\n");
++}
+ static void print_stats(void)
+ {
++    mc_print();
+     dbt_puts("[dbt] blocks="); dbt_puthex(dbt_stat.blocks);
+     dbt_puts(" translations="); dbt_puthex(dbt_stat.translations);
+     dbt_puts(" flushes="); dbt_puthex(dbt_stat.flushes);
+@@ -3748,6 +3786,13 @@
+ {
+     int idx;
+     ensure_meta(b);
++    {
++        sf_u32 e = ctx->expevt;
++        int why = ctx->vec_off == 0x600 ? MC_IRQ : ctx->vec_off == 0x400 ? MC_TLB :
++            (e == 0x800 || e == 0x820) ? MC_FPUDIS : e == 0x160 ? MC_TRAP :
++            (e == 0x040 || e == 0x060 || e == 0x080 || e == 0x0A0 || e == 0x0C0 || e == 0x0E0 || e == 0x100) ? MC_FAULT : MC_OTHER;
++        mc_note_index((unsigned)(b - g_blocks), why);
++    }
+     idx = dbt_block_find(b, off);
+     dbt_imeta meta;
+     const dbt_imeta *m = &meta;
+@@ -3974,6 +4019,7 @@
+     dbt_block *b = block_of_host(host);
+     int idx, committed;
+     if (!b) dbt_halt("stub target not in a block");
++    if (host == b->host_base) return b->guest_pc;      /* a block entry: nothing to look up */
+     return resume_pc(b, host - b->host_base, ctx, &idx, &committed);
+ }
+ 
+@@ -4396,6 +4442,137 @@
+ }
+ #endif
+ 
++/* ------------------------------------------------- deferred interrupts
++ * -DDBT_DEFER_IRQ (prototype). An interrupt that arrives inside a block (or
++ * in a helper stub the block called) is not delivered there, which needs the
++ * block's recovery metadata to rebuild the guest state. Instead the block
++ * runs on to its exit with SR.IMASK = 15, and its exits are made to trap:
++ * links unchained, the inline cache emptied, and the pool literals that
++ * hold the lookup stubs' addresses pointed at dbt_defer_stubs. The trap
++ * (defer_deliver) puts the literals and the interrupt mask back and resumes
++ * at the real lookup stub, where the pending interrupt is taken with the
++ * guest state canonical (resume = X0, no metadata). Any other exception
++ * that reaches the guest first cancels the deferral (defer_cancel): the
++ * interrupt request is still asserted and fires when the guest unmasks.
++ * Not deferred (delivered at once, as before): blocks that touch SR
++ * (dbt_block.no_defer), an interrupt inside a link's patch window or the
++ * inline-cache sequence, block entries and exit stubs (no metadata needed). */
++#ifdef DBT_DEFER_IRQ
++extern char dbt_defer_stubs[], dbt_defer_stubs_end[];
++#define DEFER_LITS 8
++static struct {
++    int pending;
++    dbt_block *block;
++    sf_u32 orig_imask;
++    sf_u32 intevt, expevt, tra;         /* INTEVT of the deferred interrupt; EXPEVT/TRA as the guest last saw them */
++    sf_u32 lit[DEFER_LITS], old[DEFER_LITS];
++    int nlit;
++} g_defer;
++
++static void defer_unpatch(void)
++{
++    int i;
++    for (i = 0; i < g_defer.nlit; i++) *(volatile sf_u32 *)g_defer.lit[i] = g_defer.old[i];
++    g_defer.nlit = 0; g_defer.block = 0;
++}
++
++static int defer_patch(dbt_block *b)
++{
++    sf_u32 a, hi = b->host_base + (sf_u32)b->host_len;
++    int k;
++    for (k = 0; k < b->nlinks; k++) unchain(b, k);
++    if (b->ic_off >= 0) reset_ic(b);
++    g_defer.nlit = 0; g_defer.block = b;
++#ifdef DBT_SECOND_CHANCE
++    a = b->host_base + reloc_pool(reloc_rec(b));
++#else
++    a = (b->host_base + (sf_u32)b->code_len + 3u) & ~3u;
++#endif
++    for (; a + 4 <= hi; a += 4) {
++        sf_u32 v = *(volatile sf_u32 *)a, n = 0;
++        if (v == (sf_u32)dbt_lookup_link) n = (sf_u32)dbt_defer_stubs;
++        else if (v == (sf_u32)dbt_lookup_ic) n = (sf_u32)dbt_defer_stubs + 2;
++        if (!n) continue;
++        if (g_defer.nlit == DEFER_LITS) { defer_unpatch(); return 0; }
++        g_defer.lit[g_defer.nlit] = a; g_defer.old[g_defer.nlit] = v; ++g_defer.nlit;
++        *(volatile sf_u32 *)a = n;
++    }
++    if (!g_defer.nlit) { g_defer.block = 0; return 0; }     /* no exit we can catch */
++    return 1;
++}
++
++/* An exception is about to be delivered to the guest while a deferral is
++ * pending: give the guest its real interrupt mask and forget the deferral. */
++static void defer_cancel(dbt_gctx *ctx)
++{
++    defer_unpatch();
++    ctx->ssr = (ctx->ssr & ~SR_IMASK) | g_defer.orig_imask;
++    g_defer.pending = 0;
++    ++g_df_cancelled;
++}
++
++/* The trap of a deferred block's exit: the context becomes that of the
++ * deferred interrupt taken at the first instruction of the real lookup stub
++ * (guest state canonical, resume = X0), which the caller then delivers.
++ * Waiting for the request to fire again after unmasking is not enough: it
++ * need not be accepted before the stub and the next block have run, and
++ * would then be deferred once more (tmu guest, 2026-11-10). The trap's own
++ * EXPEVT and TRA are replaced by the values the guest last saw. */
++static void defer_deliver(dbt_gctx *ctx)
++{
++    unsigned k = (unsigned)(ctx->host_spc - 2 - (sf_u32)dbt_defer_stubs) / 2;
++    if (!g_defer.pending) dbt_halt("deferred-interrupt trap with nothing pending");
++    defer_unpatch();
++    ctx->ssr = (ctx->ssr & ~SR_IMASK) | g_defer.orig_imask;
++    ctx->host_spc = k ? (sf_u32)dbt_lookup_ic : (sf_u32)dbt_lookup_link;
++    ctx->vec_off = 0x600; ctx->intevt = g_defer.intevt;
++    ctx->expevt = g_defer.expevt; ctx->tra = g_defer.tra;
++    EXPEVT_REG = g_defer.expevt; TRA_REG = g_defer.tra;
++    g_defer.pending = 0;
++    ++g_df_delivered;
++}
++
++/* Interrupt at ctx->host_spc: 1 = deferred (resume where it was, masked). */
++static int defer_try(dbt_gctx *ctx)
++{
++    sf_u32 spc = ctx->host_spc, host, off;
++    dbt_block *b;
++    int k;
++    if (IN(spc, dbt_stubs_start, dbt_stubs_end)) {
++        if (IN(spc, dbt_full_m1, dbt_full_end)) host = ctx->r[1];           /* about to jump to r1 */
++        else if (IN(spc, dbt_fpu_stub, dbt_hfpu_masked) || IN(spc, dbt_fallback_stub, dbt_hfb_masked) ||
++                 IN(spc, dbt_ldc_sr_stub, dbt_hsr_masked)) host = ctx->slots[SLOT_X1];   /* helper prologue: returns to X1 */
++        else return 0;
++    } else host = spc;
++    b = block_of_host(host);
++    if (!b || g_binfo[b - g_blocks].dead) return 0;
++    off = host - b->host_base;
++    if (off == 0) { ++g_df_entry; return 0; }               /* block entry: the precise path needs no metadata */
++    if (off >= (sf_u32)b->code_len) return 0;               /* exit stub: resolved from the link */
++    if (b->no_defer) { ++g_df_unsafe; return 0; }
++    for (k = 0; k < b->nlinks; k++) {
++        sf_u32 j = b->links[k].jump_off;
++        if (off + 2 >= j && off < j + 10) { ++g_df_window; return 0; }     /* inside words that unchain rewrites */
++    }
++    if (b->ic_off >= 0 && off + 48 >= (sf_u32)b->code_len) { ++g_df_window; return 0; }   /* inside the inline-cache sequence */
++    if (g_defer.block != b) {
++        if (g_defer.block) defer_unpatch();
++        if (!defer_patch(b)) {
++            ++g_df_nopatch;
++            if (g_defer.pending) { ctx->ssr = (ctx->ssr & ~SR_IMASK) | g_defer.orig_imask; g_defer.pending = 0; }
++            return 0;
++        }
++    }
++    if (!g_defer.pending) {
++        g_defer.orig_imask = ctx->ssr & SR_IMASK; g_defer.expevt = ctx->expevt; g_defer.tra = ctx->tra;
++        g_defer.pending = 1; ++g_df_deferred;
++    } else ++g_df_again;
++    g_defer.intevt = ctx->intevt;
++    ctx->ssr |= SR_IMASK;
++    return 1;
++}
++#endif
++
+ static int exc_c_body(dbt_gctx *ctx)
+ {
+     dbt_block *b = 0;                   /* set on the in-block paths only */
+@@ -4405,6 +4582,15 @@
+ #ifdef DBT_TLB_REFILL
+     if (ctx->vec_off == 0x400 && !g_exc_depth && tlb_refill(ctx)) { dbt_stat.tlb_refills++; return RT_ACT_RESUME; }
+ #endif
++#ifdef DBT_DEFER_IRQ
++    if (ctx->vec_off == 0x100 && ctx->expevt == 0x160 && IN(ctx->host_spc - 2, dbt_defer_stubs, dbt_defer_stubs_end)) {
++        defer_deliver(ctx);
++        guest_pc = ctx->slots[SLOT_X0];
++        where = 3;
++        goto deliver;
++    }
++    if (ctx->vec_off == 0x600 && !g_exc_depth && defer_try(ctx)) return RT_ACT_RESUME;
++#endif
+ 
+     if (ctx->vec_off == 0x100 && ctx->expevt == 0x160) {
+         sf_u32 nr = (ctx->tra >> 2) & 0xFF;
+@@ -4509,8 +4695,11 @@
+                  * in a scratch, which the undo below takes back. The other
+                  * register the pc can come from, META_TARGET_REG's, is never
+                  * a scratch of its slot (translate.c slot_avoid). */
+-                guest_pc = resume_pc(b, off, ctx, &idx, &committed);
+-                apply_resume_state(b, idx, off, committed, ctx);
++                if (off == 0) { guest_pc = b->guest_pc; idx = 0; committed = 0; }   /* at the entry nothing has run */
++                else {
++                    guest_pc = resume_pc(b, off, ctx, &idx, &committed);
++                    apply_resume_state(b, idx, off, committed, ctx);
++                }
+                 where = 2;
+                 trace_exc(ctx->host_spc, b->guest_pc, off, dbt_meta_kind(b, idx), (sf_u32)committed, guest_pc, ctx->vec_off, 2);
+                 if (ctx->vec_off == 0x100 && (ctx->expevt == 0x180 || ctx->expevt == 0x1A0)) {
+@@ -4527,6 +4716,10 @@
+     }
+ 
+ deliver:
++#ifdef DBT_DEFER_IRQ
++    if (g_defer.pending) defer_cancel(ctx);
++#endif
++    if (where >= 0 && where < 6) ++g_mc_where[where][ctx->vec_off == 0x600 ? 0 : ctx->vec_off == 0x400 ? 1 : 2];
+     if (ctx->vec_off == 0x600 && ctx->intevt == 0x400) {
+ #ifdef DBT_CACHE_TICK_LFU
+         if (where == 1 || where == 2) {
+@@ -4794,6 +4987,7 @@
+     int idx;
+     if (!b) dbt_halt("helper return address not in a block");
+     ensure_meta(b);
++    mc_note_index((unsigned)(b - g_blocks), MC_HELPER);
+     off = ret - 4 - b->host_base;
+     idx = dbt_block_find(b, off);
+     if (idx < 0) dbt_halt("helper return address outside the block's code");
+diff --git a/dbt/rt/stubs.S b/dbt/rt/stubs.S
+--- a/dbt/rt/stubs.S	2026-11-10 19:36:54
++++ b/dbt/rt/stubs.S	2026-11-10 23:22:57
+@@ -1009,6 +1009,12 @@
+         LDSX    1, SLOT_Y0
+         mov.l   @(16, r3), r1
+         LDSX    1, SLOT_Y1
++        /* the C side may have moved the resume point or masked interrupts
++         * (deferred interrupt delivery, rt.c DBT_DEFER_IRQ) */
++        mov.l   @(CTX_HOSTSPC - CTX_SLOTS, r3), r1
++        ldc     r1, spc
++        mov.l   @(CTX_SSR - CTX_SLOTS, r3), r1
++        ldc     r1, ssr
+         bra     .Lexc_restore_common
+         nop
+ .Lexc_jump:
+@@ -1090,6 +1096,18 @@
+         .align 2
+         .global _dbt_stubs_end
+ _dbt_stubs_end:
++
++        /* Deferred interrupt delivery (rt.c DBT_DEFER_IRQ): a block that ran
++         * on with interrupts masked has its two lookup-stub literals pointed
++         * here; the trap restores them and the interrupt mask and resumes at
++         * the real stub (lookup_link, lookup_ic), where the interrupt arrives. */
++        .section .text
++        .align 2
++        .global _dbt_defer_stubs, _dbt_defer_stubs_end
++_dbt_defer_stubs:
++        trapa   #0xEF
++        trapa   #0xEF
++_dbt_defer_stubs_end:
+ 
+         .section .bss
+         .balign 16
+diff --git a/dbt/src/translate.c b/dbt/src/translate.c
+--- a/dbt/src/translate.c	2026-11-10 19:36:54
++++ b/dbt/src/translate.c	2026-11-10 23:22:57
+@@ -1593,6 +1593,18 @@
+     for (r = 1; r <= 14; r++) if (!(touched & R(r))) { t->bx = r; return; }
+ }
+ 
++/* Instructions that see or change SR, SSR, SPC or the banked registers, or
++ * that leave the block through an exception or the power state: a block
++ * holding one is not run on with interrupts masked (rt.c DBT_DEFER_IRQ). */
++static int defer_unsafe_op(unsigned op)
++{
++    unsigned form = op & 0xF00Fu, cr = (op >> 4) & 0xFu;
++    if (op == 0x002Bu || op == 0x001Bu || op == 0x0038u) return 1;      /* rte, sleep, ldtlb */
++    if ((op & 0xFF00u) == 0xC300u) return 1;                            /* trapa */
++    if ((form == 0x0002u || form == 0x4003u || form == 0x400Eu || form == 0x4007u) && cr != 1) return 1;   /* stc/ldc except GBR */
++    return 0;
++}
++
+ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
+                         sf_u16 *buf, int cap, dbt_block *out, sf_u32 *fault_addr)
+ {
+@@ -1626,6 +1638,7 @@
+     if (guest_pc == (sf_u32)(DBT_WATCH_GPC)) emit16(&t.em, 0xC3EE);
+ #endif
+     b->guest_pc = guest_pc; b->host_base = host_base; b->end_reason = END_FULL; b->ic_off = -1;
++    b->no_defer = 0;
+     prepass(&t, guest_pc, max);
+     b->borrow = t.bx;
+ 
+@@ -1645,6 +1658,7 @@
+ #else
+         if (!(d = fetch(&t, gpc, &decoded))) break;
+ #endif
++        if (defer_unsafe_op(d->op)) b->no_defer = 1;
+ #ifdef DBT_LINEAR_META
+         if (n > 0 && d->kind == K_PASS) {
+             dbt_imeta *prev = b->nmeta ? &b->meta[b->nmeta - 1] : 0;
+@@ -1666,6 +1680,7 @@
+                 decoded = *d; d = &decoded;
+ #endif
+                 if (!(slot = fetch(&t, gpc + 2, &s))) break;
++                if (defer_unsafe_op(slot->op)) b->no_defer = 1;
+                 if (!sh4_slot_legal(slot)) { /* let hardware raise slot-illegal: pass both through */
+                     emit16(&t.em, d->op); emit16(&t.em, slot->op);
+                     gpc += 4; b->end_reason = END_ILLEGAL; ended = 1; break;
+diff --git a/dbt/src/translate.h b/dbt/src/translate.h
+--- a/dbt/src/translate.h	2026-11-10 19:36:54
++++ b/dbt/src/translate.h	2026-11-10 23:22:57
+@@ -150,6 +150,7 @@
+     /* A GPR untouched by the block, parked in A0 and restored at exits;
+      * -1 means none. Used for byte-swapped stores and their cached value. */
+     signed char borrow;
++    sf_u8 no_defer;          /* the block reads or writes SR/SSR/SPC, traps or sleeps: interrupts inside it are delivered at once (rt.c DBT_DEFER_IRQ) */
+ #if defined(DBT_CONST_DEVICE_ADDRESS) || defined(DBT_UNIFORM_STORE)
+     sf_u8 const_specialized; /* halfword offset after last entry-dependent access */
+ #endif
