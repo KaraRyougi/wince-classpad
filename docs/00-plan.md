@@ -1,6 +1,13 @@
 # Plan and status
 
-Last updated: 2026-11-03
+Last updated: 2026-11-03 (milestones below); status note added 2026-11-10
+
+> **Where the project stands (2026-11-10).** Route D below was built and
+> works: Windows CE runs under the translator in casio-emu and on a real
+> fx-CP400. The target moved from CE 6.0 R3 to CE 5.0 on 2026-11-08
+> (milestone 4). Milestones 5 to 7 are done in substance; their history is
+> in docs/05 (image and OAL), docs/06 (suspend), docs/07 and docs/08 (the
+> CE 5.0 port and the calculator). The rest of this page is kept as written.
 
 ## The blocker found on day one: endianness
 
@@ -49,7 +56,7 @@ needed: casio-emu runs the translator as an ordinary big-endian add-in.
   stubs, exception vectors, FPU/mac helpers, hypercall console), a `.g3a`
   launcher and three little-endian test guests. As of 2026-10-22 all three
   guests pass in casio-emu (with `dbt/emu-patch` applied to the emulator).
-- Docs 01-06: hardware facts, FPU emulation design, boot/image notes, DBT design, CE image/OAL plan, Platform Builder post-install steps.
+- Docs 01-05 and 09: hardware facts, FPU emulation design, boot/image notes, DBT design, CE image/OAL plan, Platform Builder post-install steps.
 
 ## Milestones (route D)
 

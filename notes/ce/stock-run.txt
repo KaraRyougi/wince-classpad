@@ -65,7 +65,7 @@ Open, intermittent (2026-11-03): the Debug image sometimes dies after "FILESYS: 
   the suspect by correlation with flush frequency. Knobs: -DDBT_NO_BORROW, -DDBT_NO_ROMKEEP, -DMAX_BLOCKS=n.
   Found 2026-11-04 (see below): the inline-cache refill in the lookup_ic stub wrote pc then host with interrupts
   live; a tick between the stores and a handler running the same site jumped to the old host. Fixed in stubs.S.
-GWES image (/Users/kokutou/Downloads/ClasspadUI, 2.4 MB, 27 modules incl. gwes.dll, classpad_ddi.dll, classpad_hello.exe),
+GWES image (~/Downloads/ClasspadUI, 2.4 MB, 27 modules incl. gwes.dll, classpad_ddi.dll, classpad_hello.exe),
   2026-11-03, make BUILD=build-gwes NKBIN=... nkshot: kernel to POSTINIT, then
   "Exception 'Access Violation' PC=gwes.dll!WBITMAP::WBITMAP(GdiObjectHandle_t, Driver_t*)+0x2c BVA=00000104"
   (a null Driver_t), first idle, no "CLASSPAD DDI:" line ever, no frame. (The TOC load offsets of the platform
