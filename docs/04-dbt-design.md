@@ -3222,6 +3222,101 @@ line means driving `tr_mem` from `tr_fpu_inline` with a borrowed register;
 the slots and the fault recovery of that combination have not been worked
 out.
 
+### Where the time goes at a877a57 (2026-11-09)
+
+A review before the next round of work. CE 5.0 image of 2026-11-09
+(RelDir NK.bin/EXT.bin), casio-emu fx-cp400, `HLE_HB=2` (one PC per 2M
+instructions, sleep excluded), `HLE_CB_TOUCHSEQ="35,40,700000,3000;
+35,40,706000,3000;12,516,1100000,3000;50,349,1160000,3000"`: boot, a
+double tap on My Device, then Start > Programs left open (GWES's message
+loop: `MsgQueue::GetMessageW_I`, `SC_WaitForMultiple`, `KCall`,
+`EnterCriticalSection`; no new code).
+
+| | boot to taskbar | My Device | menu open (warm) |
+|---|---:|---:|---:|
+| busy instructions | 826M | 638M | 23% of the time |
+| translator C | 60% | 62% | 7% |
+| of it: translation and commit | ~38% | ~40% | 1% |
+| of it: invalidation, TLB tracking | 13% | 12% | 4% (`switch_asid`) |
+| `lookup_ic` stub (inline-cache misses) | 6% | 8% | ~20% |
+| translated guest code | 31% | 26% | 65% |
+
+30000 translations up to the taskbar, 20000 more for My Device, 27 bank
+recycles in all. A translation costs about 13k host instructions for a
+block of 11 guest instructions (decode and emit ~9k, commit bookkeeping
+~4.7k; `cpage_set` alone is 3% of the cold phases). 64% of the stub's warm
+samples have a user-mode PR.
+
+Static mix of the image's code (2.64M instructions, literal pools left
+out): 32-bit data accesses 24.0%, 16-bit 1.6%, 8-bit 3.0%, pc-relative
+loads 8.6%, `jsr` 5.1%, `rts` 1.3%, `bt/bf` 5.5%. So per 100 guest
+instructions the swaps add about 72 host instructions and calls and returns
+about 70 (a `jsr`/`rts` pair is 13 + 15 with both inline caches hitting, a
+miss 45 more for a kernel target, 80 for a user target that the stub
+refills).
+
+With casio-emu's cache model (`HLE_CACHESIM=1`: 32 KiB 4-way I and D, 25
+cycles per miss) the warm loop has 1.55 stall cycles per instruction (2.5%
+of fetches and 7% of data accesses miss), the cold phases 0.76: on the
+machine, code density and layout weigh more than these instruction counts
+show.
+
+What that leaves, largest first: (1) returns and inline-cache misses (inline
+caches that survive an address-space switch, a second target for
+polymorphic returns, no T restore on a hit; direct links for literal
+calls were tried, below); (2) the volume of translation:
+ROM code translated ahead of time into flash, statically linked, or a
+translator several times cheaper per block; (3) the memory model: with
+memory kept byte-reversed within each 32-bit word, 32-bit accesses run
+unchanged and the cost moves to the 4.6% of byte and halfword accesses;
+(4) FPU helper calls for the maths programs; (5) hot/cold layout: exit
+stubs and literal pools (37% of host bytes) sit inside the hot code and
+every block is aligned to 32 bytes.
+
+### Calls through a literal as direct links: tried, not adopted (2026-11-09)
+
+The compilers call anything out of `bsr`'s reach as `mov.l @(disp,PC),Rn
+... jsr @Rn`; 79% of the image's `jsr` sites have the load in the same
+straight-line run. The translator already folds the load into a constant,
+so such a `jsr` (and `jmp`) was translated like `bsr`/`bra`: PR write,
+slot, a `META_TARGET_CONST` range and `jump_direct`, no inline cache
+(4 + 5 host instructions unchained, 4 + 2 chained, against 3 + 10). The
+constants were tracked per block (set by pc-relative loads, dropped when
+the register is written and by helpers, traps and privileged
+instructions), the block marked entry-from-start-only, and the runtime
+allowed a link only to P1/P2 targets or, from user code, within the same
+32 MiB section; a block ending in such a call into slot 0 was not shared
+between ASIDs (a shared page would carry one process's target into the
+other: an aspace check with a literal `jmp` on a shared page failed
+without that). Host tests and all 25 guests passed with it on and off.
+
+Measured on the scenario above, it does not pay:
+
+| | without | with |
+|---|---:|---:|
+| blocks ending in a direct call | 0 | 21816 of 50000 |
+| boot to taskbar, busy instructions | 826M | 828M |
+| My Device, busy instructions | 638M | 652M |
+| menu open, samples in iterations 2600M-6700M | 479 | 430 |
+| at 50000 translations: inline-cache misses resolved in C | 50666 | 37263 |
+| ... C lookups in all | 117084 | 123401 |
+| ... links unchained | 48056 | 68440 |
+
+The warm difference is 1.6 standard deviations of the sample counts: not
+established. The cold phases are no better and the counters say why: a
+link is resolved in C once (`dbt_lookup_link` always goes to
+`dbt_resolve`), where the inline cache it replaces is usually refilled
+from the hash in the stub, and with the cache recycling a bank every two
+thousand translations that one-time cost is paid again for every
+retranslated block, plus 40% more links to detach at each recycle. The
+code was removed. What it shows for the list above: while translation
+volume and eviction stay as they are, anything that adds per-block link
+work loses in the cold phases, and the warm stub time is on the return
+side (one target per `rts` site, user targets emptied at every
+address-space switch), not at the `jsr` sites. A heartbeat phase of ~400
+samples resolves nothing under about 10%; compare counters or longer
+windows.
+
 ### fmov.s between memory and FR registers in line (2026-11-14)
 
 The item left open above. `tr_fpu_inline` now also translates the six
