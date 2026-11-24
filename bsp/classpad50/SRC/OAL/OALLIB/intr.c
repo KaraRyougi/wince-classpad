@@ -23,13 +23,11 @@ static const CLASSPAD_IRQ_MASK g_irqMask[] = {
     { IRQ_USB,        9, INTC_IMR9_USB },
 };
 
+static const CLASSPAD_IRQ_MASK *g_irqLut[OAL_INTR_IRQ_MAXIMUM];
+
 static const CLASSPAD_IRQ_MASK *FindMask(UINT32 irq)
 {
-    UINT32 i;
-    for (i = 0; i < sizeof(g_irqMask) / sizeof(g_irqMask[0]); i++) {
-        if (g_irqMask[i].irq == irq) return &g_irqMask[i];
-    }
-    return NULL;
+    return (irq < OAL_INTR_IRQ_MAXIMUM) ? g_irqLut[irq] : NULL;
 }
 
 //------------------------------------------------------------------------------
@@ -55,10 +53,11 @@ static UINT32 DeviceIntrHandler(UINT32 imr, UINT8 bit, UINT32 irq)
     return (sysIntr == SYSINTR_UNDEFINED) ? SYSINTR_NOP : sysIntr;
 }
 
+extern volatile BOOL g_classpadPowerSleeping;
 extern BOOL ClasspadPowerKeyIsr(void);
 static UINT32 KeyscIntrHandler(void)
 {
-    if (ClasspadPowerKeyIsr()) return SYSINTR_NOP;
+    if (g_classpadPowerSleeping && ClasspadPowerKeyIsr()) return SYSINTR_NOP;
     return DeviceIntrHandler(5, INTC_IMR5_KEYSC, IRQ_KEYSC);
 }
 
@@ -79,9 +78,14 @@ static UINT32 RtcAlarmIntrHandler(void)
 //------------------------------------------------------------------------------
 BOOL OALIntrInit()
 {
+    UINT32 i;
+
     OALMSG(OAL_INTR && OAL_FUNC, (L"+OALIntrInit()\r\n"));
 
     OALIntrMapInit();
+    for (i = 0; i < sizeof(g_irqMask) / sizeof(g_irqMask[0]); i++) {
+        if (g_irqMask[i].irq < OAL_INTR_IRQ_MAXIMUM) g_irqLut[g_irqMask[i].irq] = &g_irqMask[i];
+    }
 
     // Mask every source the OAL knows until its driver enables it, then
     // give each its priority. The kernel masks SR.IMASK to the same level

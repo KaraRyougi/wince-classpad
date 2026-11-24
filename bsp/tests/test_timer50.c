@@ -168,6 +168,29 @@ int main(void) {
     InitClock();
     CHECK("resume with the same clock keeps the rate", g_oalTimer.countsPerMSec >= 3685 && g_oalTimer.countsPerMSec <= 3687);
     sim_hz = 0;
+    /* reciprocal OALTimerCountsToMSec exactness across edge values & rates */
+    {
+        static const UINT32 divs[] = { 1, 2, 3, 7, 921, 3686, 7372, 11058, 14745, 58982 };
+        unsigned di, k;
+        for (di = 0; di < sizeof divs / sizeof divs[0]; di++) {
+            UINT32 d = divs[di];
+            OALTimerInit(1000, d, 4096);
+            CHECK("recip 0", OALTimerCountsToMSec(0) == 0);
+            CHECK("recip max", OALTimerCountsToMSec(0xFFFFFFFFu) == 0xFFFFFFFFu / d);
+            for (k = 1; k <= 2000; k++) {
+                UINT32 c = k * d;
+                if (OALTimerCountsToMSec(c - 1) != k - 1 || OALTimerCountsToMSec(c) != k) {
+                    fprintf(stderr, "FAIL recip d=%u k=%u\n", d, k); ++failures; break;
+                }
+            }
+        }
+    }
+    /* ISR fast-path on full-period reload + UpdateRescheduleTime clamped no-op */
+    init(); CurMSec = 100; dwReschedTime = 100;
+    tcr |= TMU_TCR_UNF; tcnt = tcor - 42;
+    CHECK("resched tick takes full-period fast path", OALTimerIntrHandler() == SYSINTR_RESCHED && g_oalTimer.actualMSecPerSysTick == 1000 && tcnt == tcor - 42);
+    OALTimerUpdateRescheduleTime(CurMSec + 5000);
+    CHECK("distant reschedule time is a no-op after clamp", g_oalTimer.actualMSecPerSysTick == 1000 && tcnt == tcor - 42);
     printf("CE 5.0 timer regression: %d failures\n", failures);
     return failures ? 1 : 0;
 }

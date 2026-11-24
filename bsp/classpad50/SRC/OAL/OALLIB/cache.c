@@ -21,32 +21,42 @@ void OEMCacheRangeFlush(LPVOID pAddr, DWORD dwLength, DWORD dwFlags)
 {
     DWORD addr = (DWORD)pAddr, len = dwLength;
     BOOL all = (addr == 0 && len == 0);
+    BOOL canTrap = ClasspadCanTrap();
     // A range at least as large as the cache is cheaper as a walk of the
     // address array (1024 stores) than line by line; the kernel's "whole
     // cache" calls (no range) are the common case during boot.
-    BOOL wholeD = all || len >= g_oalCacheInfo.L1DSize;
-    BOOL wholeI = all || len >= g_oalCacheInfo.L1ISize;
+    // For writeback-only (without discard), prefer line-by-line writeback up
+    // to 4x the cache size so we avoid invalidating 32 KiB of hot D-cache.
+    BOOL wholeD = all || ((dwFlags & CACHE_SYNC_DISCARD)
+        ? (len >= g_oalCacheInfo.L1DSize)
+        : (len >= g_oalCacheInfo.L1DSize * 4));
+    BOOL didD = FALSE;
 
     if (dwFlags & (CACHE_SYNC_DISCARD | CACHE_SYNC_WRITEBACK)) {
         if (wholeD) ClasspadOCacheFlushAll();                // write-back and invalidate
         else if (dwFlags & CACHE_SYNC_DISCARD) ClasspadCachePurge(addr, len);
         else ClasspadCacheWriteback(addr, len);
+        didD = TRUE;
     }
     if (dwFlags & CACHE_SYNC_INSTRUCTIONS) {
-        if (wholeD) {
-            if (!(dwFlags & (CACHE_SYNC_DISCARD | CACHE_SYNC_WRITEBACK))) ClasspadOCacheFlushAll();
-        } else {
-            ClasspadCacheWriteback(addr, len);              // code written through the D-cache
+        if (!didD) {
+            if (wholeD) ClasspadOCacheFlushAll();
+            else ClasspadCacheWriteback(addr, len);          // code written through the D-cache
         }
-        if (wholeI) ClasspadICacheInvalidateAll();
-        else ClasspadICacheInvalidate(addr, len);
-        if (ClasspadCanTrap()) ClasspadHcFlush(all ? 0 : (DWORD)pAddr, all ? 0 : dwLength);
+        // Under the translator the guest never executes from hardware I-cache:
+        // translated host blocks live in the code cache and are synchronised by
+        // the translator itself. Flushing hardware I-cache here would only
+        // evict the translator's own hot code.
+        if (canTrap) ClasspadHcFlush(all ? 0 : (DWORD)pAddr, all ? 0 : dwLength);
     }
     if (dwFlags & CACHE_SYNC_FLUSH_TLB) {
         // MMUCR is a P4 register and this code is in nk.exe, which the
-        // translator translates device-aware: plain access (classpad_mmio.h)
+        // translator translates device-aware: plain access (classpad_mmio.h).
+        // The MMUCR_TI store already notifies the translator of a whole-TLB
+        // flush synchronously inside dev_mem, so skip the redundant whole-TLB
+        // hypercall and only issue HC_TLB_INVAL for range invalidations.
         P4_W32(CCN_MMUCR, P4_R32(CCN_MMUCR) | MMUCR_TI);
-        if (ClasspadCanTrap()) ClasspadHcTlbInval(all ? 0 : (DWORD)pAddr, all ? 0 : dwLength);
+        if (!all && canTrap) ClasspadHcTlbInval((DWORD)pAddr, dwLength);
     }
 }
 

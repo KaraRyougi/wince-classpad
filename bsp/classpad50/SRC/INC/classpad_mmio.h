@@ -27,6 +27,22 @@
 
 #define CLASSPAD_UA(pa)     ((UINT32)(pa) | 0xA0000000)
 
+#if defined(_MSC_VER)
+extern DWORD __asm1(const char *, ...);
+static __inline UINT32 classpad_bswap32(UINT32 v)
+{
+    v = (UINT32)__asm1("swap.b r4, r0", (DWORD)v);
+    v = (UINT32)__asm1("swap.w r4, r0", (DWORD)v);
+    return (UINT32)__asm1("swap.b r4, r0", (DWORD)v);
+}
+static __inline UINT16 classpad_bswap16(UINT16 v)
+{
+    return (UINT16)__asm1("swap.b r4, r0", (DWORD)v);
+}
+#elif defined(__GNUC__)
+static __inline UINT32 classpad_bswap32(UINT32 v) { return __builtin_bswap32(v); }
+static __inline UINT16 classpad_bswap16(UINT16 v) { return __builtin_bswap16(v); }
+#else
 static __inline UINT32 classpad_bswap32(UINT32 v)
 {
     return (v >> 24) | ((v >> 8) & 0x0000FF00) | ((v << 8) & 0x00FF0000) | (v << 24);
@@ -35,6 +51,7 @@ static __inline UINT16 classpad_bswap16(UINT16 v)
 {
     return (UINT16)((v >> 8) | (v << 8));
 }
+#endif
 
 #define MMIO_R32(pa)        classpad_bswap32(*(volatile UINT32 *)CLASSPAD_UA(pa))
 #define MMIO_W32(pa, v)     (*(volatile UINT32 *)CLASSPAD_UA(pa) = classpad_bswap32((UINT32)(v)))

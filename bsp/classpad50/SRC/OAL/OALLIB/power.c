@@ -25,6 +25,7 @@
 #include "classpad_pwrseq.h"
 
 static ClasspadPowerState g_power;              // the CPU-sleep fallback (classpad_power.h)
+volatile BOOL g_classpadPowerSleeping;          // TRUE only while in the CPU-sleep fallback loop
 extern VOID ClasspadSleepUntilInterrupt(volatile unsigned *wake);
 extern VOID ClasspadRtcSuspend(void);
 extern VOID ClasspadRtcResume(void);
@@ -433,9 +434,11 @@ VOID OEMPowerOff(void)
     if (reason == STANDBY_NOT_ENTERED) {
         g_stats.path = CLASSPAD_SUSPEND_PATH_CPUSLEEP;
         RETAILMSG(1, (L"CLASSPAD POWER: no R-standby, CPU sleep with Clear/ON wake\r\n"));
+        g_classpadPowerSleeping = TRUE;
         ClasspadPowerPrepare(&g_power, g_oalTimer.countsPerMSec);
         while (!g_power.wake) ClasspadSleepUntilInterrupt(&g_power.wake);
         ClasspadPowerRestore(&g_power);
+        g_classpadPowerSleeping = FALSE;
         reason = key;
     }
 

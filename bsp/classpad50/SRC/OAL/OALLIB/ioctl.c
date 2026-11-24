@@ -128,8 +128,9 @@ BOOL OALIoCtlHalClasspadClockSet(
     OALTimerRetune(after, before);
     INTERRUPTS_ENABLE(enabled);
 
-    RETAILMSG(1, (L"CLASSPAD OAL: clock FLLFRQ=%08x FRQCR=%08x CS0WCR=%08x CS3WCR=%08x, Pphi %u Hz\r\n",
-                  s_lastClock.fllfrq, s_lastClock.frqcr, s_lastClock.cs0wcr, s_lastClock.cs3wcr, OALClockPphiHz()));
+    RETAILMSG(1, (L"CLASSPAD OAL: clock FLLFRQ=%08x FRQCR=%08x CS0BCR=%08x CS0WCR=%08x CS3WCR=%08x CS5A=%08x RTCOR=%02x SSCG=%08x, Pphi %u Hz\r\n",
+                  s_lastClock.fllfrq, s_lastClock.frqcr, s_lastClock.cs0bcr, s_lastClock.cs0wcr,
+                  s_lastClock.cs3wcr, s_lastClock.cs5awcr, s_lastClock.rtcor, s_lastClock.sscgcr, OALClockPphiHz()));
     return TRUE;
 }
 

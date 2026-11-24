@@ -19,20 +19,32 @@
 
 #define CPCLK_FRQCR     0xA4150000u
 #define CPCLK_PLLCR     0xA4150024u
+#define CPCLK_SSCGCR    0xA4150044u
 #define CPCLK_FLLFRQ    0xA4150050u
 #define CPCLK_LSTATS    0xA4150060u
+#define CPCLK_CS0BCR    0xFEC10004u
 #define CPCLK_CS0WCR    0xFEC10024u
 #define CPCLK_CS3WCR    0xFEC1002Cu
+#define CPCLK_CS5AWCR   0xFEC10034u
+#define CPCLK_RTCOR     0xFEC10050u
 
-#define CPCLK_FRQCR_KICK    0x80000000u
-#define CPCLK_FRQCR_FIELDS  0x3FF0FF0Fu     /* STC, IFC, SFC, BFC, PFC */
-#define CPCLK_FLLFRQ_FIELDS 0x0000C7FFu     /* SELXM, FLF */
-#define CPCLK_PLLCR_ON      0x00004000u
-#define CPCLK_WR_MASK       0x00000780u
-#define CPCLK_WR_SHIFT      7
-#define CPCLK_TRC_MASK      0x00000003u
-#define CPCLK_WR_SAFE       11              /* 18 waits while the clock moves */
-#define CPCLK_TRC_SAFE      3               /* 9 cycles */
+#define CPCLK_FRQCR_KICK        0x80000000u
+#define CPCLK_FRQCR_FIELDS      0x3FF0FF0Fu     /* STC, IFC, SFC, BFC, PFC */
+#define CPCLK_FLLFRQ_FIELDS     0x0000C7FFu     /* SELXM, FLF */
+#define CPCLK_PLLCR_ON          0x00004000u
+#define CPCLK_SSCGCR_SSEN       0x80000000u     /* spread-spectrum enable (bit 31) */
+#define CPCLK_WR_MASK           0x00000780u
+#define CPCLK_WR_SHIFT          7
+#define CPCLK_TRC_MASK          0x00000003u
+#define CPCLK_WR_SAFE           11              /* 18 waits while the clock moves */
+#define CPCLK_TRC_SAFE          3               /* 9 cycles */
+#define CPCLK_CS0BCR_IDLE_MASK  0x7FFF0000u     /* IWW, IWRWD, IWRWS, IWRRD, IWRRS */
+#define CPCLK_CS0BCR_SAFE       0x36DA0000u     /* stock SH7305 conservative idle waits */
+#define CPCLK_CS0BCR_TUNED      0x24920000u     /* gint SH7305 tuned idle waits (2 cyc) */
+#define CPCLK_CS5A_MASK         0x00070783u     /* WW 18:16, WR 10:7, HW 1:0 */
+#define CPCLK_CS5A_SAFE         0x00030581u     /* conservative LCD waits during clock switch */
+#define CPCLK_RTCOR_KEY         0xA55A0000u     /* SH7305 BSC refresh register write key */
+#define CPCLK_RTCOR_MASK        0x000000FFu
 
 #define CPCLK_FLL_MIN   450u
 #define CPCLK_FLL_MAX   2047u
@@ -41,14 +53,18 @@
 
 /* KernelIoControl codes (OAL\OALLIB\ioctl.c; 2100..2102 are in
  * classpad_pwrstat.h, 2103 is the touch driver's IOCTL_HAL_CLASSPAD_PPHI). GET: output ClasspadClockInfo. SET: input
- * ClasspadClockRegs; the OAL takes FLLFRQ, FRQCR, CS0WCR.WR and CS3WCR.TRC
- * from it, switches with interrupts off and rescales the TMU0 tick. */
+ * ClasspadClockRegs; the OAL takes FLLFRQ, FRQCR, CS0WCR.WR, CS3WCR.TRC,
+ * CS0BCR idle waits, CS5AWCR waits, RTCOR and SSCGCR.SSEN from it, switches
+ * with interrupts off and rescales the TMU0 tick. */
 #ifdef CTL_CODE
 #define IOCTL_HAL_CLASSPAD_CLOCK_GET CTL_CODE(FILE_DEVICE_HAL, 2104, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_HAL_CLASSPAD_CLOCK_SET CTL_CODE(FILE_DEVICE_HAL, 2105, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #endif
 
-typedef struct { unsigned fllfrq, frqcr, cs0wcr, cs3wcr; } ClasspadClockRegs;
+typedef struct {
+    unsigned fllfrq, frqcr, cs0wcr, cs3wcr;
+    unsigned cs0bcr, cs5awcr, rtcor, sscgcr;
+} ClasspadClockRegs;
 /* pphi: the peripheral clock as the OAL keeps time by it, in Hz: four times
  * the TMU0 count rate measured against the RTC at boot, scaled by every
  * change since. The frequencies computed from the registers are nominal. */
@@ -209,19 +225,51 @@ static __inline unsigned ClockTRCCycles(unsigned code)
     static const unsigned char cycles[4] = { 3, 4, 6, 9 };
     return cycles[code & 3u];
 }
+/* LCD controller (CS5A) wait states scaled conservatively with Bphi:
+ * returns WW (18:16) | WR (10:7) | HW (1:0) masked to CPCLK_CS5A_MASK. */
+static __inline unsigned ClockBestLcdCS5A(unsigned bphi)
+{
+    if (bphi <= 65000000u)  return 0x00010281u;     /* WW=1, WR=5, HW=1 (stock 0x00020381) */
+    if (bphi <= 90000000u)  return 0x00020301u;     /* WW=2, WR=6, HW=1 */
+    if (bphi <= 120000000u) return 0x00020381u;     /* WW=2, WR=7, HW=1 */
+    return 0x00030481u;                             /* WW=3, WR=9, HW=1 */
+}
+
+/* Scale SDRAM refresh constant (RTCOR, 0..255) proportionally to Bphi so
+ * higher bus clocks do not over-refresh SDRAM and lower clocks stay safe. */
+static __inline unsigned ClockScaleRtcor(unsigned bootRtcor, unsigned bootBphi, unsigned newBphi)
+{
+    unsigned base = bootRtcor & CPCLK_RTCOR_MASK;
+    unsigned scaled;
+    if (!base || !bootBphi) return base;
+    /* Compute (base * newBphi) / bootBphi in kHz units to stay within 32 bits */
+    scaled = (base * (newBphi / 1000u)) / (bootBphi / 1000u);
+    if (scaled < 1u) scaled = 1u;
+    if (scaled > 255u) scaled = 255u;
+    return scaled;
+}
+
 static __inline void ClockAutoWait(ClasspadClockRegs *r, unsigned bphi)
 {
-    r->cs0wcr = (r->cs0wcr & ~CPCLK_WR_MASK) | (ClockBestRomWR(bphi) << CPCLK_WR_SHIFT);
-    r->cs3wcr = (r->cs3wcr & ~CPCLK_TRC_MASK) | ClockBestTRC(bphi);
+    r->cs0wcr  = (r->cs0wcr & ~CPCLK_WR_MASK) | (ClockBestRomWR(bphi) << CPCLK_WR_SHIFT);
+    r->cs3wcr  = (r->cs3wcr & ~CPCLK_TRC_MASK) | ClockBestTRC(bphi);
+    r->cs0bcr  = (r->cs0bcr & ~CPCLK_CS0BCR_IDLE_MASK)
+               | (bphi <= 125000000u ? CPCLK_CS0BCR_TUNED : CPCLK_CS0BCR_SAFE);
+    r->cs5awcr = (r->cs5awcr & ~CPCLK_CS5A_MASK) | ClockBestLcdCS5A(bphi);
+    r->sscgcr &= ~CPCLK_SSCGCR_SSEN;                /* disable spread spectrum for +~2% clock & lower jitter */
 }
 
 #ifdef MMIO_W32
 static __inline void ClockRead(ClasspadClockRegs *r)
 {
-    r->fllfrq = MMIO_R32(CPCLK_FLLFRQ);
-    r->frqcr  = MMIO_R32(CPCLK_FRQCR) & ~CPCLK_FRQCR_KICK;
-    r->cs0wcr = MMIO_R32(CPCLK_CS0WCR);
-    r->cs3wcr = MMIO_R32(CPCLK_CS3WCR);
+    r->fllfrq  = MMIO_R32(CPCLK_FLLFRQ);
+    r->frqcr   = MMIO_R32(CPCLK_FRQCR) & ~CPCLK_FRQCR_KICK;
+    r->cs0wcr  = MMIO_R32(CPCLK_CS0WCR);
+    r->cs3wcr  = MMIO_R32(CPCLK_CS3WCR);
+    r->cs0bcr  = MMIO_R32(CPCLK_CS0BCR);
+    r->cs5awcr = MMIO_R32(CPCLK_CS5AWCR);
+    r->rtcor   = MMIO_R32(CPCLK_RTCOR) & CPCLK_RTCOR_MASK;
+    r->sscgcr  = MMIO_R32(CPCLK_SSCGCR);
 }
 
 /* Interrupts must be off. Slowest waits first, then the frequency, then the
@@ -229,16 +277,25 @@ static __inline void ClockRead(ClasspadClockRegs *r)
  * Only the fields this header owns are taken from *want. */
 static __inline void ClockApply(const ClasspadClockRegs *want)
 {
-    unsigned cs0 = MMIO_R32(CPCLK_CS0WCR), cs3 = MMIO_R32(CPCLK_CS3WCR), i;
+    unsigned cs0 = MMIO_R32(CPCLK_CS0WCR), cs3 = MMIO_R32(CPCLK_CS3WCR);
+    unsigned cs0b = MMIO_R32(CPCLK_CS0BCR), cs5a = MMIO_R32(CPCLK_CS5AWCR);
+    unsigned sscg = MMIO_R32(CPCLK_SSCGCR), i;
 
+    MMIO_W32(CPCLK_CS0BCR, (cs0b & ~CPCLK_CS0BCR_IDLE_MASK) | CPCLK_CS0BCR_SAFE);
     MMIO_W32(CPCLK_CS0WCR, (cs0 & ~CPCLK_WR_MASK) | (CPCLK_WR_SAFE << CPCLK_WR_SHIFT));
     MMIO_W32(CPCLK_CS3WCR, cs3 | CPCLK_TRC_SAFE);
+    MMIO_W32(CPCLK_CS5AWCR, (cs5a & ~CPCLK_CS5A_MASK) | CPCLK_CS5A_SAFE);
     MMIO_W32(CPCLK_FLLFRQ, (MMIO_R32(CPCLK_FLLFRQ) & ~CPCLK_FLLFRQ_FIELDS) | (want->fllfrq & CPCLK_FLLFRQ_FIELDS));
     MMIO_W32(CPCLK_FRQCR, (MMIO_R32(CPCLK_FRQCR) & ~(CPCLK_FRQCR_FIELDS | CPCLK_FRQCR_KICK))
                           | (want->frqcr & CPCLK_FRQCR_FIELDS) | CPCLK_FRQCR_KICK);
     for (i = 0; i < 1000000u && MMIO_R32(CPCLK_LSTATS) != 0; i++) { }
+    MMIO_W32(CPCLK_SSCGCR, (sscg & ~CPCLK_SSCGCR_SSEN) | (want->sscgcr & CPCLK_SSCGCR_SSEN));
+    if (want->rtcor & CPCLK_RTCOR_MASK)
+        MMIO_W32(CPCLK_RTCOR, CPCLK_RTCOR_KEY | (want->rtcor & CPCLK_RTCOR_MASK));
+    MMIO_W32(CPCLK_CS0BCR, (cs0b & ~CPCLK_CS0BCR_IDLE_MASK) | (want->cs0bcr & CPCLK_CS0BCR_IDLE_MASK));
     MMIO_W32(CPCLK_CS0WCR, (cs0 & ~CPCLK_WR_MASK) | (want->cs0wcr & CPCLK_WR_MASK));
     MMIO_W32(CPCLK_CS3WCR, (cs3 & ~CPCLK_TRC_MASK) | (want->cs3wcr & CPCLK_TRC_MASK));
+    MMIO_W32(CPCLK_CS5AWCR, (cs5a & ~CPCLK_CS5A_MASK) | (want->cs5awcr & CPCLK_CS5A_MASK));
 }
 #endif
 

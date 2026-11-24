@@ -89,8 +89,11 @@
 #define CTR_SQMON           0x0040
 #define CTR_SQCLR           0x0100
 #define CTR_ACLRM           0x0200
+#define CTR_INBUFM          0x4000
+#define CTR_BSTS            0x8000
 #define PIPECFG_BULK        0x4000
 #define PIPECFG_INT         0x8000
+#define PIPECFG_DBLB        0x0200
 #define PIPECFG_SHTNAK      0x0080
 #define PIPECFG_DIR_IN      0x0010
 #define SOFCFG_ENABLE       0x0020      // gint: must be set by hand
@@ -127,7 +130,16 @@ static void UsbFifoWrite(unsigned port, const unsigned char *p, unsigned n)
     UINT32 v32;
     UINT16 v16;
 
-    for (; n >= 4; n -= 4, p += 4) { UsbFifoCopy(&v32, p, 4); *f32 = v32; }
+    if (((unsigned long)p & 3) == 0) {
+        const UINT32 *p32 = (const UINT32 *)p;
+        for (; n >= 16; n -= 16, p32 += 4) {
+            *f32 = p32[0]; *f32 = p32[1]; *f32 = p32[2]; *f32 = p32[3];
+        }
+        for (; n >= 4; n -= 4) *f32 = *p32++;
+        p = (const unsigned char *)p32;
+    } else {
+        for (; n >= 4; n -= 4, p += 4) { UsbFifoCopy(&v32, p, 4); *f32 = v32; }
+    }
     if (n >= 2) {
         UsbFifoCopy(&v16, p, 2);
         *(volatile UINT16 *)f32 = v16;
@@ -142,7 +154,16 @@ static void UsbFifoRead(unsigned port, unsigned char *p, unsigned n)
     volatile UINT32 *f32 = (volatile UINT32 *)CLASSPAD_UA(USB_BASE + port);
     UINT32 v32;
 
-    for (; n >= 4; n -= 4, p += 4) { v32 = *f32; UsbFifoCopy(p, &v32, 4); }
+    if (((unsigned long)p & 3) == 0) {
+        UINT32 *p32 = (UINT32 *)p;
+        for (; n >= 16; n -= 16, p32 += 4) {
+            p32[0] = *f32; p32[1] = *f32; p32[2] = *f32; p32[3] = *f32;
+        }
+        for (; n >= 4; n -= 4) *p32++ = *f32;
+        p = (unsigned char *)p32;
+    } else {
+        for (; n >= 4; n -= 4, p += 4) { v32 = *f32; UsbFifoCopy(p, &v32, 4); }
+    }
     if (n) { v32 = *f32; UsbFifoCopy(p, &v32, n); }
 }
 

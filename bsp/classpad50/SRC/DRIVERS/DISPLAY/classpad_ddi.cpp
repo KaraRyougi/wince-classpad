@@ -16,6 +16,9 @@
 //          panel's native size otherwise), "Panel" (0 = R61524 fx-CG100,
 //          1 = DCS fx-CP400; absent: a Height under 500 means the fx-CG100)
 //------------------------------------------------------------------------------
+#if defined(_MSC_VER) && !defined(DEBUG)
+#pragma optimize("t", on)
+#endif
 #include <windows.h>
 #include <types.h>
 #include <winddi.h>
@@ -30,6 +33,8 @@
 #include "classpad_bkl.h"
 
 #define DISP_PUSH_MS        50
+#define DISP_IDLE_MS        250             // idle wait ceiling so resume (no SetEvent in PowerHandler) is noticed promptly
+#define DISP_CHUNK_PIXELS   16384           // pixel budget per HC_LCD_PUSH trap so IRQs stay responsive
 #define DISP_CONSOLE_ROWS   96              // rows the translator's console keeps (rt/lcdcon.c LINES * CELL_H)
 #define DISP_REG_KEY        TEXT("Drivers\\Display\\ClassPad")
 
@@ -78,7 +83,9 @@ class ClasspadGPE : public GPE
     HANDLE              m_hEvent;
     HANDLE              m_hThread;
     volatile BOOL       m_run;
+    int                 m_dirtyLeft;
     int                 m_dirtyTop;
+    int                 m_dirtyRight;
     int                 m_dirtyBottom;
     DWORD               m_pushes;
     int                 m_panel;            // LCD_PANEL_DCS / LCD_PANEL_R61524
@@ -92,11 +99,12 @@ class ClasspadGPE : public GPE
     CRITICAL_SECTION    m_csLcd;            // the panel's port: the push thread and the brightness escape
     BYTE               *m_pFrame;           // the primary surface, physically contiguous (AllocPhysMem)
     ULONG               m_framePa;          // its physical address
+    BOOL                m_frameP1Safe;      // VA & PA match modulo SH7305 8 KiB cache way -> P1 cached push needs no flush
     int                 m_blit;             // registry "Blit": 1 = HC_LCD_PUSH (default), 2 = HC_LCD_BLIT with our window commands, 0 = translated stores
     int                 m_consoleRows;      // top rows left to the translator's console (registry "Console"), else 0
     ClasspadSurf       *m_pPrimary;         // m_pPrimarySurface, with Relayout
-    USHORT             *m_cvt16;            // 16 -> 16 bpp colour conversion table for ConvertedCopyBlt16 (65536 entries)
-    ULONG               m_cvtProbe[4];      // what the table's converter made of CVT_PROBE: identifies it
+    USHORT             *m_cvt16;            // 16 -> 16 bpp colour conversion table for non-RGB555 converters (65536 entries)
+    ULONG               m_cvtProbe[6];      // what the table's converter made of CVT_PROBE: identifies it
 
 public:
     ClasspadGPE();
@@ -120,9 +128,13 @@ public:
     void            PanelInit();
     SCODE           WrappedLine(GPELineParms *pParms);
     SCODE           WrappedBlt(GPEBltParms *pParms);
+    SCODE           SolidFill16(GPEBltParms *pParms);
+    SCODE           FastCopyBlt16(GPEBltParms *pParms);
     SCODE           ConvertedCopyBlt16(GPEBltParms *pParms);
     void            SetWindow(unsigned x0, unsigned x1, unsigned y0, unsigned y1);
+    void            DirtyRect(int left, int top, int right, int bottom);
     void            Dirty(int top, int bottom);
+    void            PushRect(int left, int top, int right, int bottom);
     void            PushRows(int top, int bottom);
     static DWORD WINAPI PushThread(LPVOID pThis);
 };
@@ -170,7 +182,7 @@ ClasspadGPE::ClasspadGPE()
 
     m_iRotate = DMDO_0;
     m_cvt16 = NULL;
-    m_cvtProbe[0] = m_cvtProbe[1] = m_cvtProbe[2] = m_cvtProbe[3] = 0;
+    memset(m_cvtProbe, 0, sizeof m_cvtProbe);
     m_mode.modeId    = 0;
     m_mode.width     = width;
     m_mode.height    = height;
@@ -184,12 +196,15 @@ ClasspadGPE::ClasspadGPE()
     m_nScreenHeightSave = height;
 
     // The frame lives in physically contiguous memory so the push can hand
-    // its rows to the translator by physical address (PushRows). "Blit"=0
-    // in the registry keeps the translated store loop instead, 2 the
-    // pixels-only hypercall with the window commands from here.
+    // its pixels to the translator by physical address (PushRect). Align PA to
+    // 8 KiB (SH7305 D-cache way size) so VA and P1 share cache colour and no
+    // CacheRangeFlush is needed before HC_LCD_PUSH / HC_LCD_BLIT. "Blit"=0 in
+    // the registry keeps translated stores, 2 uses HC_LCD_BLIT with our window.
     m_blit    = (int)RegDword(TEXT("Blit"), 1);
     m_framePa = 0;
-    m_pFrame  = (BYTE *)AllocPhysMem(width * 2 * height, PAGE_READWRITE, 0, 0, &m_framePa);
+    m_pFrame  = (BYTE *)AllocPhysMem(width * 2 * height, PAGE_READWRITE, 0x2000, 0, &m_framePa);
+    if (!m_pFrame) m_pFrame = (BYTE *)AllocPhysMem(width * 2 * height, PAGE_READWRITE, 0, 0, &m_framePa);
+    m_frameP1Safe = m_pFrame && ((((ULONG)m_pFrame ^ m_framePa) & 0x1FFFu) == 0);
     if (m_pFrame) m_pPrimary = new ClasspadSurf(width, height, m_pFrame, width * 2, gpe16Bpp);
     else          m_pPrimary = new ClasspadSurf(width, height, gpe16Bpp);
     m_pPrimarySurface = m_pPrimary;
@@ -218,16 +233,18 @@ ClasspadGPE::ClasspadGPE()
     }
 
     InitializeCriticalSection(&m_cs);
+    m_dirtyLeft = 0; m_dirtyRight = width;
     m_dirtyTop = 0; m_dirtyBottom = height;             // first push: the whole screen
     m_pushes = 0;
     m_run = TRUE;
     m_hEvent = CreateEvent(NULL, FALSE, TRUE, NULL);
     m_hThread = CreateThread(NULL, 0, PushThread, this, 0, NULL);
-    if (m_hThread) CeSetThreadPriority(m_hThread, 250);  // below normal application threads
+    if (m_hThread) CeSetThreadPriority(m_hThread, 250);  // above normal apps (251) so busy loops (ListView_DragSelect, Plotter-Z) still refresh, below driver ISTs
 
-    RETAILMSG(1, (TEXT("CLASSPAD DDI: %dx%d 16bpp, %s panel, frame buffer %08x (phys %08x), stride %d, push %s\r\n"),
+    RETAILMSG(1, (TEXT("CLASSPAD DDI: %dx%d 16bpp, %s panel, frame buffer %08x (phys %08x%s), stride %d, push %s\r\n"),
                   width, height, m_panel == LCD_PANEL_DCS ? TEXT("DCS fx-CP400") : TEXT("R61524 fx-CG100"),
                   m_pPrimarySurface ? m_pPrimarySurface->Buffer() : NULL, m_framePa,
+                  m_frameP1Safe ? TEXT(" P1") : TEXT(" P2"),
                   m_pPrimarySurface ? m_pPrimarySurface->Stride() : 0,
                   (m_pFrame && m_blit) ? TEXT("by hypercall") : TEXT("by translated stores")));
 }
@@ -240,6 +257,7 @@ ClasspadGPE::~ClasspadGPE()
     if (m_hEvent) CloseHandle(m_hEvent);
     DeleteCriticalSection(&m_cs);
     DeleteCriticalSection(&m_csLcd);
+    if (m_cvt16) LocalFree(m_cvt16);
     delete m_pPrimarySurface;
     if (m_pFrame) FreePhysMem(m_pFrame);
 }
@@ -337,6 +355,8 @@ LONG ClasspadGPE::RotateDisplay(int angle)
         // one: clear it, GWES repaints everything after the mode change.
         m_pPrimary->Relayout(m_nScreenWidth, m_nScreenHeight);
         memset(m_pPrimary->Buffer(), 0, m_nScreenWidthSave * 2 * m_nScreenHeightSave);
+        m_dirtyLeft = 0;
+        m_dirtyRight = m_nScreenWidth;
         m_dirtyTop = 0;
         m_dirtyBottom = m_nScreenHeight;
         SetEvent(m_hEvent);
@@ -354,20 +374,30 @@ SCODE ClasspadGPE::AllocSurface(GPESurf **ppSurf, int width, int height, EGPEFor
     return S_OK;
 }
 
-// Logical rows [top, bottom) changed (the surface's own rows, whatever the rotation)
-void ClasspadGPE::Dirty(int top, int bottom)
+// Logical rectangle [left, right) x [top, bottom) changed (in the surface's own coordinates)
+void ClasspadGPE::DirtyRect(int left, int top, int right, int bottom)
 {
+    if (left < 0) left = 0;
     if (top < 0) top = 0;
+    if (right > m_nScreenWidth) right = m_nScreenWidth;
     if (bottom > m_nScreenHeight) bottom = m_nScreenHeight;
-    if (top >= bottom) return;
+    if (left >= right || top >= bottom) return;
     EnterCriticalSection(&m_cs);
-    // One wakeup per pending batch. Additional drawing widens the range
+    // One wakeup per pending batch. Additional drawing widens the box
     // already owned by the pending wakeup (or the active push thread).
-    BOOL notify = m_dirtyTop >= m_dirtyBottom;
+    BOOL notify = (m_dirtyTop >= m_dirtyBottom || m_dirtyLeft >= m_dirtyRight);
+    if (left < m_dirtyLeft) m_dirtyLeft = left;
+    if (right > m_dirtyRight) m_dirtyRight = right;
     if (top < m_dirtyTop) m_dirtyTop = top;
     if (bottom > m_dirtyBottom) m_dirtyBottom = bottom;
     LeaveCriticalSection(&m_cs);
     if (notify) SetEvent(m_hEvent);
+}
+
+// Logical rows [top, bottom) changed (the surface's own rows, whatever the rotation)
+void ClasspadGPE::Dirty(int top, int bottom)
+{
+    DirtyRect(0, top, m_nScreenWidth, bottom);
 }
 
 SCODE ClasspadGPE::Line(GPELineParms *pParms, EGPEPhase phase)
@@ -379,10 +409,34 @@ SCODE ClasspadGPE::Line(GPELineParms *pParms, EGPEPhase phase)
 
 SCODE ClasspadGPE::WrappedLine(GPELineParms *pParms)
 {
+    // Snapshot geometry before EmulatedLine so our dirty rect covers the full segment.
+    int x0 = (int)pParms->xStart;
+    int y0 = (int)pParms->yStart;
+    int n  = (int)pParms->cPels;
+    RECTL clip;
+    BOOL hasClip = (pParms->prclClip != NULL);
+    if (hasClip) clip = *pParms->prclClip;
     SCODE sc = EmulatedLine(pParms);
     if (pParms->pDst == m_pPrimarySurface) {
-        if (pParms->prclClip) Dirty(pParms->prclClip->top, pParms->prclClip->bottom);
-        else Dirty(0, m_nScreenHeight);
+        if (n > 0) {
+            // Every pixel of a cPels-pixel Bresenham segment stays within +/-cPels
+            // of (xStart, yStart) along both axes, independent of octant encoding.
+            int left   = x0 - n;
+            int right  = x0 + n + 1;
+            int top    = y0 - n;
+            int bottom = y0 + n + 1;
+            if (hasClip) {
+                if (clip.left > left)     left = clip.left;
+                if (clip.top > top)       top = clip.top;
+                if (clip.right < right)   right = clip.right;
+                if (clip.bottom < bottom) bottom = clip.bottom;
+            }
+            DirtyRect(left, top, right, bottom);
+        } else if (hasClip) {
+            DirtyRect(clip.left, clip.top, clip.right, clip.bottom);
+        } else {
+            Dirty(0, m_nScreenHeight);
+        }
     }
     return sc;
 }
@@ -392,25 +446,127 @@ SCODE ClasspadGPE::WrappedLine(GPELineParms *pParms)
 // pixel through a virtual call inside its generic rop/mask/clip machinery:
 // Plotter-Z's back buffer is a 16 bpp BI_RGB DIB (RGB555) blitted onto the
 // RGB565 primary after every column of a recalculation, and that path was
-// 40% of the recalculation's time under the translator (2026-11-09). A plain
-// copy with a converter (SRCCOPY, no mask, no stretch, no alpha, same size,
-// 16 bpp both sides) goes through a 65536-entry table instead. The table is
-// filled from the converter itself (one virtual call per entry, once) and
-// identified by what the converter makes of four probe values, since GWES
-// may hand out a new converter object for the same translation.
-static const ULONG CVT_PROBE[4] = { 0x7FFF, 0x001F, 0x03E0, 0x7C00 };
+// 40% of the recalculation's time under the translator (2026-11-09). Standard
+// RGB555 -> RGB565 converters run inline with bitwise ops (2 pixels per
+// 32-bit word, zero 128 KiB LUT); any other 16 -> 16 converter falls back to
+// a 65536-entry table identified by six probe values.
+static const ULONG CVT_PROBE[6] = { 0x7FFF, 0x001F, 0x03E0, 0x7C00, 0x8000, 0x0200 };
 
 SCODE ClasspadGPE::BltPrepare(GPEBltParms *pParms)
 {
     pParms->pBlt = (SCODE (GPE::*)(GPEBltParms *))&ClasspadGPE::WrappedBlt;
-    if (pParms->rop4 == 0xCCCC && pParms->pSrc && pParms->pDst && !pParms->pMask &&
-        pParms->pConvert && pParms->pColorConverter && !pParms->pLookup &&
-        !(pParms->bltFlags & (BLT_STRETCH | BLT_TRANSPARENT | BLT_ALPHABLEND)) &&
-        pParms->pSrc->Format() == gpe16Bpp && pParms->pDst->Format() == gpe16Bpp &&
-        pParms->prclSrc && pParms->prclDst &&
+    if (!pParms->pDst || pParms->pDst->Format() != gpe16Bpp || !pParms->prclDst ||
+        pParms->pMask || pParms->pLookup ||
+        (pParms->bltFlags & (BLT_STRETCH | BLT_TRANSPARENT | BLT_ALPHABLEND)) ||
+        pParms->prclDst->left >= pParms->prclDst->right ||
+        pParms->prclDst->top >= pParms->prclDst->bottom)
+        return S_OK;
+
+    if (!pParms->pConvert) {
+        if ((pParms->rop4 == 0xF0F0 && pParms->solidColor != (COLOR)-1 && !pParms->pBrush) ||
+            pParms->rop4 == 0x0000 || pParms->rop4 == 0xFFFF) {
+            pParms->pBlt = (SCODE (GPE::*)(GPEBltParms *))&ClasspadGPE::SolidFill16;
+            return S_OK;
+        }
+        if (pParms->rop4 == 0xCCCC && pParms->pSrc && pParms->pSrc->Format() == gpe16Bpp &&
+            pParms->prclSrc &&
+            pParms->prclSrc->right - pParms->prclSrc->left == pParms->prclDst->right - pParms->prclDst->left &&
+            pParms->prclSrc->bottom - pParms->prclSrc->top == pParms->prclDst->bottom - pParms->prclDst->top) {
+            pParms->pBlt = (SCODE (GPE::*)(GPEBltParms *))&ClasspadGPE::FastCopyBlt16;
+            return S_OK;
+        }
+    } else if (pParms->rop4 == 0xCCCC && pParms->pSrc && pParms->pColorConverter &&
+        pParms->pSrc->Format() == gpe16Bpp && pParms->prclSrc &&
         pParms->prclSrc->right - pParms->prclSrc->left == pParms->prclDst->right - pParms->prclDst->left &&
-        pParms->prclSrc->bottom - pParms->prclSrc->top == pParms->prclDst->bottom - pParms->prclDst->top)
+        pParms->prclSrc->bottom - pParms->prclSrc->top == pParms->prclDst->bottom - pParms->prclDst->top) {
         pParms->pBlt = (SCODE (GPE::*)(GPEBltParms *))&ClasspadGPE::ConvertedCopyBlt16;
+    }
+    return S_OK;
+}
+
+SCODE ClasspadGPE::SolidFill16(GPEBltParms *pParms)
+{
+    RECTL dst = *pParms->prclDst;
+    USHORT col = (pParms->rop4 == 0x0000) ? 0x0000 : (pParms->rop4 == 0xFFFF) ? 0xFFFF : (USHORT)pParms->solidColor;
+    int w, h, y, dstride;
+
+    if (pParms->prclClip) {
+        RECTL *c = pParms->prclClip;
+        if (c->left > dst.left)     dst.left = c->left;
+        if (c->top > dst.top)       dst.top = c->top;
+        if (c->right < dst.right)   dst.right = c->right;
+        if (c->bottom < dst.bottom) dst.bottom = c->bottom;
+    }
+    if (dst.left < 0) dst.left = 0;
+    if (dst.top < 0) dst.top = 0;
+    if (dst.right > pParms->pDst->Width())   dst.right = pParms->pDst->Width();
+    if (dst.bottom > pParms->pDst->Height()) dst.bottom = pParms->pDst->Height();
+    w = dst.right - dst.left;
+    h = dst.bottom - dst.top;
+    if (w > 0 && h > 0) {
+        UINT32 pair = (UINT32)col | ((UINT32)col << 16);
+        BYTE *dp;
+        dstride = pParms->pDst->Stride();
+        dp = (BYTE *)pParms->pDst->Buffer() + dst.top * dstride + dst.left * 2;
+        for (y = 0; y < h; y++, dp += dstride) {
+            USHORT *d = (USHORT *)dp;
+            int n = w;
+            UINT32 *d32;
+            if (((ULONG)d & 2) && n > 0) { *d++ = col; n--; }
+            d32 = (UINT32 *)d;
+            while (n >= 8) {
+                d32[0] = pair; d32[1] = pair; d32[2] = pair; d32[3] = pair;
+                d32 += 4; n -= 8;
+            }
+            while (n >= 2) { *d32++ = pair; n -= 2; }
+            if (n) *(USHORT *)d32 = col;
+        }
+        if (pParms->pDst == m_pPrimarySurface) DirtyRect(dst.left, dst.top, dst.left + w, dst.top + h);
+    }
+    return S_OK;
+}
+
+SCODE ClasspadGPE::FastCopyBlt16(GPEBltParms *pParms)
+{
+    RECTL dst = *pParms->prclDst;
+    int sx = pParms->prclSrc->left, sy = pParms->prclSrc->top, w, h, y;
+
+    if (pParms->prclClip) {
+        RECTL *c = pParms->prclClip;
+        if (c->left > dst.left)     { sx += c->left - dst.left; dst.left = c->left; }
+        if (c->top > dst.top)       { sy += c->top - dst.top;   dst.top = c->top; }
+        if (c->right < dst.right)   dst.right = c->right;
+        if (c->bottom < dst.bottom) dst.bottom = c->bottom;
+    }
+    if (dst.left < 0)   { sx -= dst.left; dst.left = 0; }
+    if (dst.top < 0)    { sy -= dst.top;  dst.top = 0; }
+    if (sx < 0)         { dst.left -= sx; sx = 0; }
+    if (sy < 0)         { dst.top -= sy;  sy = 0; }
+    if (dst.right > pParms->pDst->Width())   dst.right = pParms->pDst->Width();
+    if (dst.bottom > pParms->pDst->Height()) dst.bottom = pParms->pDst->Height();
+    w = dst.right - dst.left;
+    h = dst.bottom - dst.top;
+    if (sx + w > pParms->pSrc->Width())  w = pParms->pSrc->Width() - sx;
+    if (sy + h > pParms->pSrc->Height()) h = pParms->pSrc->Height() - sy;
+    if (w > 0 && h > 0) {
+        int sstride = pParms->pSrc->Stride(), dstride = pParms->pDst->Stride();
+        size_t bytes = (size_t)w * 2;
+        BOOL same = (pParms->pSrc == pParms->pDst);
+        if (same && dst.top > sy) {
+            const BYTE *src = (const BYTE *)pParms->pSrc->Buffer() + (sy + h - 1) * sstride + sx * 2;
+            BYTE *dp = (BYTE *)pParms->pDst->Buffer() + (dst.top + h - 1) * dstride + dst.left * 2;
+            for (y = 0; y < h; y++, src -= sstride, dp -= dstride) memmove(dp, src, bytes);
+        } else if (same && dst.top == sy) {
+            const BYTE *src = (const BYTE *)pParms->pSrc->Buffer() + sy * sstride + sx * 2;
+            BYTE *dp = (BYTE *)pParms->pDst->Buffer() + dst.top * dstride + dst.left * 2;
+            for (y = 0; y < h; y++, src += sstride, dp += dstride) memmove(dp, src, bytes);
+        } else {
+            const BYTE *src = (const BYTE *)pParms->pSrc->Buffer() + sy * sstride + sx * 2;
+            BYTE *dp = (BYTE *)pParms->pDst->Buffer() + dst.top * dstride + dst.left * 2;
+            for (y = 0; y < h; y++, src += sstride, dp += dstride) memcpy(dp, src, bytes);
+        }
+        if (pParms->pDst == m_pPrimarySurface) DirtyRect(dst.left, dst.top, dst.left + w, dst.top + h);
+    }
     return S_OK;
 }
 
@@ -418,19 +574,25 @@ SCODE ClasspadGPE::ConvertedCopyBlt16(GPEBltParms *pParms)
 {
     ColorConverter *cvt = pParms->pColorConverter;
     unsigned long (ColorConverter::*convert)(unsigned long) = pParms->pConvert;
-    ULONG probe[4];
+    ULONG probe[6];
     RECTL dst = *pParms->prclDst;
     int sx = pParms->prclSrc->left, sy = pParms->prclSrc->top, x, y, w, h;
-    int i;
-    for (i = 0; i < 4; i++) probe[i] = (cvt->*convert)(CVT_PROBE[i]);
-    if (!m_cvt16) {
-        m_cvt16 = (USHORT *)LocalAlloc(LMEM_FIXED, 65536 * sizeof(USHORT));
-        if (!m_cvt16) return EmulatedBlt(pParms);
-        m_cvtProbe[0] = ~probe[0];                       // force the fill below
+    int i, rgb555 = 0;
+    for (i = 0; i < 6; i++) probe[i] = (cvt->*convert)(CVT_PROBE[i]);
+    if (probe[1] == 0x001F && probe[3] == 0xF800 && probe[4] == 0x0000) {
+        if (probe[0] == 0xFFDF && probe[2] == 0x07C0 && probe[5] == 0x0400) rgb555 = 1;       // zero-extended green LSB
+        else if (probe[0] == 0xFFFF && probe[2] == 0x07E0 && probe[5] == 0x0420) rgb555 = 2;  // replicated green MSB
     }
-    if (probe[0] != m_cvtProbe[0] || probe[1] != m_cvtProbe[1] || probe[2] != m_cvtProbe[2] || probe[3] != m_cvtProbe[3]) {
-        for (i = 0; i < 65536; i++) m_cvt16[i] = (USHORT)(cvt->*convert)((unsigned long)i);
-        for (i = 0; i < 4; i++) m_cvtProbe[i] = probe[i];
+    if (!rgb555) {
+        if (!m_cvt16) {
+            m_cvt16 = (USHORT *)LocalAlloc(LMEM_FIXED, 65536 * sizeof(USHORT));
+            if (!m_cvt16) return EmulatedBlt(pParms);
+            m_cvtProbe[0] = ~probe[0];                       // force the fill below
+        }
+        if (memcmp(probe, m_cvtProbe, sizeof probe) != 0) {
+            for (i = 0; i < 65536; i++) m_cvt16[i] = (USHORT)(cvt->*convert)((unsigned long)i);
+            memcpy(m_cvtProbe, probe, sizeof probe);
+        }
     }
     if (pParms->prclClip) {
         RECTL *c = pParms->prclClip;
@@ -450,42 +612,74 @@ SCODE ClasspadGPE::ConvertedCopyBlt16(GPEBltParms *pParms)
     if (sx + w > pParms->pSrc->Width())  w = pParms->pSrc->Width() - sx;
     if (sy + h > pParms->pSrc->Height()) h = pParms->pSrc->Height() - sy;
     if (w > 0 && h > 0) {
-        const USHORT *tab = m_cvt16;
         int sstride = pParms->pSrc->Stride(), dstride = pParms->pDst->Stride();
         const BYTE *src = (const BYTE *)pParms->pSrc->Buffer() + sy * sstride + sx * 2;
         BYTE *dp = (BYTE *)pParms->pDst->Buffer() + dst.top * dstride + dst.left * 2;
-        for (y = 0; y < h; y++, src += sstride, dp += dstride) {
-            const USHORT *s = (const USHORT *)src;
-            USHORT *d = (USHORT *)dp;
-            for (x = 0; x < w; x++) d[x] = tab[s[x]];
+        if (rgb555 == 1) {
+            for (y = 0; y < h; y++, src += sstride, dp += dstride) {
+                const USHORT *s = (const USHORT *)src;
+                USHORT *d = (USHORT *)dp;
+                int n = w;
+                if ((((ULONG)s ^ (ULONG)d) & 2) == 0) {
+                    if (((ULONG)d & 2) && n > 0) { USHORT v = *s++; *d++ = (USHORT)(((v & 0x7FE0) << 1) | (v & 0x001F)); n--; }
+                    const UINT32 *s32 = (const UINT32 *)s;
+                    UINT32 *d32 = (UINT32 *)d;
+                    while (n >= 2) { UINT32 v = *s32++; *d32++ = ((v & 0x7FE07FE0u) << 1) | (v & 0x001F001Fu); n -= 2; }
+                    s = (const USHORT *)s32; d = (USHORT *)d32;
+                }
+                while (n-- > 0) { USHORT v = *s++; *d++ = (USHORT)(((v & 0x7FE0) << 1) | (v & 0x001F)); }
+            }
+        } else if (rgb555 == 2) {
+            for (y = 0; y < h; y++, src += sstride, dp += dstride) {
+                const USHORT *s = (const USHORT *)src;
+                USHORT *d = (USHORT *)dp;
+                int n = w;
+                if ((((ULONG)s ^ (ULONG)d) & 2) == 0) {
+                    if (((ULONG)d & 2) && n > 0) { USHORT v = *s++; *d++ = (USHORT)(((v & 0x7FE0) << 1) | (v & 0x001F) | ((v & 0x0200) >> 4)); n--; }
+                    const UINT32 *s32 = (const UINT32 *)s;
+                    UINT32 *d32 = (UINT32 *)d;
+                    while (n >= 2) { UINT32 v = *s32++; *d32++ = ((v & 0x7FE07FE0u) << 1) | (v & 0x001F001Fu) | ((v & 0x02000200u) >> 4); n -= 2; }
+                    s = (const USHORT *)s32; d = (USHORT *)d32;
+                }
+                while (n-- > 0) { USHORT v = *s++; *d++ = (USHORT)(((v & 0x7FE0) << 1) | (v & 0x001F) | ((v & 0x0200) >> 4)); }
+            }
+        } else {
+            const USHORT *tab = m_cvt16;
+            for (y = 0; y < h; y++, src += sstride, dp += dstride) {
+                const USHORT *s = (const USHORT *)src;
+                USHORT *d = (USHORT *)dp;
+                for (x = 0; x < w; x++) d[x] = tab[s[x]];
+            }
         }
-        if (pParms->pDst == m_pPrimarySurface) Dirty(dst.top, dst.top + h);
+        if (pParms->pDst == m_pPrimarySurface) DirtyRect(dst.left, dst.top, dst.left + w, dst.top + h);
     }
     return S_OK;
 }
 
 SCODE ClasspadGPE::WrappedBlt(GPEBltParms *pParms)
 {
-    static int logged;
+    RECTL dst, clip;
+    BOOL hasDst = (pParms->prclDst != NULL);
+    BOOL hasClip = (pParms->prclClip != NULL);
+    if (hasDst) dst = *pParms->prclDst;
+    if (hasClip) clip = *pParms->prclClip;
     SCODE sc = EmulatedBlt(pParms);
     if (pParms->pDst == m_pPrimarySurface) {
-        if (pParms->prclDst) Dirty(pParms->prclDst->top, pParms->prclDst->bottom);
-        else Dirty(0, m_nScreenHeight);
-    }
-    // Diagnostic (2026-11-04): exact-colour fills and lines reach the frame
-    // buffer, blits with a dithered brush or a glyph mask seem not to. Log
-    // the first blits: what GWES asks for and what EmulatedBlt says.
-    if (logged < 48) {
-        logged++;
-        RETAILMSG(1, (TEXT("CLASSPAD DDI: blt rop4=%04X dst=%d,%d-%d,%d %s src=%d mask=%d brush=%d flags=%08X color=%08X -> %08X\r\n"),
-                      (UINT)pParms->rop4,
-                      pParms->prclDst ? pParms->prclDst->left : -1, pParms->prclDst ? pParms->prclDst->top : -1,
-                      pParms->prclDst ? pParms->prclDst->right : -1, pParms->prclDst ? pParms->prclDst->bottom : -1,
-                      pParms->pDst == m_pPrimarySurface ? TEXT("screen") : TEXT("offscreen"),
-                      pParms->pSrc ? (int)pParms->pSrc->Format() : -1,
-                      pParms->pMask ? (int)pParms->pMask->Format() : -1,
-                      pParms->pBrush ? (int)pParms->pBrush->Format() : -1,
-                      (UINT)pParms->bltFlags, (UINT)pParms->solidColor, (UINT)sc));
+        if (hasDst) {
+            int left = dst.left, top = dst.top;
+            int right = dst.right, bottom = dst.bottom;
+            if (left > right) { int t = left; left = right; right = t; }
+            if (top > bottom) { int t = top; top = bottom; bottom = t; }
+            if (hasClip) {
+                if (clip.left > left)     left = clip.left;
+                if (clip.top > top)       top = clip.top;
+                if (clip.right < right)   right = clip.right;
+                if (clip.bottom < bottom) bottom = clip.bottom;
+            }
+            DirtyRect(left, top, right, bottom);
+        } else {
+            Dirty(0, m_nScreenHeight);
+        }
     }
     return sc;
 }
@@ -526,73 +720,71 @@ void ClasspadGPE::SetWindow(unsigned x0, unsigned x1, unsigned y0, unsigned y1)
     }
 }
 
-// Push the logical rows [top, bottom) of the frame to the panel. Portrait:
-// the rows as they are, by the translator (HC_LCD_PUSH, "Blit"=1), its
-// pixel-only hypercall after our window commands ("Blit"=2) or translated
-// stores. Rotated: the logical buffer is the panel turned by the angle
-// (classpad_lcdrot.h), so the rows are a physical window (columns for 90 and
-// 270) streamed in panel order from transposed reads, by the translator's
-// rotated form of HC_LCD_PUSH or, without it, here. R61524 (fx-CG100):
-// portrait only, with its bottom-of-frame presentation rule kept.
-void ClasspadGPE::PushRows(int top, int bottom)
+// Push the logical rectangle [left, right) x [top, bottom) of the frame to the
+// panel. Maps the dirty box to the physical DCS window via ClasspadRotRect,
+// passes the P1 cached alias when cache-colour-aligned (skipping CacheRangeFlush),
+// and bounds each HC_LCD_PUSH trap by a pixel budget (DISP_CHUNK_PIXELS) rather
+// than 4-row strips so full frames need ~11 hypercalls instead of 132.
+void ClasspadGPE::PushRect(int left, int top, int right, int bottom)
 {
     const BYTE *fb = (const BYTE *)m_pPrimarySurface->Buffer();
     int stride = m_pPrimarySurface->Stride(), width = m_nScreenWidthSave, height = m_nScreenHeightSave, x, y;
-    unsigned rot = (unsigned)m_iRotate, x0, x1, y0, y1;
+    unsigned rot = (unsigned)m_iRotate, x0, x1, y0, y1, pw, chunkRows;
+    DWORD fbBase;
     if (!fb) return;
+    if (left < 0) left = 0;
     if (top < 0) top = 0;
+    if (right > m_nScreenWidth) right = m_nScreenWidth;
     if (bottom > m_nScreenHeight) bottom = m_nScreenHeight;
-    if (top >= bottom) return;
-    ClasspadRotWindow(rot, (unsigned)width, (unsigned)height, (unsigned)top, (unsigned)bottom, &x0, &x1, &y0, &y1);
-    if (m_panel != LCD_PANEL_DCS) y1 = (unsigned)height;
+    if (left >= right || top >= bottom) return;
+    ClasspadRotRect(rot, (unsigned)width, (unsigned)height,
+                    (unsigned)left, (unsigned)top, (unsigned)right, (unsigned)bottom,
+                    &x0, &x1, &y0, &y1);
+    if (m_panel != LCD_PANEL_DCS) { x0 = 0; x1 = (unsigned)width; y1 = (unsigned)height; }
     if (y0 < (unsigned)m_consoleRows) y0 = (unsigned)m_consoleRows;      // the console's physical rows are not ours
     if (y0 >= y1 || x0 >= x1) return;
-    if (rot == DMDO_0) {
-        const BYTE *src = fb + y0 * stride;
-        DWORD len = (DWORD)(y1 - y0) * stride;
-        if (m_panel == LCD_PANEL_DCS && m_pFrame && m_blit == 1 && ClasspadCanTrap()) {
-            // Native push by the translator with the window set there too
-            // (HC_LCD_PUSH, docs/04): write the rows back from the cache, then
-            // hand it the P2 alias of their physical address. One hypercall
-            // replaces width*rows translated stores, each of which cost a swap
-            // sequence, and nothing the translator prints (its panel console)
-            // can land between the window commands and the pixels.
+    pw = x1 - x0;
+    chunkRows = DISP_CHUNK_PIXELS / pw;
+    if (chunkRows < 4u) chunkRows = 4u;
+    fbBase = (m_frameP1Safe ? 0x80000000u : 0xA0000000u) | (m_framePa & 0x1FFFFFFFu);
+
+    if (m_panel == LCD_PANEL_DCS && m_pFrame && m_blit == 1 && ClasspadCanTrap()) {
+        if (!m_frameP1Safe) {
+            const BYTE *src = fb + top * stride;
+            DWORD len = (DWORD)(bottom - top) * stride;
             CacheRangeFlush((LPVOID)src, len, CACHE_SYNC_WRITEBACK);
-            // Each trap runs with BL=1. Bound it to four rows and return to
-            // guest code between strips so pending input/timer IRQs can run.
-            for (y = (int)y0; y < (int)y1; y += 4) {
-                DWORD rows = (DWORD)(((int)y1 - y < 4) ? (int)y1 - y : 4);
-                ClasspadHcLcdPush(0xA0000000 | ((m_framePa + y * stride) & 0x1FFFFFFF), (DWORD)y, rows, (DWORD)width);
+        }
+        if (rot == DMDO_0 && x0 == 0 && x1 == (unsigned)width) {
+            for (y = (int)y0; y < (int)y1; y += (int)chunkRows) {
+                DWORD rows = (DWORD)(((unsigned)(y1 - y) < chunkRows) ? (y1 - (unsigned)y) : chunkRows);
+                ClasspadHcLcdPush(fbBase + (DWORD)y * (DWORD)stride, (DWORD)y, rows, (DWORD)width);
             }
         } else {
-            SetWindow(0, (unsigned)width, y0, y1);
-            if (m_pFrame && m_blit && ClasspadCanTrap()) {
-                // pixels by the translator (HC_LCD_BLIT), the window by us: "Blit"=2, or the R61524
+            for (y = (int)y0; y < (int)y1; y += (int)chunkRows) {
+                unsigned ye = (unsigned)y + chunkRows < y1 ? (unsigned)y + chunkRows : y1;
+                ClasspadHcLcdPush(fbBase, (DWORD)y | (ye << 16), x0 | (x1 << 16), CLASSPAD_ROT_PUSH_TAG | rot);
+            }
+        }
+    } else if (rot == DMDO_0 && x0 == 0 && x1 == (unsigned)width) {
+        SetWindow(0, (unsigned)width, y0, y1);
+        if (m_pFrame && m_blit && ClasspadCanTrap()) {
+            if (!m_frameP1Safe) {
+                const BYTE *src = fb + y0 * stride;
+                DWORD len = (DWORD)(y1 - y0) * stride;
                 CacheRangeFlush((LPVOID)src, len, CACHE_SYNC_WRITEBACK);
-                ClasspadHcLcdBlit(0xA0000000 | ((m_framePa + y0 * stride) & 0x1FFFFFFF), (DWORD)(y1 - y0) * width, LCD_DATA_PORT);
-            } else {
-                for (y = (int)y0; y < (int)y1; y++) {
-                    const USHORT *row = (const USHORT *)(fb + y * stride);
-                    for (x = 0; x < width; x++) LcdWriteData(row[x]);
-                }
+            }
+            ClasspadHcLcdBlit(fbBase + (DWORD)y0 * (DWORD)stride, (DWORD)(y1 - y0) * width, LCD_DATA_PORT);
+        } else {
+            for (y = (int)y0; y < (int)y1; y++) {
+                const USHORT *row = (const USHORT *)(fb + y * stride);
+                for (x = 0; x < width; x++) LcdWriteData(row[x]);
             }
         }
     } else {
-        // The logical rows [top, bottom) hold every pixel of the window, contiguous in the buffer
-        const BYTE *src = fb + top * stride;
-        DWORD len = (DWORD)(bottom - top) * stride;
-        if (m_panel == LCD_PANEL_DCS && m_pFrame && m_blit == 1 && ClasspadCanTrap()) {
-            CacheRangeFlush((LPVOID)src, len, CACHE_SYNC_WRITEBACK);
-            for (y = (int)y0; y < (int)y1; y += 4) {
-                unsigned ye = (unsigned)y + 4 < y1 ? (unsigned)y + 4 : y1;
-                ClasspadHcLcdPush(0xA0000000 | (m_framePa & 0x1FFFFFFF), (DWORD)y | (ye << 16), x0 | (x1 << 16), CLASSPAD_ROT_PUSH_TAG | rot);
-            }
-        } else {
-            SetWindow(x0, x1, y0, y1);
-            for (y = (int)y0; y < (int)y1; y++)
-                for (x = (int)x0; x < (int)x1; x++)
-                    LcdWriteData(*(const USHORT *)(fb + ClasspadRotOffset(rot, (unsigned)width, (unsigned)height, (unsigned)x, (unsigned)y)));
-        }
+        SetWindow(x0, x1, y0, y1);
+        for (y = (int)y0; y < (int)y1; y++)
+            for (x = (int)x0; x < (int)x1; x++)
+                LcdWriteData(*(const USHORT *)(fb + ClasspadRotOffset(rot, (unsigned)width, (unsigned)height, (unsigned)x, (unsigned)y)));
     }
     if (m_panel == LCD_PANEL_DCS && !m_displayOn) {
         LcdCommand(LCD_DCS_DISPON);
@@ -600,7 +792,12 @@ void ClasspadGPE::PushRows(int top, int bottom)
     }
     m_pushes++;
     if (m_pushes <= 3 || (m_pushes % 200) == 0)
-        RETAILMSG(1, (TEXT("CLASSPAD DDI: push %d, logical rows %d..%d, window %u..%u x %u..%u\r\n"), m_pushes, top, bottom, x0, x1, y0, y1));
+        RETAILMSG(1, (TEXT("CLASSPAD DDI: push %d, logical %d,%d..%d,%d, window %u..%u x %u..%u\r\n"), m_pushes, left, top, right, bottom, x0, x1, y0, y1));
+}
+
+void ClasspadGPE::PushRows(int top, int bottom)
+{
+    PushRect(0, top, m_nScreenWidth, bottom);
 }
 
 // Power off / on from GWES. Called with the system mostly stopped: register
@@ -667,12 +864,8 @@ DWORD WINAPI ClasspadGPE::PushThread(LPVOID pThis)
     ClasspadGPE *p = (ClasspadGPE *)pThis;
     DWORD nextPush = GetTickCount();
     while (p->m_run) {
-        int top, bottom;
-        WaitForSingleObject(p->m_hEvent, DISP_PUSH_MS);
-        // An event wakes the thread immediately; it is not a rate limit.
-        // Keep collecting dirty rows until the next allowed push time.
-        LONG wait = (LONG)(nextPush - GetTickCount());
-        if (wait > 0) Sleep((DWORD)wait);
+        int left, top, right, bottom;
+        WaitForSingleObject(p->m_hEvent, p->m_suspended ? DISP_PUSH_MS : DISP_IDLE_MS);
         if (!p->m_run) break;
         if (p->m_suspended) continue;
         if (p->m_resumePending) {
@@ -684,14 +877,26 @@ DWORD WINAPI ClasspadGPE::PushThread(LPVOID pThis)
             LcdSetBacklight(p->m_panelNew, p->m_brightness);   // the backlight back (PowerHandler set it to 0)
             LeaveCriticalSection(&p->m_csLcd);
             p->Dirty(0, p->m_nScreenHeight);
+        } else if (p->m_dirtyTop >= p->m_dirtyBottom || p->m_dirtyLeft >= p->m_dirtyRight) {
+            continue;
         }
+        // An event wakes the thread immediately; it is not a rate limit.
+        // Keep collecting dirty regions until the next allowed push time.
+        {
+            LONG wait = (LONG)(nextPush - GetTickCount());
+            if (wait > 0) Sleep((DWORD)wait);
+        }
+        if (!p->m_run) break;
+        if (p->m_suspended) continue;
         EnterCriticalSection(&p->m_cs);
-        top = p->m_dirtyTop; bottom = p->m_dirtyBottom;
+        left = p->m_dirtyLeft; top = p->m_dirtyTop;
+        right = p->m_dirtyRight; bottom = p->m_dirtyBottom;
+        p->m_dirtyLeft = p->m_nScreenWidth; p->m_dirtyRight = 0;
         p->m_dirtyTop = p->m_nScreenHeight; p->m_dirtyBottom = 0;
         LeaveCriticalSection(&p->m_cs);
-        if (top < bottom) {
+        if (left < right && top < bottom) {
             EnterCriticalSection(&p->m_csLcd);
-            p->PushRows(top, bottom);
+            p->PushRect(left, top, right, bottom);
             LeaveCriticalSection(&p->m_csLcd);
             nextPush = GetTickCount() + DISP_PUSH_MS;
         }

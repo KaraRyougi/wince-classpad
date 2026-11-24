@@ -200,8 +200,11 @@ static void UsbClockDelay(void)
     UINT8 last = (UINT8)(MMIO_R8(RTC_R64CNT) & 1), now;
     DWORD start = GetTickCount();
     int edges = 0;
+    // 14 edges of 64 Hz R64CNT bit 0 is ~109 ms; one sleep avoids ~110 Sleep(1) wakeups.
+    Sleep(115);
+    if (GetTickCount() - start >= 110) return;
     while (edges < USB_CLOCK_EDGES && GetTickCount() - start < 300) {  // the RTC not counting: 300 ms at most
-        Sleep(1);
+        Sleep(8);
         now = (UINT8)(MMIO_R8(RTC_R64CNT) & 1);
         if (now != last) { last = now; edges++; }
     }
@@ -224,13 +227,20 @@ static BOOL UsbVbus(UINT16 *raw)
 static BOOL UsbSample(void)
 {
     UINT32 clk0, mstp0;
-    UINT16 upon0, sys0, msa0, msb0, raw1, raw2 = 0;
-    BOOL woke, on;
+    UINT16 upon0, sys0, msa0, msb0, raw1 = 0, raw2 = 0;
+    BOOL pin, woke, on;
     TCHAR diag[96];
-    msa0 = MMIO_R16(USB_MSELCRA); msb0 = MMIO_R16(USB_MSELCRB);
+    pin = (MMIO_R8(PORT_PUDR) & PUDR_USB_CABLE) != 0;
     clk0 = MMIO_R32(CPG_USBCLKCR); mstp0 = MMIO_R32(MSTPCR2);
     upon0 = MMIO_R16(USB_UPONCR);
     woke = (clk0 & USBCLKCR_STOP) || (mstp0 & MSTPCR2_USB) || upon0 != USB_UPON;
+    if (!pin && woke) {
+        // No cable detected on Port U bit 1 and the USB controller is already
+        // off: skip waking the USB clock/PHY and the 110 ms stabilisation wait.
+        on = FALSE;
+        goto report;
+    }
+    msa0 = MMIO_R16(USB_MSELCRA); msb0 = MMIO_R16(USB_MSELCRB);
     if (woke) {
         MMIO_W16(USB_MSELCRA, msa0 & ~USB_MSELCRA_M);
         MMIO_W16(USB_MSELCRB, msb0 & ~USB_MSELCRB_M);
@@ -254,8 +264,8 @@ static BOOL UsbSample(void)
         MMIO_W16(USB_MSELCRB, msb0);
         MMIO_W16(USB_MSELCRA, msa0);
     }
-    wsprintf(diag, TEXT("pin %u controller %u (ints %04X %04X)"),
-             (MMIO_R8(PORT_PUDR) & PUDR_USB_CABLE) != 0, on, raw1, raw2);
+report:
+    wsprintf(diag, TEXT("pin %u controller %u (ints %04X %04X)"), pin, on, raw1, raw2);
     if (lstrcmp(diag, g_usbDiag)) {     // the registry only when something changes
         lstrcpy(g_usbDiag, diag);
         WriteDiagValue(TEXT("UsbDiag"), diag);

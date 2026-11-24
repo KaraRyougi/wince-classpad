@@ -52,6 +52,9 @@
 //  Not verified on the calculator when written. In casio-emu the host side
 //  needs dbt/emu-patch/add_classpad_usbhost.py.
 //------------------------------------------------------------------------------
+#if defined(_MSC_VER) && !defined(DEBUG)
+#pragma optimize("t", on)
+#endif
 #include <windows.h>
 #include <nkintr.h>
 #include <ceddk.h>
@@ -111,8 +114,8 @@ static void SetPid(USBFN *u, EP_STATE *e, WORD pid)
 
 static void EnableBits(DWORD reg, WORD bit, BOOL on)
 {
-    WORD v = R16(reg);
-    W16(reg, (WORD)(on ? (v | bit) : (v & ~bit)));
+    WORD v = R16(reg), nv = (WORD)(on ? (v | bit) : (v & ~bit));
+    if (nv != v) W16(reg, nv);
 }
 
 // Ends the transfer of an endpoint and tells the MDD. Called with the lock held.
@@ -124,54 +127,76 @@ static void Complete(USBFN *u, EP_STATE *e, DWORD error)
     if (!t) return;
     e->transfer = NULL;
     EnableBits(USB_BRDYENB, bit, FALSE);
-    EnableBits(USB_BEMPENB, bit, FALSE);
+    if (e->in) EnableBits(USB_BEMPENB, bit, FALSE);
     t->dwUsbError = error;
     u->notify(u->mdd, UFN_MSG_TRANSFER_COMPLETE, (DWORD)t);
 }
 
 //------------------------------------------------------------------------------
-//  IN: one packet into the FIFO. More follows from the buffer-empty interrupt.
+//  IN: fill available FIFO plane(s) (both planes on double-buffered bulk pipes).
+//  While more packets remain, BRDY wakes us as soon as one plane frees; once
+//  the final packet is queued, BEMP fires when the last plane drains.
 //
 static void SendPacket(USBFN *u, EP_STATE *e)
 {
     PSTransfer t = e->transfer;
     DWORD port = e->pipe ? USB_D1FIFO : USB_CFIFO, sel = e->pipe ? USB_D1FIFOSEL : USB_CFIFOSEL;
     DWORD ctr = e->pipe ? USB_D1FIFOCTR : USB_CFIFOCTR;
-    DWORD left = t->cbBuffer - t->cbTransferred, n = left < e->maxPacket ? left : e->maxPacket;
     DWORD perms;
     WORD bit = (WORD)(1 << e->pipe);
-    BOOL ok = TRUE;
+    BOOL first = TRUE, ok = TRUE;
+    DWORD lastN = 0;
 
     W16(sel, (WORD)(FIFOSEL_MBW32 | FIFOSEL_BIGEND | (e->pipe ? e->pipe : FIFOSEL_ISEL)));
-    if (!UsbFifoReady(ctr)) {              // the previous packet has not left: the buffer-empty interrupt comes back here
-        EnableBits(USB_BEMPENB, bit, TRUE);
+    do {
+        DWORD left, n;
+        if (first) {
+            if (!UsbFifoReady(ctr)) {          // previous packet has not left yet
+                EnableBits(e->pipe ? USB_BRDYENB : USB_BEMPENB, bit, TRUE);
+                SetPid(u, e, PID_BUF);
+                return;
+            }
+            first = FALSE;
+        } else {
+            if (!(R16(USB_PIPECTR(e->pipe)) & CTR_BSTS) || !UsbFifoReady(ctr)) {
+                EnableBits(USB_BRDYENB, bit, TRUE);
+                return;
+            }
+        }
+        left = t->cbBuffer - t->cbTransferred;
+        n = left < e->maxPacket ? left : e->maxPacket;
+        lastN = n;
+        perms = GetCurrentPermissions();
+        SetProcPermissions(t->dwCallerPermissions);
+        __try {
+            UsbFifoWrite(port, (const BYTE *)t->pvBuffer + t->cbTransferred, n);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ok = FALSE;
+        }
+        SetProcPermissions(perms);
+        if (!ok) {
+            W16(ctr, FIFOCTR_BCLR);
+            Complete(u, e, UFN_CLIENT_BUFFER_ERROR);
+            return;
+        }
+        t->cbTransferred += n;
+        if (n < e->maxPacket) W16(ctr, FIFOCTR_BVAL);   // short (or empty) packet committed by hand
         SetPid(u, e, PID_BUF);
-        return;
-    }
-    perms = GetCurrentPermissions();
-    SetProcPermissions(t->dwCallerPermissions);
-    __try {
-        UsbFifoWrite(port, (const BYTE *)t->pvBuffer + t->cbTransferred, n);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        ok = FALSE;
-    }
-    SetProcPermissions(perms);
-    if (!ok) {
-        W16(ctr, FIFOCTR_BCLR);
-        Complete(u, e, UFN_CLIENT_BUFFER_ERROR);
-        return;
-    }
-    t->cbTransferred += n;
-    if (n < e->maxPacket) W16(ctr, FIFOCTR_BVAL);       // a short (or empty) packet is sent by hand, a full one by itself
-    SetPid(u, e, PID_BUF);
-    if (!e->pipe && n < e->maxPacket) {
+    } while (e->pipe && e->pipe <= 5 && t->cbTransferred < t->cbBuffer);
+
+    if (!e->pipe && lastN < e->maxPacket) {
         // the last packet of a control read: gint found the buffer-empty
         // interrupt unreliable for a hand-committed DCP packet, and nothing
         // waits for it: the status stage follows on the MDD's handshake
         Complete(u, e, UFN_NO_ERROR);
         return;
     }
-    EnableBits(USB_BEMPENB, bit, TRUE);
+    if (e->pipe && t->cbTransferred < t->cbBuffer) {
+        EnableBits(USB_BRDYENB, bit, TRUE);
+    } else {
+        if (e->pipe) EnableBits(USB_BRDYENB, bit, FALSE);
+        EnableBits(USB_BEMPENB, bit, TRUE);
+    }
 }
 
 static void OnBufferEmpty(USBFN *u, EP_STATE *e)
@@ -184,8 +209,8 @@ static void OnBufferEmpty(USBFN *u, EP_STATE *e)
 }
 
 //------------------------------------------------------------------------------
-//  OUT: what the FIFO holds into the transfer. Ends on a short packet or a
-//  full buffer; what does not fit stays in the FIFO for the next transfer.
+//  OUT: drain ready FIFO plane(s) into the transfer. Ends on a short packet or
+//  a full buffer; what does not fit stays in the FIFO for the next transfer.
 //
 static void ReceivePacket(USBFN *u, EP_STATE *e)
 {
@@ -193,38 +218,48 @@ static void ReceivePacket(USBFN *u, EP_STATE *e)
     DWORD port = e->pipe ? USB_D0FIFO : USB_CFIFO, sel = e->pipe ? USB_D0FIFOSEL : USB_CFIFOSEL;
     DWORD ctr = e->pipe ? USB_D0FIFOCTR : USB_CFIFOCTR;
     DWORD have, room, n, perms;
-    BOOL ok = TRUE;
+    BOOL first = TRUE, ok = TRUE;
 
     W16(sel, (WORD)(FIFOSEL_MBW32 | FIFOSEL_BIGEND | e->pipe));
-    if (!UsbFifoReady(ctr)) return;        // nothing there yet: the buffer-ready interrupt comes back here
-    have = R16(ctr) & FIFOCTR_DTLN;
-    room = t->cbBuffer - t->cbTransferred;
-    n = have < room ? have : room;
-    perms = GetCurrentPermissions();
-    SetProcPermissions(t->dwCallerPermissions);
-    __try {
-        UsbFifoRead(port, (BYTE *)t->pvBuffer + t->cbTransferred, n);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        ok = FALSE;
-    }
-    SetProcPermissions(perms);
-    if (!ok) {
-        W16(ctr, FIFOCTR_BCLR);
-        Complete(u, e, UFN_CLIENT_BUFFER_ERROR);
-        return;
-    }
-    t->cbTransferred += n;
-    if (!have) W16(ctr, FIFOCTR_BCLR);                  // an empty packet is taken by clearing the buffer
-    if (t->cbTransferred == t->cbBuffer || have < e->maxPacket || have % e->maxPacket) {
-        Complete(u, e, UFN_NO_ERROR);
-    } else {
+    for (;;) {
+        if (first) {
+            if (!UsbFifoReady(ctr)) return;    // nothing there yet: BRDY comes back here
+            first = FALSE;
+        } else {
+            if (!(R16(USB_PIPECTR(e->pipe)) & CTR_BSTS) || !UsbFifoReady(ctr)) return;
+        }
+        have = R16(ctr) & FIFOCTR_DTLN;
+        room = t->cbBuffer - t->cbTransferred;
+        n = have < room ? have : room;
+        perms = GetCurrentPermissions();
+        SetProcPermissions(t->dwCallerPermissions);
+        __try {
+            UsbFifoRead(port, (BYTE *)t->pvBuffer + t->cbTransferred, n);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ok = FALSE;
+        }
+        SetProcPermissions(perms);
+        if (!ok) {
+            W16(ctr, FIFOCTR_BCLR);
+            Complete(u, e, UFN_CLIENT_BUFFER_ERROR);
+            return;
+        }
+        t->cbTransferred += n;
+        if (!have) W16(ctr, FIFOCTR_BCLR);              // an empty packet is taken by clearing the buffer
+        if (t->cbTransferred == t->cbBuffer || have < e->maxPacket || have % e->maxPacket) {
+            Complete(u, e, UFN_NO_ERROR);
+            return;
+        }
         SetPid(u, e, PID_BUF);                          // the next packet
+        if (!e->pipe || e->pipe > 5) return;
     }
 }
 
 static void OnBufferReady(USBFN *u, EP_STATE *e)
 {
-    if (e->transfer && !e->in) ReceivePacket(u, e);
+    if (!e->transfer) return;
+    if (e->in) SendPacket(u, e);
+    else ReceivePacket(u, e);
 }
 
 //------------------------------------------------------------------------------
@@ -598,12 +633,13 @@ static DWORD WINAPI UfnPdd_InitEndpoint(PVOID context, DWORD endpoint, UFN_BUS_S
     e->initialized = TRUE;
     if (endpoint && u->powered) {
         SetPid(u, e, PID_NAK);
-        cfg = (WORD)((type == USB_ENDPOINT_TYPE_BULK ? PIPECFG_BULK : PIPECFG_INT) | PIPECFG_SHTNAK |
+        cfg = (WORD)((type == USB_ENDPOINT_TYPE_BULK ? (PIPECFG_BULK | PIPECFG_DBLB) : PIPECFG_INT) | PIPECFG_SHTNAK |
                      (e->in ? PIPECFG_DIR_IN : 0) | (desc->bEndpointAddress & 0x0F));
         W16(USB_PIPESEL, e->pipe);
         W16(USB_PIPECFG, cfg);
-        // buffer memory, in 64-byte blocks: 0-3 the DCP, 4-7 pipes 6-9 (fixed), 512 bytes for each bulk pipe from 8 up
-        if (e->pipe <= 5) W16(USB_PIPEBUF, (WORD)((7 << 10) | (8 + (e->pipe - 1) * 8)));
+        // buffer memory, in 64-byte blocks (128 total): 0-3 DCP, 4-7 pipes 6-9,
+        // 2x512 B (16 blocks, double-buffered) for each bulk pipe 1-5 -> blocks 8..87
+        if (e->pipe <= 5) W16(USB_PIPEBUF, (WORD)((7 << 10) | (8 + (e->pipe - 1) * 16)));
         W16(USB_PIPEMAXP, (WORD)e->maxPacket);
         W16(USB_PIPEPERI, 0);
         W16(USB_PIPESEL, 0);

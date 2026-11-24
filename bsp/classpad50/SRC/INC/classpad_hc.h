@@ -34,6 +34,7 @@ static __inline BOOL ClasspadCanTrap(void)
 }
 
 static __inline void ClasspadHcPutc(BYTE ch)      { __asm("trapa #243", (DWORD)ch); }
+static __inline void ClasspadHcPuts(const char *s){ __asm("trapa #241", (DWORD)s); }
 static __inline void ClasspadHcExit(DWORD code)   { __asm("trapa #240", code); }
 static __inline void ClasspadHcFlush(DWORD addr, DWORD len)     { __asm("trapa #242", addr, len); }
 static __inline void ClasspadHcTlbInval(DWORD addr, DWORD len)  { __asm("trapa #249", addr, len); }

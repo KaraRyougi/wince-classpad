@@ -23,6 +23,13 @@
 [HKEY_LOCAL_MACHINE\SYSTEM\GDI\GLYPHCACHE]
     "Limit"=dword:10000
 
+; Disable window and menu open/close animations: every animation frame forces
+; intermediate GPE repaints and panel pushes under the translator.
+[HKEY_LOCAL_MACHINE\SYSTEM\GWE]
+    "Animate"=dword:0
+[HKEY_LOCAL_MACHINE\SYSTEM\GWE\Menu]
+    "AniType"=dword:0
+
 [HKEY_LOCAL_MACHINE\Drivers\Display\ClassPad]
 ;   "Blit"=dword:1    ; the push: 1 = HC_LCD_PUSH by the translator (default), 2 = HC_LCD_BLIT with our window commands, 0 = translated stores
 ;   "Console"=dword:1 ; debug: leave the top 96 rows to the translator's panel console (rt/lcdcon.c), never push them
@@ -130,6 +137,7 @@
     "Dll"="battdrvr.dll"
     "Flags"=dword:8
     "Order"=dword:0
+    "PollInterval"=dword:7530
     "IClass"="{DD176277-CD34-4980-91EE-67DBEF3D8913}"
 
 [HKEY_LOCAL_MACHINE\Software\ClassPad\Battery]

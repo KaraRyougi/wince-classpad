@@ -127,7 +127,7 @@ static BOOL SameChain(const ClasspadClockChain *a, const ClasspadClockChain *b)
 static void TargetRegs(ClasspadClockRegs *r)
 {
     ClasspadClockChain c;
-    unsigned hz[6];
+    unsigned hz[6], bootHz[6];
 
     *r = g_cur;
     ClockDecode(&g_cur, &c);
@@ -135,12 +135,18 @@ static void TargetRegs(ClasspadClockRegs *r)
     ClockEncode(&g_tg, r);
     ClockDecode(&g_boot, &c);
     if (SameChain(&c, &g_tg)) {
-        r->cs0wcr = (r->cs0wcr & ~CPCLK_WR_MASK) | (g_boot.cs0wcr & CPCLK_WR_MASK);
-        r->cs3wcr = (r->cs3wcr & ~CPCLK_TRC_MASK) | (g_boot.cs3wcr & CPCLK_TRC_MASK);
+        r->cs0wcr  = (r->cs0wcr & ~CPCLK_WR_MASK) | (g_boot.cs0wcr & CPCLK_WR_MASK);
+        r->cs3wcr  = (r->cs3wcr & ~CPCLK_TRC_MASK) | (g_boot.cs3wcr & CPCLK_TRC_MASK);
+        r->cs0bcr  = (r->cs0bcr & ~CPCLK_CS0BCR_IDLE_MASK) | (g_boot.cs0bcr & CPCLK_CS0BCR_IDLE_MASK);
+        r->cs5awcr = (r->cs5awcr & ~CPCLK_CS5A_MASK) | (g_boot.cs5awcr & CPCLK_CS5A_MASK);
+        r->rtcor   = g_boot.rtcor & CPCLK_RTCOR_MASK;
+        r->sscgcr  = (r->sscgcr & ~CPCLK_SSCGCR_SSEN) | (g_boot.sscgcr & CPCLK_SSCGCR_SSEN);
         return;
     }
+    ClockHz(&c, 1, bootHz);
     ClockHz(&g_tg, 1, hz);
     ClockAutoWait(r, hz[4]);
+    r->rtcor = ClockScaleRtcor(g_boot.rtcor, bootHz[4], hz[4]);
 }
 
 static BOOL Dirty(void)
@@ -160,7 +166,10 @@ static void ReadClock(void)
         g_cur = info.cur; g_boot = info.boot; g_pllOn = info.pllcr & CPCLK_PLLCR_ON; g_pphi = info.pphi;
     } else if (g_boot.frqcr == 0) {
         // demo: the fx-CG50's stock setting
-        g_boot.fllfrq = 0x00004384; g_boot.frqcr = 0x0F011112; g_boot.cs0wcr = 0x000003C0; g_boot.cs3wcr = 0x000024D1;
+        g_boot.fllfrq  = 0x00004384; g_boot.frqcr   = 0x0F011112;
+        g_boot.cs0wcr  = 0x000003C0; g_boot.cs3wcr  = 0x000024D1;
+        g_boot.cs0bcr  = 0x36DA0400; g_boot.cs5awcr = 0x000203C1;
+        g_boot.rtcor   = 0x00000020; g_boot.sscgcr  = 0x80000000;
         g_cur = g_boot; g_pllOn = 1;
     }
 }

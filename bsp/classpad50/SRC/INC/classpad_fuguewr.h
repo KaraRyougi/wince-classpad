@@ -76,6 +76,7 @@ typedef struct {
     unsigned char used[CLASSPAD_FUGUE_MAX_SECTORS];    // records in the sector, 0 = erased (no header)
     unsigned char live[CLASSPAD_FUGUE_MAX_SECTORS];    // live DATA records plus the live DETAIL
     unsigned char clean[CLASSPAD_FUGUE_MAX_SECTORS];   // erased and verified by this writer since the scan: known blank
+    unsigned char headClean;            // current head was freshly verified blank on open: skip per-slot blank scan
     unsigned head;                      // the sector being appended to, CLASSPAD_FUGUE_NO_SECTOR = none
     unsigned erased;                    // erased sectors
     unsigned minWord;                   // lowest FINFO word on the volume
@@ -101,24 +102,18 @@ static unsigned ClasspadFugueBe32(const unsigned char *p)
 // A record's CRC and slice ECCs cover 4 KiB each: bit by bit that was most
 // of the time an optimise took under the translator.
 static unsigned short g_fugueCrcTab[256];
-static unsigned char g_fugueColTab[256], g_fugueOddTab[256], g_fugueTabsReady;
+static unsigned char g_fugueTabsReady;
 
 static void ClasspadFugueTables(void)
 {
-    static const unsigned char col[8] = { 0x15, 0x16, 0x19, 0x1A, 0x25, 0x26, 0x29, 0x2A };
-    unsigned b, j, crc, c, odd;
+    unsigned b, j, crc;
 
     if (g_fugueTabsReady) return;
+    ClasspadFugueEccTables();
     for (b = 0; b < 256; b++) {
         crc = b << 8;
         for (j = 0; j < 8; j++) crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) & 0xFFFF : (crc << 1) & 0xFFFF;
         g_fugueCrcTab[b] = (unsigned short)crc;
-        c = 0; odd = 0;
-        for (j = 0; j < 8; j++) {
-            if (b & (1u << j)) { c ^= col[j]; odd ^= 1; }
-        }
-        g_fugueColTab[b] = (unsigned char)c;
-        g_fugueOddTab[b] = (unsigned char)odd;
     }
     g_fugueTabsReady = 1;
 }
@@ -174,16 +169,6 @@ static void ClasspadFugueBuildRecord(unsigned char *m, unsigned kind, unsigned v
     ClasspadFugueEcc(m, m + 37);
 }
 
-// Whole words where the address allows: an all-ones word is all-ones in
-// either byte order, and a word copied is the same bytes in the same places
-// (the translator swaps the load and the store alike), so neither needs the
-// byte accesses the rest of this code keeps to.
-#ifdef __GNUC__
-typedef unsigned __attribute__((may_alias)) CLASSPAD_FUGUE_WORD;
-#else
-typedef unsigned CLASSPAD_FUGUE_WORD;
-#endif
-
 static int ClasspadFugueBlank(const unsigned char *p, unsigned n)
 {
     const CLASSPAD_FUGUE_WORD *q;
@@ -194,15 +179,16 @@ static int ClasspadFugueBlank(const unsigned char *p, unsigned n)
     return 1;
 }
 
-static void ClasspadFugueCopy(unsigned char *d, const unsigned char *s, unsigned n)
+static int ClasspadFugueEqual(const unsigned char *a, const unsigned char *b, unsigned n)
 {
-    if ((((unsigned long)d | (unsigned long)s) & 3) == 0) {
-        CLASSPAD_FUGUE_WORD *dw = (CLASSPAD_FUGUE_WORD *)d;
-        const CLASSPAD_FUGUE_WORD *sw = (const CLASSPAD_FUGUE_WORD *)s;
-        for (; n >= 4; n -= 4) *dw++ = *sw++;
-        d = (unsigned char *)dw; s = (const unsigned char *)sw;
+    if ((((unsigned long)a | (unsigned long)b) & 3) == 0) {
+        const CLASSPAD_FUGUE_WORD *aw = (const CLASSPAD_FUGUE_WORD *)a;
+        const CLASSPAD_FUGUE_WORD *bw = (const CLASSPAD_FUGUE_WORD *)b;
+        for (; n >= 4; n -= 4) if (*aw++ != *bw++) return 0;
+        a = (const unsigned char *)aw; b = (const unsigned char *)bw;
     }
-    for (; n; n--) *d++ = *s++;
+    for (; n; n--) if (*a++ != *b++) return 0;
+    return 1;
 }
 
 static const unsigned char *ClasspadFugueMeta(const CLASSPAD_FUGUE *f, unsigned s, unsigned slot)
@@ -238,6 +224,7 @@ static int ClasspadFugueWrInit(CLASSPAD_FUGUE_WR *w, CLASSPAD_FUGUE *f, unsigned
 
     w->f = f; w->ctx = ctx; w->program = program; w->erase = erase; w->page = page;
     w->head = CLASSPAD_FUGUE_NO_SECTOR;
+    w->headClean = 0;
     w->erased = 0; w->minWord = 0xFFFFFFFF; w->detail = 0; w->detailVer = 0;
     w->records = w->reclaims = w->erases = w->skipped = 0;
     w->writable = 0;
@@ -334,6 +321,7 @@ static int ClasspadFugueOpenHead(CLASSPAD_FUGUE_WR *w, unsigned keep)
     }
     w->minWord = word;
     w->head = best;
+    w->headClean = 1;                   // remaining slots 1..30 of this freshly opened sector are known blank
     w->records++;
     return CLASSPAD_FUGUE_OK;
 }
@@ -350,6 +338,7 @@ static int ClasspadFugueAppend(CLASSPAD_FUGUE_WR *w, unsigned kind, unsigned ver
     for (;;) {
         if (w->head == CLASSPAD_FUGUE_NO_SECTOR || w->used[w->head] >= CLASSPAD_FUGUE_RECORDS) {
             w->head = CLASSPAD_FUGUE_NO_SECTOR;
+            w->headClean = 0;
             r = ClasspadFugueOpenHead(w, keep);
             if (r != CLASSPAD_FUGUE_OK) return r;
         }
@@ -357,8 +346,9 @@ static int ClasspadFugueAppend(CLASSPAD_FUGUE_WR *w, unsigned kind, unsigned ver
         slot = w->used[s];
         base = s * CLASSPAD_FUGUE_SECTOR_BYTES;
         w->used[s]++;                   // taken, whether the record gets there or not
-        if (!ClasspadFugueBlank(ClasspadFugueMeta(w->f, s, slot), CLASSPAD_FUGUE_META_BYTES) ||
-            !ClasspadFugueBlank(ClasspadFuguePayload(w->f, s, slot), CLASSPAD_FUGUE_PAGE_BYTES)) {
+        if (!w->headClean &&
+            (!ClasspadFugueBlank(ClasspadFugueMeta(w->f, s, slot), CLASSPAD_FUGUE_META_BYTES) ||
+             !ClasspadFugueBlank(ClasspadFuguePayload(w->f, s, slot), CLASSPAD_FUGUE_PAGE_BYTES))) {
             w->skipped++;               // left by an interrupted write
             continue;
         }
@@ -366,6 +356,7 @@ static int ClasspadFugueAppend(CLASSPAD_FUGUE_WR *w, unsigned kind, unsigned ver
         if (ClasspadFugueProgramSparse(w, base + slot * CLASSPAD_FUGUE_PAGE_BYTES, payload, CLASSPAD_FUGUE_PAGE_BYTES) ||
             w->program(w->ctx, base + CLASSPAD_FUGUE_META_OFF + slot * CLASSPAD_FUGUE_META_BYTES + 2, m + 2, CLASSPAD_FUGUE_META_BYTES - 2) ||
             w->program(w->ctx, base + CLASSPAD_FUGUE_META_OFF + slot * CLASSPAD_FUGUE_META_BYTES, m, 2)) {
+            w->headClean = 0;
             w->skipped++;
             if (++tries >= 3) return CLASSPAD_FUGUE_ERR_FLASH;
             continue;                   // the slot is spent; the next one
@@ -538,7 +529,7 @@ static unsigned ClasspadFugueTrim(CLASSPAD_FUGUE_WR *w, unsigned lc)
 static int ClasspadFugueWrite(CLASSPAD_FUGUE_WR *w, unsigned lc, const unsigned char *data)
 {
     const unsigned char *old;
-    unsigned ver = 0xFFFFFFFE, loc, i, n = 0;
+    unsigned ver = 0xFFFFFFFE, loc, n = 0;
     int r;
 
     if (!w->writable) return CLASSPAD_FUGUE_ERR_READONLY;
@@ -546,8 +537,7 @@ static int ClasspadFugueWrite(CLASSPAD_FUGUE_WR *w, unsigned lc, const unsigned 
 
     old = ClasspadFugueCluster(w->f, lc);
     if (old) {
-        for (i = 0; i < CLASSPAD_FUGUE_PAGE_BYTES && old[i] == data[i]; i++) ;
-        if (i == CLASSPAD_FUGUE_PAGE_BYTES) return CLASSPAD_FUGUE_OK;
+        if (ClasspadFugueEqual(old, data, CLASSPAD_FUGUE_PAGE_BYTES)) return CLASSPAD_FUGUE_OK;
     } else if (ClasspadFugueBlank(data, CLASSPAD_FUGUE_PAGE_BYTES)) {
         return CLASSPAD_FUGUE_OK;       // no record reads as 0xFF already
     }

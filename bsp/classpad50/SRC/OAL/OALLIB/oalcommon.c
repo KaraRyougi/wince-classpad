@@ -383,7 +383,7 @@ DWORD SC_GetTickCount(void)
         base = CurMSec;
         offset = OALTimerCountsSinceSysTick();
     } while (base != CurMSec);
-    return base + (offset > 0 ? (DWORD)offset / g_oalTimer.countsPerMSec : 0);
+    return base + (offset > 0 ? OALTimerCountsToMSec((UINT32)offset) : 0);
 }
 
 //==============================================================================

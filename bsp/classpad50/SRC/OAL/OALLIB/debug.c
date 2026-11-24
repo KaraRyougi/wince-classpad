@@ -53,9 +53,25 @@ void OEMWriteDebugByte(BYTE ch)
 //------------------------------------------------------------------------------
 void OEMWriteDebugString(unsigned short *string)
 {
-    while (*string != L'\0') {
-        OEMWriteDebugByte((BYTE)*string);
-        string++;
+    if (ClasspadCanTrap()) {
+        char buf[128];
+        int n = 0;
+        while (*string != L'\0') {
+            buf[n++] = (char)(BYTE)*string++;
+            if (n == sizeof(buf) - 1) {
+                buf[n] = '\0';
+                ClasspadHcPuts(buf);
+                n = 0;
+            }
+        }
+        if (n > 0) {
+            buf[n] = '\0';
+            ClasspadHcPuts(buf);
+        }
+    } else {
+        while (*string != L'\0') {
+            RingPut((BYTE)*string++);
+        }
     }
 }
 

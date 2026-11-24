@@ -109,10 +109,11 @@ static HANDLE   g_hevSample;                    // auto-reset: work for the thre
 static BOOL   (*g_pfnTickRegister)(void (*)(void));     // kbdmouse.dll's, NULL: none
 static volatile BOOL g_sharedTick;              // InputTick is being called by the keyboard's tick
 static DWORD    g_tickMs;                       // its period
+static volatile DWORD g_tickEvery = 1;          // precomputed ticks per touch sample (avoids division in InputTick)
 static DWORD    g_tickCount;
 #define TOUCH_KEYBD_DLL             TEXT("kbdmouse.dll")
 #define TOUCH_KEYBD_REG_KEY         TEXT("HARDWARE\\DEVICEMAP\\KEYBD")
-#define TOUCH_IDLE_POLL_MS          640         // the thread's own period with the shared tick: the suspend option
+#define TOUCH_IDLE_POLL_MS          15000       // slow idle poll with the shared tick to notice suspend-option edits
 static volatile BOOL g_sampling;                // stylus down: keep waking the IST
 static volatile BOOL g_quit, g_suspended;
 static volatile BOOL g_wakePending;             // after a resume: the sample thread powers the sensor up (it may sleep, the power handler may not)
@@ -278,14 +279,23 @@ static void SampleTick(void)
     if (!g_suspended && hTouchPanelEvent && (PenDown() || g_sampling)) SetEvent(hTouchPanelEvent);
 }
 
+static void UpdateTickEvery(void)
+{
+    DWORD every = (g_tickMs && g_rate > 0) ? (1000u / (DWORD)g_rate) / g_tickMs : 1u;
+    g_tickEvery = every > 1u ? every : 1u;
+}
+
 // The keyboard's tick (every g_tickMs): every tick at the high sample rate,
 // as many as make the low rate's period otherwise. Work that may sleep goes
 // to the thread.
 static void InputTick(void)
 {
-    DWORD every = g_tickMs ? (1000 / (DWORD)g_rate) / g_tickMs : 1;      // 8 ms tick: every tick at the high rate, every other at the low
+    DWORD every = g_tickEvery;
     if (g_wakePending) SetEvent(g_hevSample);
-    if (every > 1 && (++g_tickCount % every) != 0) return;
+    if (every > 1u) {
+        if (++g_tickCount < every) return;
+        g_tickCount = 0;
+    }
     SampleTick();
 }
 
@@ -300,6 +310,7 @@ static void SharedTickOpen(void)
         RegCloseKey(key);
     }
     if (g_tickMs < 5) g_tickMs = 5;
+    UpdateTickEvery();
     if (kbd) g_pfnTickRegister = (BOOL (*)(void (*)(void)))GetProcAddress(kbd, TEXT("ClasspadInputTickRegister"));
     if (!g_pfnTickRegister) RETAILMSG(1, (TEXT("CLASSPAD TOUCH: no keyboard tick to share: own sample thread\r\n")));
 }
@@ -319,23 +330,29 @@ static void SharedTickClose(void)
     g_sharedTick = FALSE;
 }
 
+static void ReadSuspendOptions(void)
+{
+    HKEY key; DWORD v = 0, type, size = sizeof v;
+    if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, TEXT("Software\\ClassPad\\Suspend"), 0, 0, &key) == ERROR_SUCCESS) {
+        if (RegQueryValueEx(key, TEXT("Options"), NULL, &type, (LPBYTE)&v, &size) != ERROR_SUCCESS || type != REG_DWORD) v = CLASSPAD_SUSPEND_OPT_DEFAULT;
+        RegCloseKey(key);
+    } else v = CLASSPAD_SUSPEND_OPT_DEFAULT;
+    g_powerSwitch = (v & CLASSPAD_SUSPEND_OPT_TOUCH) != 0;
+}
+
 static DWORD WINAPI SampleThread(LPVOID)
 {
     CeSetThreadPriority(GetCurrentThread(), (int)RegDword(TEXT("Priority256"), TOUCH_THREAD_PRIORITY));
     DWORD optionPoll = 0, rc;
     SharedTickOpen();
     SharedTickTry();
+    ReadSuspendOptions();
     while (!g_quit) {
         rc = WaitForSingleObject(g_hevSample, g_sharedTick ? TOUCH_IDLE_POLL_MS : 1000 / (DWORD)g_rate);
         if (g_quit) break;
-        if (g_sharedTick || (++optionPoll & 63) == 0 || rc != WAIT_TIMEOUT) {   // the suspend options (classpad_pwrstat.h), about every 640 ms
-            HKEY key; DWORD v = 0, type, size = sizeof v;
-            if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, TEXT("Software\\ClassPad\\Suspend"), 0, 0, &key) == ERROR_SUCCESS) {
-                if (RegQueryValueEx(key, TEXT("Options"), NULL, &type, (LPBYTE)&v, &size) != ERROR_SUCCESS || type != REG_DWORD) v = CLASSPAD_SUSPEND_OPT_DEFAULT;
-                RegCloseKey(key);
-            } else v = CLASSPAD_SUSPEND_OPT_DEFAULT;
-            g_powerSwitch = (v & CLASSPAD_SUSPEND_OPT_TOUCH) != 0;
-            SharedTickTry();
+        if (g_sharedTick || (++optionPoll & 63) == 0 || rc != WAIT_TIMEOUT) {
+            ReadSuspendOptions();
+            if (!g_sharedTick) SharedTickTry();
         }
         if (g_wakePending) {                    // resumed: nobody else uses the bus while g_suspended is set
             SensorPowerUp();
@@ -420,8 +437,8 @@ BOOL DdsiTouchPanelGetDeviceCaps(INT iIndex, LPVOID lpOutput)
 BOOL DdsiTouchPanelSetMode(INT iIndex, LPVOID lpInput)
 {
     switch (iIndex) {
-    case TPSM_SAMPLERATE_LOW_ID:  g_rate = TOUCH_SAMPLE_RATE_LOW;  g_rateSetting = 0; return TRUE;
-    case TPSM_SAMPLERATE_HIGH_ID: g_rate = TOUCH_SAMPLE_RATE_HIGH; g_rateSetting = 1; return TRUE;
+    case TPSM_SAMPLERATE_LOW_ID:  g_rate = TOUCH_SAMPLE_RATE_LOW;  g_rateSetting = 0; UpdateTickEvery(); return TRUE;
+    case TPSM_SAMPLERATE_HIGH_ID: g_rate = TOUCH_SAMPLE_RATE_HIGH; g_rateSetting = 1; UpdateTickEvery(); return TRUE;
     default: SetLastError(ERROR_INVALID_PARAMETER); return FALSE;
     }
 }

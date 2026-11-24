@@ -68,7 +68,8 @@ static DWORD            g_dwSysIntr = SYSINTR_UNDEFINED;
 static HANDLE           g_hThread;                  // the input tick
 static CRITICAL_SECTION g_csTick;                   // the registered tick function: called and changed under it
 static void           (*g_pfnInputTick)(void);      // touch.dll's part of the tick
-static UINT16           g_image[KEYSC_WORDS];       // last matrix image
+static UINT16           g_image[KEYSC_WORDS];       // last logical matrix image (byte-swapped)
+static UINT16           g_rawImage[KEYSC_WORDS];    // last raw unswapped KIUDATA words for zero-swap idle scans
 static volatile BOOL    g_suppressClear;
 static DWORD            g_events;                   // key events delivered
 static BOOL             g_cp400;                    // fx-CP400 matrix (registry "Matrix" = 1)
@@ -122,9 +123,21 @@ static void KeyscStop(void)
 //
 static UINT KeyscScan(void)
 {
-    UINT16 now[KEYSC_WORDS];
+    UINT16 raw[KEYSC_WORDS], now[KEYSC_WORDS], diff = 0;
     UINT w, b, n = 0;
-    for (w = 0; w < KEYSC_WORDS; w++) now[w] = MMIO_R16(KEYSC_KIUDATA(w));
+    for (w = 0; w < KEYSC_WORDS; w++) {
+        raw[w] = *(volatile UINT16 *)CLASSPAD_UA(KEYSC_KIUDATA(w));
+        diff |= (UINT16)(raw[w] ^ g_rawImage[w]);
+    }
+    if (!diff && !g_suppressClear) return 0;
+    for (w = 0; w < KEYSC_WORDS; w++) {
+        if (raw[w] != g_rawImage[w] || (w == 0 && g_suppressClear)) {
+            now[w] = classpad_bswap16(raw[w]);
+            g_rawImage[w] = raw[w];
+        } else {
+            now[w] = g_image[w];
+        }
+    }
     if (g_suppressClear) {
         if (!(now[0] & KEYSC_CLEAR_MASK)) g_suppressClear = FALSE;
         now[0] &= ~KEYSC_CLEAR_MASK;
@@ -211,9 +224,11 @@ static DWORD WINAPI KeyscTick(LPVOID)
     for (;;) {
         Sleep(pollMs);
         KeyscScan();
-        EnterCriticalSection(&g_csTick);
-        if (g_pfnInputTick) g_pfnInputTick();
-        LeaveCriticalSection(&g_csTick);
+        if (g_pfnInputTick) {
+            EnterCriticalSection(&g_csTick);
+            if (g_pfnInputTick) g_pfnInputTick();
+            LeaveCriticalSection(&g_csTick);
+        }
         SuspendIfRequested();
     }
     return 0;

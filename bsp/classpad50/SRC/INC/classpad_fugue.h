@@ -64,22 +64,71 @@ typedef struct {
     unsigned blocks;                    // size of the block device in 512-byte sectors, 0 = no MBR
 } CLASSPAD_FUGUE;
 
-// The 3 ECC bytes of a metadata record (over its first 37 bytes) into e[].
-// Casio's tables (OS 02.01.7003 at 0x808BFB00) are a column parity code per
-// byte and a line parity over the offsets of the odd-parity bytes; computed
-// here bit by bit, the test compares it with every record of a real volume.
-static void ClasspadFugueEcc(const unsigned char *m, unsigned char *e)
+// Whole words where the address allows: an all-ones word is all-ones in
+// either byte order, and a word copied is the same bytes in the same places
+// (the translator swaps the load and the store alike).
+#ifdef __GNUC__
+typedef unsigned __attribute__((may_alias)) CLASSPAD_FUGUE_WORD;
+#else
+typedef unsigned CLASSPAD_FUGUE_WORD;
+#endif
+
+static void ClasspadFugueCopy(unsigned char *d, const unsigned char *s, unsigned n)
+{
+    if ((((unsigned long)d | (unsigned long)s) & 3) == 0) {
+        CLASSPAD_FUGUE_WORD *dw = (CLASSPAD_FUGUE_WORD *)d;
+        const CLASSPAD_FUGUE_WORD *sw = (const CLASSPAD_FUGUE_WORD *)s;
+        for (; n >= 16; n -= 16) { dw[0] = sw[0]; dw[1] = sw[1]; dw[2] = sw[2]; dw[3] = sw[3]; dw += 4; sw += 4; }
+        for (; n >= 4; n -= 4) *dw++ = *sw++;
+        d = (unsigned char *)dw; s = (const unsigned char *)sw;
+    }
+    for (; n; n--) *d++ = *s++;
+}
+
+static void ClasspadFugueFillFF(unsigned char *d, unsigned n)
+{
+    for (; n && ((unsigned long)d & 3); n--) *d++ = 0xFF;
+    if (n >= 4) {
+        CLASSPAD_FUGUE_WORD *dw = (CLASSPAD_FUGUE_WORD *)d;
+        for (; n >= 16; n -= 16) { dw[0] = 0xFFFFFFFFu; dw[1] = 0xFFFFFFFFu; dw[2] = 0xFFFFFFFFu; dw[3] = 0xFFFFFFFFu; dw += 4; }
+        for (; n >= 4; n -= 4) *dw++ = 0xFFFFFFFFu;
+        d = (unsigned char *)dw;
+    }
+    for (; n; n--) *d++ = 0xFF;
+}
+
+// Per-byte column parity and odd-parity LUT shared by record ECC and slice ECC.
+static unsigned char g_fugueColTab[256], g_fugueOddTab[256], g_fugueEccReady;
+
+static void ClasspadFugueEccTables(void)
 {
     static const unsigned char col[8] = { 0x15, 0x16, 0x19, 0x1A, 0x25, 0x26, 0x29, 0x2A };
-    unsigned r1 = 0xFF, r4 = 0xFF, r7 = 0xFF, i, j, b, odd, s1, s7, k;
+    unsigned b, j, c, odd;
 
+    if (g_fugueEccReady) return;
+    for (b = 0; b < 256; b++) {
+        c = 0; odd = 0;
+        for (j = 0; j < 8; j++) {
+            if (b & (1u << j)) { c ^= col[j]; odd ^= 1; }
+        }
+        g_fugueColTab[b] = (unsigned char)c;
+        g_fugueOddTab[b] = (unsigned char)odd;
+    }
+    g_fugueEccReady = 1;
+}
+
+// The 3 ECC bytes of a metadata record (over its first 37 bytes) into e[].
+// Casio's tables (OS 02.01.7003 at 0x808BFB00) are a column parity code per
+// byte and a line parity over the offsets of the odd-parity bytes.
+static void ClasspadFugueEcc(const unsigned char *m, unsigned char *e)
+{
+    unsigned r1 = 0xFF, r4 = 0xFF, r7 = 0xFF, i, j, b, s1, s7, k;
+
+    ClasspadFugueEccTables();
     for (i = 0; i < 37; i++) {
         b = m[i];
-        odd = 0;
-        for (j = 0; j < 8; j++) {
-            if (b & (1u << j)) { r4 ^= col[j]; odd ^= 1; }
-        }
-        if (odd) { r1 ^= i; r7 ^= ~i & 0xFF; }
+        r4 ^= g_fugueColTab[b];
+        if (g_fugueOddTab[b]) { r1 ^= i; r7 ^= ~i & 0xFF; }
     }
     e[0] = (unsigned char)(r4 | 0xC0);
     for (k = 0; k < 2; k++) {           // a nibble of r7 on the even bits, of r1 on the odd bits
@@ -117,12 +166,19 @@ static const unsigned char *ClasspadFugueCluster(const CLASSPAD_FUGUE *f, unsign
 static void ClasspadFugueRead(const CLASSPAD_FUGUE *f, unsigned lba, unsigned count, unsigned char *out)
 {
     const unsigned char *p;
-    unsigned i;
+    unsigned off, run, bytes;
 
-    for (; count; count--, lba++, out += CLASSPAD_FUGUE_BLOCK_BYTES) {
+    while (count) {
+        off = lba % CLASSPAD_FUGUE_BLOCKS_PER_PAGE;
+        run = CLASSPAD_FUGUE_BLOCKS_PER_PAGE - off;
+        if (run > count) run = count;
+        bytes = run * CLASSPAD_FUGUE_BLOCK_BYTES;
         p = ClasspadFugueCluster(f, lba / CLASSPAD_FUGUE_BLOCKS_PER_PAGE);
-        if (p) p += (lba % CLASSPAD_FUGUE_BLOCKS_PER_PAGE) * CLASSPAD_FUGUE_BLOCK_BYTES;
-        for (i = 0; i < CLASSPAD_FUGUE_BLOCK_BYTES; i++) out[i] = p ? p[i] : 0xFF;
+        if (p) ClasspadFugueCopy(out, p + off * CLASSPAD_FUGUE_BLOCK_BYTES, bytes);
+        else ClasspadFugueFillFF(out, bytes);
+        count -= run;
+        lba += run;
+        out += bytes;
     }
 }
 

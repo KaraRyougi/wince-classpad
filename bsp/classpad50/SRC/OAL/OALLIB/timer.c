@@ -30,11 +30,27 @@
 //  reloaded counter). Reprogramming briefly stops TMU0 for a coherent update;
 //  that stopped interval is not counted and still needs device drift measurement.
 //------------------------------------------------------------------------------
+#if defined(_MSC_VER) && !defined(DEBUG)
+#pragma optimize("t", on)
+#endif
 #ifndef CLASSPAD_TIMER_HOST_TEST
 #include <bsp.h>
 #endif
 
 static UINT32 g_maxCounts;      // TCOR0 + 1: the reload period, TICK_MAX_MSEC worth of counts
+static UINT32 g_invCountsPerMSec; // floor(2^32 / countsPerMSec), or 0xFFFFFFFF when countsPerMSec == 1
+
+// Exact unsigned counts / g_oalTimer.countsPerMSec via 32x32->64 multiply
+// (avoids software division on SH-4 in SC_GetTickCount and SetPeriod).
+UINT32 OALTimerCountsToMSec(UINT32 counts)
+{
+    UINT32 d = g_oalTimer.countsPerMSec;
+    UINT32 q;
+    if (d == 0) return 0;
+    q = (UINT32)(((UINT64)counts * g_invCountsPerMSec) >> 32);
+    if (counts - q * d >= d) q++;
+    return q;
+}
 
 //------------------------------------------------------------------------------
 //  Program `msec` ms from the last tick, using counterBase to measure
@@ -63,7 +79,7 @@ static void SetPeriod(UINT32 msec, UINT32 counterBase)
     }
     elapsed = counterBase - 1 - MMIO_R32(TMU_TCNT0);
     if (counts < elapsed + g_oalTimer.countsMargin) {
-        msec   = (elapsed + g_oalTimer.countsMargin + g_oalTimer.countsPerMSec - 1) / g_oalTimer.countsPerMSec;
+        msec   = OALTimerCountsToMSec(elapsed + g_oalTimer.countsMargin + g_oalTimer.countsPerMSec - 1);
         counts = msec * g_oalTimer.countsPerMSec;
     }
     g_oalTimer.actualMSecPerSysTick   = msec;
@@ -83,6 +99,7 @@ BOOL OALTimerInit(UINT32 msecPerSysTick, UINT32 countsPerMSec, UINT32 countsMarg
     if (msecPerSysTick > 0x7FFFFFFF / countsPerMSec) msecPerSysTick = 0x7FFFFFFF / countsPerMSec;
 
     g_oalTimer.countsPerMSec          = countsPerMSec;
+    g_invCountsPerMSec                = (countsPerMSec <= 1) ? 0xFFFFFFFFu : (UINT32)(((UINT64)1 << 32) / countsPerMSec);
     g_oalTimer.countsMargin           = countsMargin;
     g_oalTimer.maxPeriodMSec          = msecPerSysTick;
     g_oalTimer.msecPerSysTick         = msecPerSysTick;       // the longest period: the kernel asks for shorter ones
@@ -289,14 +306,22 @@ BOOL OALIoCtlHalClasspadPphi(UINT32 code, VOID *in, UINT32 insize,
 //  Timer ISR: runs in bank 0 with SR.IMASK = IRQ_TMU0_PRIORITY
 //
 extern BOOL ClasspadPowerTimerIsr(void);
+#ifndef CLASSPAD_TIMER_HOST_TEST
+extern volatile BOOL g_classpadPowerSleeping;
+#endif
 UINT32 OALTimerIntrHandler(void)
 {
-    UINT32 sysIntr = SYSINTR_NOP, msec;
+    UINT32 sysIntr = SYSINTR_NOP, msec, tcr;
 
+#ifdef CLASSPAD_TIMER_HOST_TEST
     if (ClasspadPowerTimerIsr()) return SYSINTR_NOP;
-    if (!(MMIO_R16(TMU_TCR0) & TMU_TCR_UNF)) return SYSINTR_NOP;
+#else
+    if (g_classpadPowerSleeping && ClasspadPowerTimerIsr()) return SYSINTR_NOP;
+#endif
+    tcr = MMIO_R16(TMU_TCR0);
+    if (!(tcr & TMU_TCR_UNF)) return SYSINTR_NOP;
     // Acknowledge: clear UNF (the counter has reloaded TCOR0 and counts on)
-    MMIO_W16(TMU_TCR0, MMIO_R16(TMU_TCR0) & ~TMU_TCR_UNF);
+    MMIO_W16(TMU_TCR0, tcr & ~TMU_TCR_UNF);
 
     // Counts since the underflow = our latency: the next period starts at
     // the tick, not now, so it is already elapsed time of that period.
@@ -312,7 +337,14 @@ UINT32 OALTimerIntrHandler(void)
     } else {
         msec = dwReschedTime - CurMSec;
     }
-    SetPeriod(msec, g_maxCounts);
+    if (msec >= g_oalTimer.msecPerSysTick && g_maxCounts > g_oalTimer.countsMargin + g_oalTimer.countsPerMSec) {
+        // Hardware already reloaded TCNT0 = TCOR0 = g_maxCounts - 1 on
+        // underflow, so avoid stopping/reprogramming TMU0 for a full period.
+        g_oalTimer.actualMSecPerSysTick   = g_oalTimer.msecPerSysTick;
+        g_oalTimer.actualCountsPerSysTick = g_maxCounts;
+    } else {
+        SetPeriod(msec, g_maxCounts);
+    }
     return sysIntr;
 }
 
@@ -327,14 +359,15 @@ VOID OALTimerUpdateRescheduleTime(DWORD time)
     UINT32 baseMSec = CurMSec, diffMSec;
     INT32  elapsed, toTick;
 
-    if (time == baseMSec + g_oalTimer.actualMSecPerSysTick) goto done;    // already set up
+    diffMSec = time - baseMSec;
+    if ((INT32)diffMSec < 0) diffMSec = 0;        // a thread on its way to sleep was preempted: tick as soon as allowed
+    else if (diffMSec > g_oalTimer.msecPerSysTick) diffMSec = g_oalTimer.msecPerSysTick;
+    if (diffMSec == g_oalTimer.actualMSecPerSysTick) goto done;    // already set up
 
     elapsed = OALTimerCountsSinceSysTick();
     toTick  = (INT32)g_oalTimer.actualCountsPerSysTick - elapsed;
     if (baseMSec != CurMSec || toTick < (INT32)g_oalTimer.countsPerMSec) goto done;
 
-    diffMSec = time - baseMSec;
-    if ((INT32)diffMSec < 0) diffMSec = 0;        // a thread on its way to sleep was preempted: tick as soon as allowed
     SetPeriod(diffMSec, g_oalTimer.actualCountsPerSysTick);
 done:
     INTERRUPTS_ENABLE(enabled);

@@ -67,6 +67,36 @@ static void check_panel(unsigned wp, unsigned hp)
                 CHECK(n == (bottom - top) * lw, "rot %u rows %u..%u: window has %u pixels, rows hold %u", rot, top, bottom, n, (bottom - top) * lw);
             }
         }
+        /* 2D dirty rectangle mapping: physical window covers exactly the pixels whose logical (lx, ly) lies in [left, right) x [top, bottom) */
+        {
+            unsigned rects[][4] = {
+                { 0, 0, lw, lh },
+                { 0, 0, 1, 1 },
+                { lw - 1, lh - 1, lw, lh },
+                { 1, 2, lw > 4 ? 4 : lw, lh > 5 ? 5 : lh },
+                { lw / 3, lh / 4, lw * 2 / 3 + 1, lh * 3 / 4 + 1 }
+            };
+            unsigned i;
+            for (i = 0; i < sizeof rects / sizeof rects[0]; i++) {
+                unsigned l = rects[i][0], t = rects[i][1], rr = rects[i][2], b = rects[i][3];
+                unsigned x0, x1, y0, y1, n = 0;
+                if (rr > lw) rr = lw;
+                if (b > lh) b = lh;
+                if (l >= rr || t >= b) continue;
+                ClasspadRotRect(rot, wp, hp, l, t, rr, b, &x0, &x1, &y0, &y1);
+                CHECK(x0 < x1 && x1 <= wp && y0 < y1 && y1 <= hp, "rot %u rect %u,%u..%u,%u: window %u..%u x %u..%u", rot, l, t, rr, b, x0, x1, y0, y1);
+                for (py = 0; py < hp; py++)
+                    for (px = 0; px < wp; px++) {
+                        unsigned off = ClasspadRotOffset(rot, wp, hp, px, py) / 2;
+                        unsigned src_row = off / lw, src_col = off % lw;
+                        int in_rect = src_col >= l && src_col < rr && src_row >= t && src_row < b;
+                        int in_window = px >= x0 && px < x1 && py >= y0 && py < y1;
+                        CHECK(in_rect == in_window, "rot %u rect %u,%u..%u,%u: physical %u,%u (logical %u,%u) in window %d", rot, l, t, rr, b, px, py, src_col, src_row, in_window);
+                        n += in_window;
+                    }
+                CHECK(n == (rr - l) * (b - t), "rot %u rect %u,%u..%u,%u: window has %u pixels, rect holds %u", rot, l, t, rr, b, n, (rr - l) * (b - t));
+            }
+        }
         free(seen);
     }
 }

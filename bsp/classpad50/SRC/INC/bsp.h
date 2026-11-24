@@ -63,6 +63,7 @@ BOOL OALIoCtlHalGetCacheInfo(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);
 BOOL   OALClockChanged(void);
 VOID   OALTimerRetune(UINT32 mul, UINT32 div);
 UINT32 OALTimerCountHz(void);
+UINT32 OALTimerCountsToMSec(UINT32 counts);
 BOOL OALIoCtlHalClasspadClockGet(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);
 BOOL OALIoCtlHalClasspadClockSet(UINT32, VOID*, UINT32, VOID*, UINT32, UINT32*);
 

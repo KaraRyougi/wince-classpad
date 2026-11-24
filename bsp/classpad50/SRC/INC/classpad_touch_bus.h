@@ -62,16 +62,16 @@ static void TouchBusBegin(void)
 
 static int TouchBusWait(unsigned mask, unsigned expected, unsigned stage)
 {
+    unsigned reads = g_touchBusReads;
     g_touchBusStage = stage;
     for (;;) {
         unsigned sr = MMIO_R8(IIC0_ICSR);
-        g_touchBusStatus = sr;
-        if (sr & (ICSR_AL | ICSR_TACK)) return 0;
-        if ((sr & mask) == expected) return 1;
-        if ((++g_touchBusReads % TOUCH_BUS_CLOCK_EVERY) == 0) {
+        if (sr & (ICSR_AL | ICSR_TACK)) { g_touchBusStatus = sr; g_touchBusReads = reads; return 0; }
+        if ((sr & mask) == expected) { g_touchBusStatus = sr; g_touchBusReads = reads; return 1; }
+        if ((++reads & (TOUCH_BUS_CLOCK_EVERY - 1u)) == 0) {
             unsigned ms = (unsigned)TOUCH_BUS_NOW_MS();
-            if (g_touchBusReads == TOUCH_BUS_CLOCK_EVERY) g_touchBusSince = ms;
-            else if (ms - g_touchBusSince >= TOUCH_BUS_LIMIT_MS) return 0;
+            if (reads == TOUCH_BUS_CLOCK_EVERY) g_touchBusSince = ms;
+            else if (ms - g_touchBusSince >= TOUCH_BUS_LIMIT_MS) { g_touchBusStatus = sr; g_touchBusReads = reads; return 0; }
         }
     }
 }

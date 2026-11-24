@@ -70,6 +70,20 @@ CLASSPAD_ROT_INLINE void ClasspadRotWindow(unsigned rot, unsigned wp, unsigned h
     }
 }
 
+// The physical window [x0, x1) x [y0, y1) that shows the logical 2D rectangle
+// [left, right) x [top, bottom) (all end-exclusive).
+CLASSPAD_ROT_INLINE void ClasspadRotRect(unsigned rot, unsigned wp, unsigned hp,
+                                         unsigned left, unsigned top, unsigned right, unsigned bottom,
+                                         unsigned *x0, unsigned *x1, unsigned *y0, unsigned *y1)
+{
+    switch (rot) {
+    case CLASSPAD_ROT_90:  *x0 = top;          *x1 = bottom;       *y0 = hp - right;  *y1 = hp - left; break;
+    case CLASSPAD_ROT_180: *x0 = wp - right;   *x1 = wp - left;    *y0 = hp - bottom; *y1 = hp - top;  break;
+    case CLASSPAD_ROT_270: *x0 = wp - bottom;  *x1 = wp - top;     *y0 = left;        *y1 = right;     break;
+    default:               *x0 = left;         *x1 = right;        *y0 = top;         *y1 = bottom;    break;
+    }
+}
+
 // Byte offset in the logical buffer of the pixel shown at physical (px, py).
 CLASSPAD_ROT_INLINE unsigned ClasspadRotOffset(unsigned rot, unsigned wp, unsigned hp, unsigned px, unsigned py)
 {

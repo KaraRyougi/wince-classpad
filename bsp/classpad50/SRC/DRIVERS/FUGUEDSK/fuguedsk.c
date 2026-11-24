@@ -39,6 +39,9 @@
 //  No volume (an erased or foreign area, no MBR): the driver does not load
 //  and CE runs without the folder.
 //------------------------------------------------------------------------------
+#if defined(_MSC_VER) && !defined(DEBUG)
+#pragma optimize("t", on)
+#endif
 #include <windows.h>
 #include <types.h>
 #include <devload.h>
@@ -238,7 +241,11 @@ static DWORD WINAPI FlushThread(LPVOID param)
     for (;;) {
         WaitForSingleObject(d->dirtyEvent, INFINITE);
         if (d->stop) break;
-        while (!d->stop && GetTickCount() - d->lastWrite < FLUSH_MS) Sleep(FLUSH_MS / 4);    // writes still coming
+        while (!d->stop) {
+            DWORD elapsed = GetTickCount() - d->lastWrite;
+            if (elapsed >= FLUSH_MS) break;
+            Sleep(FLUSH_MS - elapsed);                  // sleep the exact remaining debounce window
+        }
         EnterCriticalSection(&d->cs);
         CacheFlush(d);
         LeaveCriticalSection(&d->cs);

@@ -22,7 +22,10 @@ static void write32(unsigned a, unsigned v) {
 #define W(a, v) expect(1, a, v)
 
 /* stock fx-CG50: FLL x900 halved, PLL x16, 1/2 1/4 1/4 1/8 */
-static const ClasspadClockRegs stock = { 0x00004384, 0x0F011112, 0x000003C0, 0x000024D1 };
+static const ClasspadClockRegs stock = {
+    0x00004384, 0x0F011112, 0x000003C0, 0x000024D1,
+    0x36DA0400, 0x000203C1, 0x00000020, 0x80000000
+};
 
 int main(void)
 {
@@ -109,20 +112,36 @@ int main(void)
     assert(ClockBestTRC(117964800) == 2 && ClockTRCCycles(2) == 6 && ClockBestTRC(125000000) == 3);
     r = stock; ClockAutoWait(&r, 117964800);
     assert(r.cs0wcr == 0x000004C0 && r.cs3wcr == 0x000024D2);          /* = Ptune F5's CS0WCR and CS3WCR */
+    assert(r.cs0bcr == 0x24920400 && r.cs5awcr == 0x000203C1 && r.sscgcr == 0x00000000);
+    r = stock; ClockAutoWait(&r, 58982400);
+    assert(r.cs5awcr == 0x000102C1);                                   /* LCD WW=1, WR=5, HW=1, WM kept */
+    assert(ClockScaleRtcor(0x20, 58982400, 117964800) == 0x40);
+    assert(ClockScaleRtcor(0x20, 58982400, 29491200) == 0x10);
+    assert(ClockScaleRtcor(0xF0, 58982400, 117964800) == 0xFF);        /* clamps at 255 */
 
-    /* register sequence: safe waits, FLL, FRQCR with KICK, settle, final waits */
+    /* register sequence: safe waits, FLL, FRQCR with KICK, settle, SSCG/RTCOR, final waits */
     r.fllfrq = 0x00004384; r.frqcr = 0x1F001103; r.cs0wcr = 0xFFFFFCFF; r.cs3wcr = 0xFFFFFFFE;
+    r.cs0bcr = 0xA492FFFF; r.cs5awcr = 0xFFF20381; r.rtcor = 0x00000040; r.sscgcr = 0x00000000;
     R(CPCLK_CS0WCR, 0x000003C0); R(CPCLK_CS3WCR, 0x000024D1);
+    R(CPCLK_CS0BCR, 0x36DA0400); R(CPCLK_CS5AWCR, 0x000203C1);
+    R(CPCLK_SSCGCR, 0x80000015);
+    W(CPCLK_CS0BCR, 0x36DA0400);
     W(CPCLK_CS0WCR, 0x000005C0); W(CPCLK_CS3WCR, 0x000024D3);
+    W(CPCLK_CS5AWCR, 0x000305C1);
     R(CPCLK_FLLFRQ, 0x00004384); W(CPCLK_FLLFRQ, 0x00004384);
-    R(CPCLK_FRQCR, 0x0F011112);  W(CPCLK_FRQCR, 0x9F011113);       /* bits 19:16 and 7:4 are not ours: kept */
+    R(CPCLK_FRQCR, 0x0F011112);  W(CPCLK_FRQCR, 0x9F011113);           /* bits 19:16 and 7:4 are not ours: kept */
     R(CPCLK_LSTATS, 1); R(CPCLK_LSTATS, 1); R(CPCLK_LSTATS, 0);
-    W(CPCLK_CS0WCR, 0x000004C0); W(CPCLK_CS3WCR, 0x000024D2);       /* only WR and TRC taken from the request */
+    W(CPCLK_SSCGCR, 0x00000015);                                       /* only SSEN (bit 31) taken */
+    W(CPCLK_RTCOR, 0xA55A0040);
+    W(CPCLK_CS0BCR, 0x24920400);                                       /* only idle bits 30:16 taken */
+    W(CPCLK_CS0WCR, 0x000004C0); W(CPCLK_CS3WCR, 0x000024D2);          /* only WR and TRC taken from the request */
+    W(CPCLK_CS5AWCR, 0x000203C1);                                      /* WM/SW preserved */
     ClockApply(&r);
     assert(cursor == count);
 
     count = cursor = 0;
     R(CPCLK_FLLFRQ, 0x00004384); R(CPCLK_FRQCR, 0x8F011112); R(CPCLK_CS0WCR, 0x3C0); R(CPCLK_CS3WCR, 0x24D1);
+    R(CPCLK_CS0BCR, 0x36DA0400); R(CPCLK_CS5AWCR, 0x000203C1); R(CPCLK_RTCOR, 0x00000020); R(CPCLK_SSCGCR, 0x80000000);
     ClockRead(&r);
     assert(cursor == count && memcmp(&r, &stock, sizeof r) == 0);
 
