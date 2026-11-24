@@ -5,11 +5,13 @@
 The OS has deep integration with the calculator hardware, including the touchscreen, power management, backlight adjustment, USB, internal storage, etc.
 
 <p align="center">
+  <img src="docs/img/loader-menu.png" width="170" alt="wince.hh3 Loader Menu">
+  <img src="docs/img/loader-flash.png" width="170" alt="wince.hh3 Flashing Progress">
   <img src="docs/img/boot.png" width="170" alt="Boot Screen">
   <img src="docs/img/programs.png" width="170" alt="Start Menu Programs">
-  <img src="docs/img/plotterz.png" width="170" alt="Plotter-Z 3D Graph">
 </p>
 <p align="center">
+  <img src="docs/img/plotterz.png" width="170" alt="Plotter-Z 3D Graph">
   <img src="docs/img/system.png" width="170" alt="Control Panel - System">
   <img src="docs/img/fugue.png" width="170" alt="Control Panel - Fugue File System">
   <img src="docs/img/backlight.png" width="170" alt="Control Panel - Backlight">
@@ -69,8 +71,15 @@ Because guest and host share the SuperH instruction set, most integer instructio
 
 Pure integer arithmetic runs at near-native speed, while memory-heavy code sees roughly a 2–4× slowdown.
 
-#### 2. Fitting into NOR Flash and 16 MiB RAM
-- **Execute-in-Place (XIP) from NOR flash:** Instead of copying the OS image to RAM, Windows CE executes directly out of NOR flash. The core OS (`NK.bin`) fits into an unused 5 MiB gap inside the stock OS flash region; extra applications (`EXT.bin`) live in Casio's eActivity flash area. *(Note: booting the stock Casio OS reformats the eActivity region and wipes `EXT.bin`; `wince.hh3` can re-flash it anytime from `\fls0`.)*
+#### 2. Fitting into NOR Flash (`NK.bin` vs. `EXT.bin`) and 16 MiB RAM
+- **Execute-in-Place (XIP) split into two flash images:** Instead of copying the OS into RAM, Windows CE executes directly out of the calculator's 64 MiB NOR flash. Because no single free flash region is both large enough and untouched by Casio's OS, the image is split into two XIP regions chained together at boot via `OEMRomChain`:
+
+  | Image | Flash Window | Persistence | What's Inside |
+  |---|---|---|---|
+  | **`NK.bin`** *(Core OS)* | `0x80EE0000` (5.0 MiB unused hole inside Casio's OS area) | **Persistent** — Casio's stock OS never writes here (only a Casio firmware update erases it) | Complete bootable CE 5.0 system: kernel, OAL, Explorer shell, all hardware drivers, Plotter-Z, CEtune, PegHelp, ITaskMgr, SH3CRT, DocList |
+  | **`EXT.bin`** *(Additional Apps)* | `0x83860000` (7.625 MiB eActivity flash area) | **Non-persistent** — booting Casio's stock OS reformats the eActivity area and wipes `EXT.bin` | Optional extra applications & components: Math Xpander, `mfcce300.dll`, SpreadCE, WordPad, Solitaire/FreeCell, TCP/IP/PPP/Telnet stack |
+
+  Because `NK.bin` is self-contained, Windows CE still boots cleanly even after Casio's OS wipes `EXT.bin`. Keeping `EXT.bin` on `\fls0\` lets `wince.hh3` detect the mismatch and re-flash only `EXT.bin` whenever needed (or skip straight to **Boot Windows CE Directly**). Both files can also be compressed ~50% with `tools/cepack.py` (`CEZ2` format, same filenames); `wince.hh3` compares CRC-32s and streams compressed or raw images transparently.
 - **8 MiB + 8 MiB RAM split:** 8 MiB is handed to Windows CE, and 8 MiB holds the translator runtime, block metadata, and a 4 MiB code cache.
 
 #### 3. Running 2001 SH-3 Pocket PC Binaries (`bsp/classpad50/SRC/APPS/SH3CRT/`, `tools/`)
