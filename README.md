@@ -1,10 +1,11 @@
 # wince-classpad
 
-**Windows CE 5.0 ported to the Casio ClassPad II (fx-CP400 / fx-CG500)** — powered by a bare-metal same-ISA dynamic binary translator that bridges the calculator's big-endian SH7305 CPU and little-endian Windows CE binaries without replacing Casio's stock OS.
+**Windows CE 5.0 ported to the Casio ClassPad II (fx-CP400 / fx-CG500)** — powered by a bare-metal same-ISA dynamic binary translator that bridges the calculator's big-endian SH7305 CPU and little-endian Windows CE binaries without replacing Casio's stock OS. 
+
+The OS has deep integration with the calculator hardware, including the touchscreen, power management, backlight adjustment, USB, internal storage, etc.
 
 <p align="center">
   <img src="docs/img/boot.png" width="170" alt="Boot Screen">
-  <img src="docs/img/desktop.png" width="170" alt="Windows CE 5.0 Desktop">
   <img src="docs/img/programs.png" width="170" alt="Start Menu Programs">
   <img src="docs/img/plotterz.png" width="170" alt="Plotter-Z 3D Graph">
 </p>
