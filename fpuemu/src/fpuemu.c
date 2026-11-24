@@ -4,59 +4,61 @@
  */
 #include "fpuemu.h"
 
-static sf_u32 *fr_bank(fpu_state *st) { return &st->fr[(st->fpscr & FPSCR_FR) ? 16 : 0]; }
-static sf_u32 *xf_bank(fpu_state *st) { return &st->fr[(st->fpscr & FPSCR_FR) ? 0 : 16]; }
+#if defined(_MSC_VER)
+#define FPU_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define FPU_NOINLINE __attribute__((noinline))
+#else
+#define FPU_NOINLINE
+#endif
+
+static FPUEMU_INLINE sf_u32 *fr_bank(fpu_state *st) { return &st->fr[(st->fpscr & FPSCR_FR) ? 16 : 0]; }
+static FPUEMU_INLINE sf_u32 *xf_bank(fpu_state *st) { return &st->fr[(st->fpscr & FPSCR_FR) ? 0 : 16]; }
 
 /* For SZ=1 moves: register field n selects DR(n) when even, XD(n-1) when odd.
  * Returns a pointer to the upper word of the pair. */
-static sf_u32 *pair_ptr(fpu_state *st, int n)
+static FPUEMU_INLINE sf_u32 *pair_ptr(fpu_state *st, int n)
 {
     return (n & 1) ? xf_bank(st) + (n & ~1) : fr_bank(st) + (n & ~1);
 }
 
-static f64 get_dr(const sf_u32 *p) { return ((f64)p[0] << 32) | p[1]; }
-static void set_dr(sf_u32 *p, f64 v) { p[0] = (sf_u32)(v >> 32); p[1] = (sf_u32)v; }
+static FPUEMU_INLINE f64 get_dr(const sf_u32 *p) { return ((f64)p[0] << 32) | p[1]; }
+static FPUEMU_INLINE void set_dr(sf_u32 *p, f64 v) { p[0] = (sf_u32)(v >> 32); p[1] = (sf_u32)v; }
 
-static void env_from_fpscr(const fpu_state *st, sf_env *env)
+static FPUEMU_INLINE void env_from_fpscr(const fpu_state *st, sf_env *env)
 {
-    env->rm = (st->fpscr & FPSCR_RM_MASK) == 0 ? SF_RN : SF_RZ;
-    env->dn = (st->fpscr & FPSCR_DN) ? 1 : 0;
+    sf_u32 fpscr = st->fpscr;
+    env->rm = (fpscr & FPSCR_RM_MASK) == 0 ? SF_RN : SF_RZ;
+    env->dn = (fpscr & FPSCR_DN) ? 1 : 0;
     env->flags = 0;
 }
 
 /* Record exception flags. Returns FPU_EXCEPTION if any raised flag is enabled;
  * the caller must then NOT write the result. */
-static int finish(fpu_state *st, const sf_env *env)
+static FPUEMU_INLINE int finish(fpu_state *st, const sf_env *env)
 {
     sf_u32 fl = env->flags & 0x1Fu;
-    st->fpscr &= ~FPSCR_CAUSE_MASK;
-    st->fpscr |= fl << FPSCR_CAUSE_SHIFT;
-    if (fl & ((st->fpscr >> FPSCR_ENABLE_SHIFT) & 0x1Fu))
+    sf_u32 fpscr = st->fpscr;
+    if (fl == 0) {
+        if (fpscr & FPSCR_CAUSE_MASK)
+            st->fpscr = fpscr & ~FPSCR_CAUSE_MASK;
+        return FPU_OK;
+    }
+    fpscr = (fpscr & ~FPSCR_CAUSE_MASK) | (fl << FPSCR_CAUSE_SHIFT);
+    if (fl & ((fpscr >> FPSCR_ENABLE_SHIFT) & 0x1Fu)) {
+        st->fpscr = fpscr;
         return FPU_EXCEPTION;
-    st->fpscr |= fl << FPSCR_FLAG_SHIFT;
+    }
+    st->fpscr = fpscr | (fl << FPSCR_FLAG_SHIFT);
     return FPU_OK;
 }
 
 void fpuemu_reset(fpu_state *st)
 {
     int i;
-    for (i = 0; i < 32; i++) st->fr[i] = 0;
     st->fpscr = FPSCR_RESET;
     st->fpul = 0;
-}
-
-int fpuemu_is_fpu_op(sf_u32 op)
-{
-    op &= 0xFFFFu;
-    if ((op & 0xF000u) == 0xF000u) return (op & 0xFu) != 0xFu;
-    switch (op & 0xF0FFu) {
-    case 0x405Au: case 0x406Au: case 0x4056u: case 0x4066u:
-    case 0x4052u: case 0x4062u:                       /* lds/sts (.l) fpul/fpscr */
-    case 0x005Au: case 0x006Au:                       /* sts fpul/fpscr,rn */
-        return 1;
-    default:
-        return 0;
-    }
+    for (i = 0; i < 32; i++) st->fr[i] = 0;
 }
 
 /* ---- memory helpers: 32-bit and 64-bit (pair) loads/stores ---- */
@@ -75,7 +77,7 @@ static int store_pair(const fpu_mem *mem, sf_u32 addr, sf_u32 hi, sf_u32 lo)
 }
 
 /* FMOV family (op = 1111nnnnmmmm0110 .. 1100). */
-static int exec_fmov(fpu_state *st, sf_u32 gpr[16], sf_u32 op, const fpu_mem *mem)
+static FPU_NOINLINE int exec_fmov(fpu_state *st, sf_u32 gpr[16], sf_u32 op, const fpu_mem *mem)
 {
     int n = (op >> 8) & 0xF, m = (op >> 4) & 0xF, sub = op & 0xF;
     int sz = (st->fpscr & FPSCR_SZ) != 0;
@@ -124,32 +126,72 @@ static int exec_fmov(fpu_state *st, sf_u32 gpr[16], sf_u32 op, const fpu_mem *me
     return FPU_UNIMPL;
 }
 
+/* 0x0 and 0x4 lds/sts (.l) fpul/fpscr group. */
+static FPU_NOINLINE int exec_04(fpu_state *st, sf_u32 gpr[16], sf_u32 op, const fpu_mem *mem)
+{
+    int n = (op >> 8) & 0xF;
+    sf_u32 v;
+    if ((op >> 12) == 0x0u) {
+        if ((op & 0xF0FFu) == 0x005Au) { gpr[n] = st->fpul;  return FPU_OK; }   /* sts fpul,rn */
+        if ((op & 0xF0FFu) == 0x006Au) { gpr[n] = st->fpscr; return FPU_OK; }   /* sts fpscr,rn */
+        return FPU_NOT_FPU;
+    }
+    switch (op & 0xF0FFu) {
+    case 0x405Au: st->fpul = gpr[n]; return FPU_OK;                             /* lds rm,fpul */
+    case 0x406Au: st->fpscr = gpr[n] & FPSCR_MASK; return FPU_OK;               /* lds rm,fpscr */
+    case 0x4056u: if (mem->read32(mem->ctx, gpr[n], &v)) return FPU_FAULT;      /* lds.l @rm+,fpul */
+                  st->fpul = v; gpr[n] += 4; return FPU_OK;
+    case 0x4066u: if (mem->read32(mem->ctx, gpr[n], &v)) return FPU_FAULT;      /* lds.l @rm+,fpscr */
+                  st->fpscr = v & FPSCR_MASK; gpr[n] += 4; return FPU_OK;
+    case 0x4052u: if (mem->write32(mem->ctx, gpr[n] - 4, st->fpul)) return FPU_FAULT;  /* sts.l fpul,@-rn */
+                  gpr[n] -= 4; return FPU_OK;
+    case 0x4062u: if (mem->write32(mem->ctx, gpr[n] - 4, st->fpscr)) return FPU_FAULT; /* sts.l fpscr,@-rn */
+                  gpr[n] -= 4; return FPU_OK;
+    }
+    return FPU_NOT_FPU;
+}
+
 /* 1111nnnnmmmm1101 group: single-operand and conversion instructions. */
-static int exec_fxxd(fpu_state *st, fpu_state *dummy, sf_u32 op)
+static int exec_fxxd(fpu_state *st, sf_u32 op)
 {
     int n = (op >> 8) & 0xF, kind = (op >> 4) & 0xF;
-    int pr = (st->fpscr & FPSCR_PR) != 0;
     sf_u32 *FR = fr_bank(st);
     sf_env env;
     int r;
-    (void)dummy;
-    env_from_fpscr(st, &env);
 
     switch (kind) {
     case 0x0: FR[n] = st->fpul; return FPU_OK;                 /* fsts fpul,frn */
     case 0x1: st->fpul = FR[n]; return FPU_OK;                 /* flds frn,fpul */
     case 0x2:                                                  /* float fpul,frn/drn */
-        if (!pr) { f32 v = f32_from_i32(&env, (sf_i32)st->fpul);
-                   if ((r = finish(st, &env)) != FPU_OK) return r; FR[n] = v; return FPU_OK; }
+        env_from_fpscr(st, &env);
+        if (!(st->fpscr & FPSCR_PR)) {
+            f32 v = f32_from_i32(&env, (sf_i32)st->fpul);
+            if ((r = finish(st, &env)) != FPU_OK) return r;
+            FR[n] = v;
+            return FPU_OK;
+        }
         if (n & 1) return FPU_UNIMPL;
-        { f64 v = f64_from_i32(&env, (sf_i32)st->fpul);
-          if ((r = finish(st, &env)) != FPU_OK) return r; set_dr(FR + n, v); return FPU_OK; }
+        {
+            f64 v = f64_from_i32(&env, (sf_i32)st->fpul);
+            if ((r = finish(st, &env)) != FPU_OK) return r;
+            set_dr(FR + n, v);
+            return FPU_OK;
+        }
     case 0x3:                                                  /* ftrc frn/drn,fpul */
-        if (!pr) { sf_i32 v = f32_to_i32(&env, FR[n]);
-                   if ((r = finish(st, &env)) != FPU_OK) return r; st->fpul = (sf_u32)v; return FPU_OK; }
+        env_from_fpscr(st, &env);
+        if (!(st->fpscr & FPSCR_PR)) {
+            sf_i32 v = f32_to_i32(&env, FR[n]);
+            if ((r = finish(st, &env)) != FPU_OK) return r;
+            st->fpul = (sf_u32)v;
+            return FPU_OK;
+        }
         if (n & 1) return FPU_UNIMPL;
-        { sf_i32 v = f64_to_i32(&env, get_dr(FR + n));
-          if ((r = finish(st, &env)) != FPU_OK) return r; st->fpul = (sf_u32)v; return FPU_OK; }
+        {
+            sf_i32 v = f64_to_i32(&env, get_dr(FR + n));
+            if ((r = finish(st, &env)) != FPU_OK) return r;
+            st->fpul = (sf_u32)v;
+            return FPU_OK;
+        }
     /* fneg/fabs touch the sign bit of FRn whatever PR says: with PR = 1 and
      * an even n that is DRn's sign; the CE 5.0 SH-4 compiler also emits them
      * on odd registers in double mode (Plotter-Z's recalculation stopped at
@@ -159,22 +201,41 @@ static int exec_fxxd(fpu_state *st, fpu_state *dummy, sf_u32 op)
     case 0x5:                                                  /* fabs */
         FR[n] &= 0x7FFFFFFFu; return FPU_OK;
     case 0x6:                                                  /* fsqrt */
-        if (!pr) { f32 v = f32_sqrt(&env, FR[n]);
-                   if ((r = finish(st, &env)) != FPU_OK) return r; FR[n] = v; return FPU_OK; }
+        env_from_fpscr(st, &env);
+        if (!(st->fpscr & FPSCR_PR)) {
+            f32 v = f32_sqrt(&env, FR[n]);
+            if ((r = finish(st, &env)) != FPU_OK) return r;
+            FR[n] = v;
+            return FPU_OK;
+        }
         if (n & 1) return FPU_UNIMPL;
-        { f64 v = f64_sqrt(&env, get_dr(FR + n));
-          if ((r = finish(st, &env)) != FPU_OK) return r; set_dr(FR + n, v); return FPU_OK; }
+        {
+            f64 v = f64_sqrt(&env, get_dr(FR + n));
+            if ((r = finish(st, &env)) != FPU_OK) return r;
+            set_dr(FR + n, v);
+            return FPU_OK;
+        }
     case 0x7: return FPU_UNIMPL;                               /* fsrra (approximate) */
     case 0x8: FR[n] = 0; return FPU_OK;                        /* fldi0 */
     case 0x9: FR[n] = 0x3F800000u; return FPU_OK;              /* fldi1 */
     case 0xA:                                                  /* fcnvsd fpul,drn */
-        if (!pr || (n & 1)) return FPU_UNIMPL;
-        { f64 v = f32_to_f64(&env, st->fpul);
-          if ((r = finish(st, &env)) != FPU_OK) return r; set_dr(FR + n, v); return FPU_OK; }
+        if (!(st->fpscr & FPSCR_PR) || (n & 1)) return FPU_UNIMPL;
+        env_from_fpscr(st, &env);
+        {
+            f64 v = f32_to_f64(&env, st->fpul);
+            if ((r = finish(st, &env)) != FPU_OK) return r;
+            set_dr(FR + n, v);
+            return FPU_OK;
+        }
     case 0xB:                                                  /* fcnvds drm,fpul */
-        if (!pr || (n & 1)) return FPU_UNIMPL;
-        { f32 v = f64_to_f32(&env, get_dr(FR + n));
-          if ((r = finish(st, &env)) != FPU_OK) return r; st->fpul = v; return FPU_OK; }
+        if (!(st->fpscr & FPSCR_PR) || (n & 1)) return FPU_UNIMPL;
+        env_from_fpscr(st, &env);
+        {
+            f32 v = f64_to_f32(&env, get_dr(FR + n));
+            if ((r = finish(st, &env)) != FPU_OK) return r;
+            st->fpul = v;
+            return FPU_OK;
+        }
     case 0xE: return FPU_UNIMPL;                               /* fipr */
     case 0xF:
         if (op == 0xF3FDu) { st->fpscr ^= FPSCR_SZ; return FPU_OK; }   /* fschg */
@@ -189,13 +250,12 @@ static int exec_fxxd(fpu_state *st, fpu_state *dummy, sf_u32 op)
 static int exec_arith(fpu_state *st, sf_u32 *sr, sf_u32 op)
 {
     int n = (op >> 8) & 0xF, m = (op >> 4) & 0xF, sub = op & 0xF;
-    int pr = (st->fpscr & FPSCR_PR) != 0;
     sf_u32 *FR = fr_bank(st);
     sf_env env;
     int r;
     env_from_fpscr(st, &env);
 
-    if (!pr) {
+    if (!(st->fpscr & FPSCR_PR)) {
         f32 a = FR[n], b = FR[m], v = 0;
         int t = 0;
         switch (sub) {
@@ -230,57 +290,66 @@ static int exec_arith(fpu_state *st, sf_u32 *sr, sf_u32 op)
     }
 }
 
+int fpuemu_exec_arith(fpu_state *st, sf_u32 *sr, sf_u32 op)
+{
+    sf_u32 sub = op & 0xFu;
+    if (sub <= 0x5u)
+        return exec_arith(st, sr, op);
+    if (sub == 0xDu)
+        return exec_fxxd(st, op);
+    if (sub == 0xCu) {
+        int n = (op >> 8) & 0xF, m = (op >> 4) & 0xF;
+        if (!(st->fpscr & FPSCR_SZ)) {
+            sf_u32 *FR = fr_bank(st);
+            FR[n] = FR[m];
+        } else {
+            sf_u32 *dst = pair_ptr(st, n), *src = pair_ptr(st, m);
+            dst[0] = src[0];
+            dst[1] = src[1];
+        }
+        return FPU_OK;
+    }
+    if (sub == 0xEu) {                                          /* fmac fr0,frm,frn */
+        sf_u32 *FR = fr_bank(st);
+        int n = (op >> 8) & 0xF;
+        sf_env env; f32 r; int rc;
+        if (st->fpscr & FPSCR_PR) return FPU_UNIMPL;
+        env_from_fpscr(st, &env);
+        r = f32_fmac(&env, FR[0], FR[(op >> 4) & 0xF], FR[n]);
+        if ((rc = finish(st, &env)) != FPU_OK) return rc;
+        FR[n] = r;
+        return FPU_OK;
+    }
+    return FPU_NOT_FPU;
+}
+
+int fpuemu_exec_batch(fpu_state *st, sf_u32 *sr, const sf_u16 *ops, int count, int *done)
+{
+    int i, r = FPU_OK;
+    for (i = 0; i < count; i++) {
+        r = fpuemu_exec_arith(st, sr, ops[i]);
+        if (r != FPU_OK) break;
+    }
+    if (done) *done = i;
+    return r;
+}
+
 int fpuemu_exec(fpu_state *st, sf_u32 gpr[16], sf_u32 *sr, sf_u32 op, const fpu_mem *mem)
 {
-    int n, m;
-    sf_u32 v;
+    sf_u32 top;
     op &= 0xFFFFu;
-    n = (op >> 8) & 0xF;
-    m = n;
-
-    switch (op >> 12) {
-    case 0x0:
-        if ((op & 0xF0FFu) == 0x005Au) { gpr[n] = st->fpul;  return FPU_OK; }   /* sts fpul,rn */
-        if ((op & 0xF0FFu) == 0x006Au) { gpr[n] = st->fpscr; return FPU_OK; }   /* sts fpscr,rn */
-        return FPU_NOT_FPU;
-    case 0x4:
-        switch (op & 0xF0FFu) {
-        case 0x405Au: st->fpul = gpr[m]; return FPU_OK;                         /* lds rm,fpul */
-        case 0x406Au: st->fpscr = gpr[m] & FPSCR_MASK; return FPU_OK;           /* lds rm,fpscr */
-        case 0x4056u: if (mem->read32(mem->ctx, gpr[m], &v)) return FPU_FAULT;  /* lds.l @rm+,fpul */
-                      st->fpul = v; gpr[m] += 4; return FPU_OK;
-        case 0x4066u: if (mem->read32(mem->ctx, gpr[m], &v)) return FPU_FAULT;  /* lds.l @rm+,fpscr */
-                      st->fpscr = v & FPSCR_MASK; gpr[m] += 4; return FPU_OK;
-        case 0x4052u: if (mem->write32(mem->ctx, gpr[n] - 4, st->fpul)) return FPU_FAULT;   /* sts.l fpul,@-rn */
-                      gpr[n] -= 4; return FPU_OK;
-        case 0x4062u: if (mem->write32(mem->ctx, gpr[n] - 4, st->fpscr)) return FPU_FAULT;  /* sts.l fpscr,@-rn */
-                      gpr[n] -= 4; return FPU_OK;
-        }
-        return FPU_NOT_FPU;
-    case 0xF:
-        switch (op & 0xFu) {
-        case 0x0: case 0x1: case 0x2: case 0x3: case 0x4: case 0x5:
-            return exec_arith(st, sr, op);
-        case 0x6: case 0x7: case 0x8: case 0x9: case 0xA: case 0xB: case 0xC:
-            return exec_fmov(st, gpr, op, mem);
-        case 0xD:
-            return exec_fxxd(st, 0, op);
-        case 0xE: {                                                             /* fmac fr0,frm,frn */
-            sf_u32 *FR = fr_bank(st);
-            sf_env env; f32 r; int rc;
-            if (st->fpscr & FPSCR_PR) return FPU_UNIMPL;
-            env_from_fpscr(st, &env);
-            r = f32_fmac(&env, FR[0], FR[(op >> 4) & 0xF], FR[n]);
-            if ((rc = finish(st, &env)) != FPU_OK) return rc;
-            FR[n] = r;
-            return FPU_OK;
-        }
-        default:
-            return FPU_NOT_FPU;
-        }
-    default:
+    top = op >> 12;
+    if (top == 0xFu) {
+        sf_u32 sub = op & 0xFu;
+        if (sub <= 0x5u) return exec_arith(st, sr, op);
+        if (sub == 0xDu) return exec_fxxd(st, op);
+        if (sub <= 0xCu) return exec_fmov(st, gpr, op, mem);
+        if (sub == 0xEu) return fpuemu_exec_arith(st, sr, op);
         return FPU_NOT_FPU;
     }
+    if (top == 0x4u || top == 0x0u)
+        return exec_04(st, gpr, op, mem);
+    return FPU_NOT_FPU;
 }
 
 int fpuemu_run(fpu_state *st, sf_u32 gpr[16], sf_u32 *sr, sf_u32 *pc,

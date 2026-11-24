@@ -395,6 +395,13 @@ static void test_insns(void)
         st.fpscr = 0;
         expect("run", fpuemu_run(&st, gpr, &sr, &pc, &mem, 16, &n) == FPU_OK && n == 3 && pc == 6 && st.fr[1] == 0x40000000u);
     }
+    /* fpuemu_exec_batch: fldi1 fr1; fldi1 fr2; fadd fr2,fr1; fmul fr1,fr1 -> fr1 = 4.0 */
+    {
+        sf_u16 batch[4] = { 0xF19D, 0xF29D, 0xF120, 0xF112 };
+        int done = 0;
+        st.fpscr = 0;
+        expect("batch ok", fpuemu_exec_batch(&st, &sr, batch, 4, &done) == FPU_OK && done == 4 && st.fr[1] == 0x40800000u);
+    }
 }
 
 int main(void)
