@@ -259,7 +259,7 @@ VOID OALTimerRetune(UINT32 mul, UINT32 div)
     UINT32 old = g_oalTimer.countsPerMSec, hz, perMSec, elapsedMSec;
 
     if (old == 0 || mul == 0 || div == 0 || mul == div) return;
-    hz = (UINT32)((UINT64)(g_calibratedHz ? g_calibratedHz : COUNT_FREQUENCY) * mul / div);
+    hz = (UINT32)(((UINT64)(g_calibratedHz ? g_calibratedHz : COUNT_FREQUENCY) * mul + div / 2) / div);
     perMSec = (hz + 500) / 1000;
     if (perMSec == 0) return;
 

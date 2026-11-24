@@ -84,7 +84,7 @@ static int    g_cx, g_cy;
 
 static BOOL   g_haveOal;                    // the OAL answers the clock IOCTLs
 static ClasspadClockRegs  g_cur, g_boot;    // applied now, found at boot
-static unsigned           g_pllOn, g_pphi;    // g_pphi: Pphi as the OAL measured it, Hz
+static unsigned           g_pllOn, g_sscgOn, g_pphi; // g_pphi: Pphi as the OAL measured it, Hz
 static ClasspadClockChain g_tg;             // what Apply would write
 static ClasspadClockChain g_preset[5];      // F1 = boot (fixed), F2..F5 stored
 static int    g_sel = 1;
@@ -101,7 +101,7 @@ typedef struct {
     unsigned cpu, cpuApplied, cpuBoot; BOOL same;   // the dial
     unsigned rowVal[6], rowHz[6]; int sel;          // the six rows
     unsigned chip[4];                               // wait chips
-    unsigned presetMHz[5]; BOOL presetOn[5];
+    unsigned presetCpuMHz[5], presetBusMHz[5]; BOOL presetOn[5];
     unsigned frqcr, fllfrq;
     int keep; BOOL dirty;                           // action bar
     unsigned pphi; BOOL limits, oal;                // title
@@ -118,35 +118,25 @@ static COLORREF g_dcBk, g_dcText;                   // colours the DC in use has
 //
 static BOOL SameChain(const ClasspadClockChain *a, const ClasspadClockChain *b)
 {
-    return memcmp(a, b, sizeof *a) == 0;
+    return ClockSameChain(a, b) != 0;
 }
 
-//  Registers for the target chain. The wait fields follow the bus clock
-//  (Xtune's tables), except that a chain equal to the applied or the boot
-//  chain keeps the waits that setting actually has.
+static const unsigned *ActiveLimit(void)
+{
+    return g_limits ? g_cpclkLimit : g_cpclkHardLimit;
+}
+
+//  Registers for the target chain (strictly following gpSP's classpad_clock.h):
+//  a chain equal to the applied chain keeps g_cur; a chain equal to boot keeps
+//  exact g_boot (including stock idle cycles); all other chains clamp WR/TRC
+//  against boot and apply Ptune4 F5 fast flash/SDRAM idle cycles.
 static void TargetRegs(ClasspadClockRegs *r)
 {
-    ClasspadClockChain c;
-    unsigned hz[6], bootHz[6];
+    ClasspadClockChain cur;
 
-    *r = g_cur;
-    ClockDecode(&g_cur, &c);
-    if (SameChain(&c, &g_tg)) return;
-    ClockEncode(&g_tg, r);
-    ClockDecode(&g_boot, &c);
-    if (SameChain(&c, &g_tg)) {
-        r->cs0wcr  = (r->cs0wcr & ~CPCLK_WR_MASK) | (g_boot.cs0wcr & CPCLK_WR_MASK);
-        r->cs3wcr  = (r->cs3wcr & ~CPCLK_TRC_MASK) | (g_boot.cs3wcr & CPCLK_TRC_MASK);
-        r->cs0bcr  = (r->cs0bcr & ~CPCLK_CS0BCR_IDLE_MASK) | (g_boot.cs0bcr & CPCLK_CS0BCR_IDLE_MASK);
-        r->cs5awcr = (r->cs5awcr & ~CPCLK_CS5A_MASK) | (g_boot.cs5awcr & CPCLK_CS5A_MASK);
-        r->rtcor   = g_boot.rtcor & CPCLK_RTCOR_MASK;
-        r->sscgcr  = (r->sscgcr & ~CPCLK_SSCGCR_SSEN) | (g_boot.sscgcr & CPCLK_SSCGCR_SSEN);
-        return;
-    }
-    ClockHz(&c, 1, bootHz);
-    ClockHz(&g_tg, 1, hz);
-    ClockAutoWait(r, hz[4]);
-    r->rtcor = ClockScaleRtcor(g_boot.rtcor, bootHz[4], hz[4]);
+    ClockDecode(&g_cur, &cur);
+    if (SameChain(&cur, &g_tg)) { *r = g_cur; return; }
+    ClockForChain(&g_boot, &g_tg, g_pllOn, r);
 }
 
 static BOOL Dirty(void)
@@ -161,16 +151,20 @@ static void ReadClock(void)
     ClasspadClockInfo info;
     DWORD got = 0;
 
-    g_haveOal = KernelIoControl(IOCTL_HAL_CLASSPAD_CLOCK_GET, NULL, 0, &info, sizeof info, &got);
+    g_haveOal = KernelIoControl(IOCTL_HAL_CLASSPAD_CLOCK_GET, NULL, 0, &info, sizeof info, &got)
+                && got == sizeof info;
     if (g_haveOal) {
-        g_cur = info.cur; g_boot = info.boot; g_pllOn = info.pllcr & CPCLK_PLLCR_ON; g_pphi = info.pphi;
+        g_cur    = info.cur;
+        g_boot   = info.boot;
+        g_pllOn  = (info.pllcr & CPCLK_PLLCR_ON) != 0;
+        g_sscgOn = (info.sscgcr & CPCLK_SSCGCR_SSEN) != 0;
+        g_pphi   = info.pphi;
     } else if (g_boot.frqcr == 0) {
         // demo: the fx-CG50's stock setting
-        g_boot.fllfrq  = 0x00004384; g_boot.frqcr   = 0x0F011112;
-        g_boot.cs0wcr  = 0x000003C0; g_boot.cs3wcr  = 0x000024D1;
-        g_boot.cs0bcr  = 0x36DA0400; g_boot.cs5awcr = 0x000203C1;
-        g_boot.rtcor   = 0x00000020; g_boot.sscgcr  = 0x80000000;
-        g_cur = g_boot; g_pllOn = 1;
+        g_boot.fllfrq = 0x00004384; g_boot.frqcr  = 0x0F011112;
+        g_boot.cs0bcr = 0x36DA0400; g_boot.cs3bcr = 0x76DB4400;
+        g_boot.cs0wcr = 0x000003C0; g_boot.cs3wcr = 0x000024D1;
+        g_cur = g_boot; g_pllOn = 1; g_sscgOn = 1;
     }
 }
 
@@ -184,22 +178,23 @@ static BOOL WriteClock(const ClasspadClockRegs *r)
 
 static void DefaultPresets(void)
 {
-    ClasspadClockChain c;
-    unsigned target;
-    int k;
-
-    ClockDecode(&g_boot, &c);
-    g_preset[0] = c;
-    // F2: the CPU clock one divider step down. F3 and F4: the PLL multiplier
-    // raised by a quarter and by a half, stepped like the + button so that
-    // Pphi follows and the limits stop it. F5: free, starts as F1.
-    g_preset[1] = c; ClockStep(&g_preset[1], 2, -1, 0, g_cpclkLimit);
-    for (k = 2; k <= 3; k++) {
-        g_preset[k] = c;
-        target = c.pll + c.pll * (unsigned)(k - 1) / 4u;
-        while (g_preset[k].pll < target && ClockStep(&g_preset[k], 1, 1, 0, g_cpclkLimit) == 0) { }
+    // F1: boot stock. F2..F5: Ptune4's presets at the 471.86 MHz PLL base
+    // (Ptune4.g3a & gpSP's cp_clock_f5):
+    //   F2 = 59 / 29.5 / 29.5 / 29.5 MHz   (/8 /16 /16 /16)
+    //   F3 = 118 / 59 / 59 / 29.5 MHz      (/4 /8 /8 /16)
+    //   F4 = 236 / 118 / 59 / 29.5 MHz     (/2 /4 /8 /16, CPU x2 safe bus)
+    //   F5 = 236 / 118 / 118 / 29.5 MHz    (/2 /4 /4 /16, Ptune4 F5)
+    ClockDecode(&g_boot, &g_preset[0]);
+    ClockPtuneChain(&g_boot, 8u, 16u, 16u, 16u, &g_preset[1]);
+    ClockPtuneChain(&g_boot, 4u, 8u,  8u,  16u, &g_preset[2]);
+    if (SameChain(&g_preset[2], &g_preset[0])) {
+        // keep F3 distinct from F1 (so it applies fast idle cycles) if boot is already /4 /8 /8 /16
+        g_preset[2].fll   = 900u;
+        g_preset[2].selxm = g_preset[0].selxm ? 0u : 1u;
+        g_preset[2].pll   = g_preset[2].selxm ? 32u : 16u;
     }
-    g_preset[4] = c;
+    ClockPtuneChain(&g_boot, 2u, 4u, 8u, 16u, &g_preset[3]);
+    ClockPtuneChain(&g_boot, 2u, 4u, 4u, 16u, &g_preset[4]);
 }
 
 //------------------------------------------------------------------------------
@@ -207,7 +202,8 @@ static void DefaultPresets(void)
 //  writable, else the object store's root
 //
 typedef struct { DWORD magic, version; ClasspadClockChain preset[4]; } CetuneFile;
-#define CETUNE_MAGIC 0x4E544543     // "CETN"
+#define CETUNE_MAGIC   0x4E544543   // "CETN"
+#define CETUNE_VERSION 2u           // v2: Ptune4 F2..F5 defaults
 
 static const TCHAR *g_savePath[2] = { TEXT("\\Storage\\cetune.sav"), TEXT("\\cetune.sav") };
 
@@ -218,7 +214,7 @@ static BOOL SavePresets(void)
     DWORD done = 0;
     int i;
 
-    f.magic = CETUNE_MAGIC; f.version = 1;
+    f.magic = CETUNE_MAGIC; f.version = CETUNE_VERSION;
     memcpy(f.preset, &g_preset[1], sizeof f.preset);
     for (i = 0; i < 2; i++) {
         h = CreateFile(g_savePath[i], GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -228,6 +224,11 @@ static BOOL SavePresets(void)
         if (done == sizeof f) return TRUE;
     }
     return FALSE;
+}
+
+static BOOL ValidDiv(unsigned d)
+{
+    return d == 2u || d == 4u || d == 8u || d == 16u || d == 32u || d == 64u;
 }
 
 static void LoadPresets(void)
@@ -245,13 +246,19 @@ static void LoadPresets(void)
         done = 0;
         ReadFile(h, &f, sizeof f, &done, NULL);
         CloseHandle(h);
-        if (done != sizeof f || f.magic != CETUNE_MAGIC || f.version != 1) continue;
+        if (done != sizeof f || f.magic != CETUNE_MAGIC || f.version != CETUNE_VERSION) continue;
         for (k = 0; k < 4; k++) {
-            // only chains the OAL would take
-            if (f.preset[k].pll < 1 || f.preset[k].pll > CPCLK_PLL_MAX || f.preset[k].fll > CPCLK_FLL_MAX) continue;
+            // only chains the OAL would take, within hard limits
+            if (f.preset[k].pll < 1u || f.preset[k].pll > CPCLK_PLL_MAX ||
+                f.preset[k].fll < CPCLK_FLL_MIN || f.preset[k].fll > CPCLK_FLL_MAX ||
+                f.preset[k].selxm > 1u ||
+                !ValidDiv(f.preset[k].div[0]) || !ValidDiv(f.preset[k].div[1]) ||
+                !ValidDiv(f.preset[k].div[2]) || !ValidDiv(f.preset[k].div[3])) continue;
             r = g_boot; ClockEncode(&f.preset[k], &r);
             ClockDecode(&r, &back);
-            if (SameChain(&back, &f.preset[k]) && ClockValid(&r, 1)) g_preset[1 + k] = f.preset[k];
+            if (SameChain(&back, &f.preset[k]) && ClockValid(&r, g_pllOn) &&
+                ClockOverLimit(&f.preset[k], g_cpclkHardLimit) == 0)
+                g_preset[1 + k] = f.preset[k];
         }
         return;
     }
@@ -333,11 +340,11 @@ static void Line(HDC hdc, int x0, int y0, int x1, int y1)
     p[0].x = x0; p[0].y = y0; p[1].x = x1; p[1].y = y1;
     Polyline(hdc, p, 2);
 }
-//  style: 0 plain, 1 lit (amber outline), 2 primary (amber fill), 3 warning (red outline)
+//  style: 0 plain, 1 lit (amber outline), 2 primary (amber fill), 3 warning (red outline), 4 green text
 static void Button(HDC hdc, const RECT *r, const TCHAR *label, int style)
 {
     COLORREF edge = style == 1 ? C_AMBER : style == 3 ? C_RED : style == 2 ? C_AMBER : C_LINE;
-    COLORREF text = style == 1 ? C_AMBER : style == 3 ? C_RED : style == 2 ? C_BG : C_TEXT;
+    COLORREF text = style == 1 ? C_AMBER : style == 3 ? C_RED : style == 2 ? C_BG : style == 4 ? C_GREEN : C_TEXT;
     Box(hdc, r, edge, style == 2 ? C_AMBER : C_PANEL);
     if (label) Text(hdc, r->left, r->top, r->right, r->bottom, label, text, DT_CENTER);
 }
@@ -350,6 +357,28 @@ static BOOL In(const RECT *r)
     return FALSE;
 }
 static BOOL InBand(int top, int bottom) { RECT r; SetR(&r, 0, top, g_cx, bottom); return In(&r); }
+//  True if any piece of the update region inside [0,top,g_cx,bottom) spills
+//  outside the strip's own buttons (e.g. after an overlapping dialog closes).
+static BOOL StripNeedsBg(int top, int bottom, const RECT *items, int nitems)
+{
+    int u, j;
+    for (u = 0; u < g_nupd; u++) {
+        int l = g_upd[u].left > 0 ? g_upd[u].left : 0;
+        int t = g_upd[u].top > top ? g_upd[u].top : top;
+        int r = g_upd[u].right < g_cx ? g_upd[u].right : g_cx;
+        int b = g_upd[u].bottom < bottom ? g_upd[u].bottom : bottom;
+        BOOL covered = FALSE;
+        if (l >= r || t >= b) continue;
+        for (j = 0; j < nitems; j++) {
+            if (l >= items[j].left && r <= items[j].right && t >= items[j].top && b <= items[j].bottom) {
+                covered = TRUE;
+                break;
+            }
+        }
+        if (!covered) return TRUE;
+    }
+    return FALSE;
+}
 static void Section(HDC hdc, int y, const TCHAR *name, const TCHAR *right, COLORREF rightColor)
 {
     Fill(hdc, 0, y, g_cx, y + 1, C_LINE);
@@ -504,8 +533,7 @@ static void PaintTitle(HDC hdc)
     } else {
         Text(hdc, 50, 0, g_cx - 120, 21, TEXT("DEMO: no OAL clock"), C_RED, DT_LEFT);
     }
-    TitleRect(0, &r); Button(hdc, &r, g_limits ? TEXT("LIMITS ON") : TEXT("LIMITS OFF"), g_limits ? 0 : 3);
-    if (g_limits) Text(hdc, r.left, r.top, r.right, r.bottom, TEXT("LIMITS ON"), C_GREEN, DT_CENTER);
+    TitleRect(0, &r); Button(hdc, &r, g_limits ? TEXT("LIMITS ON") : TEXT("LIMITS OFF"), g_limits ? 4 : 3);
     TitleRect(1, &r); Button(hdc, &r, TEXT("?"), 0);
     TitleRect(2, &r); Button(hdc, &r, TEXT("x"), 0);
 }
@@ -563,35 +591,26 @@ static void PaintRow(HDC hdc, int i)
     }
 }
 
-//  A strip of buttons: its background only when the left margin, which no
-//  button covers, is to be painted (the whole strip is), each button when it is
-static BOOL StripBackground(HDC hdc, int top, int bottom)
-{
-    RECT margin;
-    SetR(&margin, 0, top, 6, bottom);
-    if (!In(&margin)) return FALSE;
-    Fill(hdc, 0, top, g_cx, bottom, C_BG);
-    return TRUE;
-}
-
 static void PaintWait(HDC hdc)
 {
     ClasspadClockRegs t;
     TCHAR text[16];
-    RECT r;
+    RECT items[4];
+    BOOL bg;
     int i;
 
     TargetRegs(&t);
     if (InBand(Y_WAIT, Y_CHIPS)) Section(hdc, Y_WAIT, TEXT("WAIT STATES"), TEXT("AUTO"), C_GREEN);
-    StripBackground(hdc, Y_CHIPS, Y_PRESET);
+    for (i = 0; i < 4; i++) ChipRect(i, &items[i]);
+    bg = StripNeedsBg(Y_CHIPS, Y_PRESET, items, 4);
+    if (bg) Fill(hdc, 0, Y_CHIPS, g_cx, Y_PRESET, C_BG);
     for (i = 0; i < 4; i++) {
-        ChipRect(i, &r);
-        if (!In(&r)) continue;
+        if (!bg && !In(&items[i])) continue;
         if (i == 0)      wsprintf(text, TEXT("roR %u"), ClockWRCycles((t.cs0wcr & CPCLK_WR_MASK) >> CPCLK_WR_SHIFT));
         else if (i == 1) wsprintf(text, TEXT("TRC %u"), ClockTRCCycles(t.cs3wcr & CPCLK_TRC_MASK));
         else if (i == 2) wsprintf(text, TEXT("CL %u"), ((t.cs3wcr >> 7) & 3u) + 1u);
         else             wcscpy(text, g_tg.selxm ? TEXT("XM 1/2") : TEXT("XM 1"));
-        Button(hdc, &r, text, 0);
+        Button(hdc, &items[i], text, 0);
     }
 }
 
@@ -599,21 +618,24 @@ static void PaintPresets(HDC hdc)
 {
     unsigned hz[6];
     TCHAR text[16];
-    RECT r;
+    RECT items[5];
+    BOOL bg;
     int i;
 
     if (InBand(Y_PRESET, Y_PBTNS)) Section(hdc, Y_PRESET, TEXT("PRESETS"), TEXT("hold F2-F5 to store"), C_DIM);
-    StripBackground(hdc, Y_PBTNS, Y_REGS);
+    for (i = 0; i < 5; i++) PresetRect(i, &items[i]);
+    bg = StripNeedsBg(Y_PBTNS, Y_REGS, items, 5);
+    if (bg) Fill(hdc, 0, Y_PBTNS, g_cx, Y_REGS, C_BG);
     for (i = 0; i < 5; i++) {
         BOOL on = SameChain(&g_preset[i], &g_tg);
-        PresetRect(i, &r);
-        if (!In(&r)) continue;
-        Button(hdc, &r, NULL, on ? 1 : 0);
+        const RECT *r = &items[i];
+        if (!bg && !In(r)) continue;
+        Button(hdc, r, NULL, on ? 1 : 0);
         wsprintf(text, TEXT("F%d"), i + 1);
-        Text(hdc, r.left, r.top + 2, r.right, r.top + 15, text, on ? C_AMBER : C_TEXT, DT_CENTER);
+        Text(hdc, r->left, r->top + 2, r->right, r->top + 15, text, on ? C_AMBER : C_TEXT, DT_CENTER);
         ClockHz(&g_preset[i], g_pllOn, hz);
-        wsprintf(text, TEXT("%u MHz"), (hz[2] + 500000u) / 1000000u);
-        Text(hdc, r.left, r.top + 15, r.right, r.bottom - 2, text, C_DIM, DT_CENTER);
+        wsprintf(text, TEXT("%u/%u"), (hz[2] + 500000u) / 1000000u, (hz[4] + 500000u) / 1000000u);
+        Text(hdc, r->left, r->top + 15, r->right, r->bottom - 2, text, C_DIM, DT_CENTER);
     }
 }
 
@@ -633,27 +655,33 @@ static void PaintRegs(HDC hdc)
 
 static void PaintActions(HDC hdc)
 {
-    RECT r, last;
+    RECT items[4], last;
     TCHAR text[16];
-    BOOL dirty = Dirty();
-    int i;
+    BOOL dirty = Dirty(), bg;
+    int i, n;
 
-    if (InBand(g_cy - H_ACTION, g_cy - H_ACTION + 1)) {     // the line on top: the whole bar is to be painted
+    if (g_keepLeft > 0) {
+        ActionRect(0, &items[0]);
+        ActionRect(1, &items[1]); ActionRect(3, &last); items[1].right = last.right;
+        n = 2;
+    } else {
+        for (i = 0; i < 4; i++) ActionRect(i, &items[i]);
+        n = 4;
+    }
+    bg = StripNeedsBg(g_cy - H_ACTION, g_cy, items, n);
+    if (bg) {
         Fill(hdc, 0, g_cy - H_ACTION, g_cx, g_cy - H_ACTION + 1, C_LINE);
         Fill(hdc, 0, g_cy - H_ACTION + 1, g_cx, g_cy, C_BLACK);
     }
     if (g_keepLeft > 0) {
-        ActionRect(0, &r);
-        if (In(&r)) { wsprintf(text, TEXT("Keep (%d)"), g_keepLeft); Button(hdc, &r, text, 2); }
-        ActionRect(1, &r); ActionRect(3, &last); r.right = last.right;
-        if (In(&r)) Button(hdc, &r, TEXT("Revert now"), 0);
+        if (bg || In(&items[0])) { wsprintf(text, TEXT("Keep (%d)"), g_keepLeft); Button(hdc, &items[0], text, 2); }
+        if (bg || In(&items[1])) Button(hdc, &items[1], TEXT("Revert now"), 0);
         return;
     }
     for (i = 0; i < 4; i++) {
-        ActionRect(i, &r);
-        if (!In(&r)) continue;
-        if (i == 0) Button(hdc, &r, dirty ? TEXT("Apply") : TEXT("Applied"), dirty ? 2 : 0);
-        else        Button(hdc, &r, i == 1 ? TEXT("Bench") : i == 2 ? TEXT("MemTest") : TEXT("Save"), 0);
+        if (!bg && !In(&items[i])) continue;
+        if (i == 0) Button(hdc, &items[i], dirty ? TEXT("Apply") : TEXT("Applied"), dirty ? 2 : 0);
+        else        Button(hdc, &items[i], i == 1 ? TEXT("Bench") : i == 2 ? TEXT("MemTest") : TEXT("Save"), 0);
     }
 }
 
@@ -683,7 +711,8 @@ static void Snapshot(Shown *s)
     for (i = 0; i < 5; i++) {
         s->presetOn[i] = SameChain(&g_preset[i], &g_tg);
         ClockHz(&g_preset[i], g_pllOn, hz);
-        s->presetMHz[i] = (hz[2] + 500000u) / 1000000u;
+        s->presetCpuMHz[i] = (hz[2] + 500000u) / 1000000u;
+        s->presetBusMHz[i] = (hz[4] + 500000u) / 1000000u;
     }
     s->keep = g_keepLeft; s->dirty = memcmp(&t, &g_cur, sizeof t) != 0;
     s->pphi = g_pphi; s->limits = g_limits; s->oal = g_haveOal;
@@ -707,7 +736,9 @@ static void Refresh(void)
     }
     for (i = 0; i < 4; i++) if (n.chip[i] != o->chip[i]) { ChipRect(i, &r); InvalidateRect(g_hWnd, &r, FALSE); }
     for (i = 0; i < 5; i++)
-        if (n.presetOn[i] != o->presetOn[i] || n.presetMHz[i] != o->presetMHz[i]) { PresetRect(i, &r); InvalidateRect(g_hWnd, &r, FALSE); }
+        if (n.presetOn[i] != o->presetOn[i] || n.presetCpuMHz[i] != o->presetCpuMHz[i] || n.presetBusMHz[i] != o->presetBusMHz[i]) {
+            PresetRect(i, &r); InvalidateRect(g_hWnd, &r, FALSE);
+        }
     if (n.frqcr != o->frqcr || n.fllfrq != o->fllfrq) InvalidateBand(Y_REGS, Y_BENCH);
     if ((n.keep > 0) != (o->keep > 0)) InvalidateBand(g_cy - H_ACTION, g_cy);      // the bar changes its buttons
     else if (n.keep != o->keep || n.dirty != o->dirty) { ActionRect(0, &r); InvalidateRect(g_hWnd, &r, FALSE); }
@@ -720,7 +751,7 @@ static void Paint(HWND hWnd)
     PAINTSTRUCT ps;
     HDC hdc;
     HGDIOBJ oldFont;
-    int i, kind;
+    int i, kind, bodyBot = g_cy - H_ACTION;
 
     // the region's rectangles, before BeginPaint validates it; the bounding
     // box when there is no region to be had or it has too many pieces
@@ -736,19 +767,20 @@ static void Paint(HWND hWnd)
 
     SetBkMode(hdc, TRANSPARENT);
     if (InBand(0, Y_GAUGE)) PaintTitle(hdc);
-    if (InBand(Y_GAUGE, Y_CLOCK)) PaintGauge(hdc);
-    if (InBand(Y_CLOCK, Y_ROWS)) Section(hdc, Y_CLOCK, TEXT("CLOCK"), g_msg[0] ? g_msg : TEXT("MHz"), g_msg[0] ? g_msgColor : C_DIM);
-    for (i = 0; i < 6; i++) if (InBand(Y_ROWS + i * H_ROW, Y_ROWS + (i + 1) * H_ROW)) PaintRow(hdc, i);
-    if (InBand(Y_ROWS + 6 * H_ROW, Y_WAIT)) Fill(hdc, 0, Y_ROWS + 6 * H_ROW, g_cx, Y_WAIT, C_BG);
-    if (InBand(Y_WAIT, Y_PRESET)) PaintWait(hdc);
-    if (InBand(Y_PRESET, Y_REGS)) PaintPresets(hdc);
-    if (InBand(Y_REGS, Y_BENCH)) PaintRegs(hdc);
-    if (InBand(Y_BENCH, Y_END)) Section(hdc, Y_BENCH, TEXT("BENCH"), g_bench, C_TEXT);
-    if (g_cy - H_ACTION > Y_END && InBand(Y_END, g_cy - H_ACTION)) {
-        Fill(hdc, 0, Y_END, g_cx, g_cy - H_ACTION, C_BG);
+    if (Y_CLOCK <= bodyBot && InBand(Y_GAUGE, Y_CLOCK)) PaintGauge(hdc);
+    if (Y_ROWS <= bodyBot && InBand(Y_CLOCK, Y_ROWS)) Section(hdc, Y_CLOCK, TEXT("CLOCK"), g_msg[0] ? g_msg : TEXT("MHz"), g_msg[0] ? g_msgColor : C_DIM);
+    for (i = 0; i < 6; i++)
+        if (Y_ROWS + (i + 1) * H_ROW <= bodyBot && InBand(Y_ROWS + i * H_ROW, Y_ROWS + (i + 1) * H_ROW)) PaintRow(hdc, i);
+    if (Y_WAIT <= bodyBot && InBand(Y_ROWS + 6 * H_ROW, Y_WAIT)) Fill(hdc, 0, Y_ROWS + 6 * H_ROW, g_cx, Y_WAIT, C_BG);
+    if (Y_PRESET <= bodyBot && InBand(Y_WAIT, Y_PRESET)) PaintWait(hdc);
+    if (Y_REGS <= bodyBot && InBand(Y_PRESET, Y_REGS)) PaintPresets(hdc);
+    if (Y_BENCH <= bodyBot && InBand(Y_REGS, Y_BENCH)) PaintRegs(hdc);
+    if (Y_END <= bodyBot && InBand(Y_BENCH, Y_END)) Section(hdc, Y_BENCH, TEXT("BENCH"), g_bench, C_TEXT);
+    if (bodyBot > Y_END && InBand(Y_END, bodyBot)) {
+        Fill(hdc, 0, Y_END, g_cx, bodyBot, C_BG);
         if (g_bench2[0]) Text(hdc, 6, Y_END, g_cx - 6, Y_END + 16, g_bench2, C_TEXT, DT_RIGHT);
     }
-    if (InBand(g_cy - H_ACTION, g_cy)) PaintActions(hdc);
+    if (InBand(bodyBot, g_cy)) PaintActions(hdc);
     SelectObject(hdc, oldFont);
     EndPaint(hWnd, &ps);
 }
@@ -780,7 +812,6 @@ int   dhrystone(int runs);                                  // dhry.c: 1 = it en
 #define BENCH_ROM   0xA0150000u
 #define BENCH_RAM   0xAC150000u
 #define BENCH_IO    0xA4150000u
-#define BENCH_SSCGCR_SSEN ((const volatile BYTE *)0xA4150044u)     // bit 7 of the register's first byte: spread spectrum on
 
 static volatile DWORD g_benchFlag;
 
@@ -813,6 +844,7 @@ static DWORD BenchLoop(DWORD *area, DWORD ms)
     QueryPerformanceCounter(&t0);
     n = area ? mem_bench(area, &g_benchFlag) : tick_count(&g_benchFlag);
     QueryPerformanceCounter(&t1);
+    WaitForSingleObject(stop, INFINITE);
     CloseHandle(stop);
     us = MicroSeconds(&t0, &t1);
     if (us) n = (DWORD)((unsigned __int64)n * (ms * 1000) / us);
@@ -835,9 +867,10 @@ static void RunBench(void)
     InvalidateBand(Y_BENCH, g_cy - H_ACTION); UpdateWindow(g_hWnd);
 
     memset(data, 0, sizeof data);
-    kmode = SetKMode(TRUE);
     data[0] = BenchLoop(NULL, 100) / 100;
+    kmode = SetKMode(TRUE);
     for (i = 0; i < 3; i++) data[1 + i] = BenchLoop((DWORD *)area[i], 50);
+    SetKMode(kmode);
 
     hdc = GetDC(g_hWnd);
     QueryPerformanceCounter(&t0);
@@ -853,13 +886,12 @@ static void RunBench(void)
 
     // Xtune: with the spread spectrum on and PLL x3 or more, scores down and times up by 256 / PLL / 1000
     ClockDecode(&g_cur, &cur);
-    if (g_haveOal && (*BENCH_SSCGCR_SSEN & 0x80) && cur.pll >= 3) {
+    if (g_haveOal && g_sscgOn && cur.pll >= 3) {
         for (i = 0; i < 8; i++) {
-            DWORD correction = data[i] * 256 / cur.pll / 1000;
+            DWORD correction = (DWORD)((unsigned __int64)data[i] * 256u / cur.pll / 1000u);
             if (i <= 3) data[i] -= correction; else data[i] += correction;
         }
     }
-    SetKMode(kmode);
 
     wsprintf(g_bench, TEXT("CPU %u  ROM %u  RAM %u  I/O %u"), data[0], data[1], data[2], data[3]);
     if (data[4]) { DWORD fps = 100000000u / data[4]; wsprintf(g_bench2, TEXT("dupdate: %u.%02u FPS   "), fps / 100, fps % 100); }
@@ -881,10 +913,11 @@ static void RunMemTest(void)
     int pass;
 
     wcscpy(g_bench, TEXT("testing memory..."));
-    InvalidateBand(Y_BENCH, Y_END); UpdateWindow(g_hWnd);
+    g_bench2[0] = 0;
+    InvalidateBand(Y_BENCH, g_cy - H_ACTION); UpdateWindow(g_hWnd);
 
     mem = (DWORD *)VirtualAlloc(NULL, MEMTEST_BYTES, MEM_COMMIT, PAGE_READWRITE);
-    if (!mem) { wcscpy(g_bench, TEXT("MEM: no memory for the test")); InvalidateBand(Y_BENCH, Y_END); return; }
+    if (!mem) { wcscpy(g_bench, TEXT("MEM: no memory for the test")); InvalidateBand(Y_BENCH, g_cy - H_ACTION); return; }
     for (pass = 0; pass < 6 && bad == 0xFFFFFFFF; pass++) {
         // four fixed patterns, then the address and its complement
         for (i = 0; i < n; i++) mem[i] = pass < 4 ? pattern[pass] : pass == 4 ? i * 4u : ~(i * 4u);
@@ -894,7 +927,7 @@ static void RunMemTest(void)
     VirtualFree(mem, 0, MEM_RELEASE);
     if (bad == 0xFFFFFFFF) wsprintf(g_bench, TEXT("MEM OK  %u KB x 6 patterns"), MEMTEST_BYTES / 1024);
     else                   wsprintf(g_bench, TEXT("MEM FAIL at +%05X"), bad);
-    InvalidateBand(Y_BENCH, Y_END);
+    InvalidateBand(Y_BENCH, g_cy - H_ACTION);
 }
 
 //------------------------------------------------------------------------------
@@ -902,15 +935,21 @@ static void RunMemTest(void)
 //
 static void Step(int row, int dir, int big)
 {
+    const unsigned *lim = ActiveLimit();
     TCHAR text[40];
     int over;
 
     if (g_keepLeft > 0) return;
     g_sel = row;
-    over = ClockStep(&g_tg, row, dir, big, g_limits ? g_cpclkLimit : NULL);
+    over = ClockStep(&g_tg, row, dir, big, lim);
     if (over > 0) {
-        wsprintf(text, TEXT("%s > %u MHz"), g_rowName[over], g_cpclkLimit[over] / 1000000u);
+        wsprintf(text, TEXT("%s > %u MHz"), g_rowName[over], lim[over] / 1000000u);
         SetMsg(text, C_RED);
+    } else if (over < 0 && dir < 0 &&
+               ((row == 0 && g_tg.fll > CPCLK_FLL_MIN) ||
+                (row == 1 && g_tg.pll > 1u) ||
+                (row >= 2 && g_tg.div[row - 2] < 64u))) {
+        SetMsg(TEXT("PFC < 1 MHz"), C_RED);
     } else {
         SetMsg(TEXT(""), C_DIM);
     }
@@ -966,9 +1005,24 @@ static void Help(void)
         TEXT("bus (BFC) and I/O (PFC) clocks. Tap - or +, or hold to repeat. Red mark: red zone.\r\n\r\n")
         TEXT("Nothing changes until Apply. After Apply press Keep within 10 s, or the old setting returns.\r\n\r\n")
         TEXT("Wait states follow the bus clock. XM switches the FLL input divider.\r\n")
-        TEXT("F1 is the setting found at boot; hold F2-F5 to store the target, Save writes them to a file.\r\n\r\n")
+        TEXT("F1 is boot stock; F2-F5 default to Ptune4 presets (F5 = 236/118 MHz). Hold F2-F5 to store, Save writes cetune.sav.\r\n\r\n")
         TEXT("Keys: up/down row, left/right step, Enter apply or keep, Esc revert."),
         TEXT("CEtune"), MB_OK);
+}
+
+static void CancelPress(void)
+{
+    KillTimer(g_hWnd, TIMER_REPEAT);
+    KillTimer(g_hWnd, TIMER_HOLD);
+    g_downRow = -1;
+    g_downPreset = -1;
+}
+
+static void StepHitRect(int row, int dir, RECT *r)
+{
+    if (dir < 0) { MinusRect(row, r); r->left -= 3; }
+    else         { PlusRect(row, r);  r->right += 3; }
+    r->top -= 2; r->bottom += 2;
 }
 
 static void Click(int x, int y)
@@ -976,24 +1030,26 @@ static void Click(int x, int y)
     RECT r;
     int i;
 
+    if (g_keepLeft > 0) {
+        TitleRect(2, &r);
+        if (Hit(&r, x, y)) { PostMessage(g_hWnd, WM_CLOSE, 0, 0); return; }
+        ActionRect(0, &r);
+        if (Hit(&r, x, y)) { StopKeep(); SetMsg(TEXT("kept"), C_GREEN); return; }
+        if (y >= g_cy - H_ACTION && x >= r.right) Revert();
+        return;                                     // nothing else while the countdown runs
+    }
     for (i = 0; i < 3; i++) {
         TitleRect(i, &r);
         if (!Hit(&r, x, y)) continue;
         if (i == 0) ToggleLimits(); else if (i == 1) Help(); else PostMessage(g_hWnd, WM_CLOSE, 0, 0);
         return;
     }
-    if (g_keepLeft > 0) {
-        ActionRect(0, &r);
-        if (Hit(&r, x, y)) { StopKeep(); SetMsg(TEXT("kept"), C_GREEN); return; }
-        if (y >= g_cy - H_ACTION && x >= r.right) Revert();
-        return;                                     // nothing else while the countdown runs
-    }
     for (i = 0; i < 6; i++) {
         RowRect(i, &r);
         if (!Hit(&r, x, y)) continue;
-        MinusRect(i, &r); r.left -= 3; r.top -= 2; r.bottom += 2;
+        StepHitRect(i, -1, &r);
         if (Hit(&r, x, y)) { g_downRow = i; g_downDir = -1; }
-        PlusRect(i, &r); r.right += 3; r.top -= 2; r.bottom += 2;
+        StepHitRect(i, 1, &r);
         if (Hit(&r, x, y)) { g_downRow = i; g_downDir = 1; }
         if (g_downRow == i) { g_repeats = 0; Step(i, g_downDir, 0); SetTimer(g_hWnd, TIMER_REPEAT, 400, NULL); }
         else if (g_sel != i) { g_sel = i; SetMsg(TEXT(""), C_DIM); Refresh(); }
@@ -1001,12 +1057,16 @@ static void Click(int x, int y)
     }
     ChipRect(3, &r);
     if (Hit(&r, x, y)) {                            // FLL input divider
+        const unsigned *lim = ActiveLimit();
         ClasspadClockChain c = g_tg;
+        unsigned hz[6];
         int over;
         c.selxm = !c.selxm;
-        over = g_limits ? ClockOverLimit(&c, g_cpclkLimit) : 0;
-        if (over) { TCHAR text[40]; wsprintf(text, TEXT("%s > %u MHz"), g_rowName[over], g_cpclkLimit[over] / 1000000u); SetMsg(text, C_RED); }
-        else      { g_tg = c; SetMsg(TEXT(""), C_DIM); }
+        ClockHz(&c, g_pllOn, hz);
+        over = ClockOverLimit(&c, lim);
+        if (hz[5] < CPCLK_PPHI_MIN) { SetMsg(TEXT("PFC < 1 MHz"), C_RED); }
+        else if (over) { TCHAR text[40]; wsprintf(text, TEXT("%s > %u MHz"), g_rowName[over], lim[over] / 1000000u); SetMsg(text, C_RED); }
+        else           { g_tg = c; SetMsg(TEXT(""), C_DIM); }
         Refresh();
         return;
     }
@@ -1029,6 +1089,28 @@ static void Click(int x, int y)
     }
 }
 
+static void Move(int x, int y)
+{
+    RECT r;
+
+    if (g_downRow >= 0) {
+        StepHitRect(g_downRow, g_downDir, &r);
+        if (!Hit(&r, x, y)) {
+            KillTimer(g_hWnd, TIMER_REPEAT);
+            g_downRow = -1;
+            if (GetCapture() == g_hWnd) ReleaseCapture();
+        }
+    }
+    if (g_downPreset >= 0) {
+        PresetRect(g_downPreset, &r);
+        if (!Hit(&r, x, y)) {
+            KillTimer(g_hWnd, TIMER_HOLD);
+            g_downPreset = -1;
+            if (GetCapture() == g_hWnd) ReleaseCapture();
+        }
+    }
+}
+
 static void Release(int x, int y)
 {
     RECT r;
@@ -1038,8 +1120,9 @@ static void Release(int x, int y)
         KillTimer(g_hWnd, TIMER_HOLD);
         PresetRect(g_downPreset, &r);
         if (Hit(&r, x, y) && g_keepLeft == 0) {
-            int over = g_limits ? ClockOverLimit(&g_preset[g_downPreset], g_cpclkLimit) : 0;
-            if (over) { TCHAR text[40]; wsprintf(text, TEXT("%s > %u MHz"), g_rowName[over], g_cpclkLimit[over] / 1000000u); SetMsg(text, C_RED); }
+            const unsigned *lim = ActiveLimit();
+            int over = g_downPreset == 0 ? 0 : ClockOverLimit(&g_preset[g_downPreset], lim);
+            if (over) { TCHAR text[40]; wsprintf(text, TEXT("%s > %u MHz"), g_rowName[over], lim[over] / 1000000u); SetMsg(text, C_RED); }
             else      { g_tg = g_preset[g_downPreset]; SetMsg(TEXT(""), C_DIM); }
             Refresh();
         }
@@ -1074,8 +1157,8 @@ static void OnTimer(WPARAM id)
 static void OnKey(WPARAM vk)
 {
     switch (vk) {
-    case VK_UP:     if (g_sel > 0) { g_sel--; SetMsg(TEXT(""), C_DIM); Refresh(); } break;
-    case VK_DOWN:   if (g_sel < 5) { g_sel++; SetMsg(TEXT(""), C_DIM); Refresh(); } break;
+    case VK_UP:     if (g_keepLeft == 0 && g_sel > 0) { g_sel--; SetMsg(TEXT(""), C_DIM); Refresh(); } break;
+    case VK_DOWN:   if (g_keepLeft == 0 && g_sel < 5) { g_sel++; SetMsg(TEXT(""), C_DIM); Refresh(); } break;
     case VK_LEFT:   Step(g_sel, -1, 0); break;
     case VK_RIGHT:  Step(g_sel, 1, 0); break;
     case VK_RETURN: if (g_keepLeft > 0) { StopKeep(); SetMsg(TEXT("kept"), C_GREEN); } else Apply(); break;
@@ -1088,15 +1171,45 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
     switch (msg) {
     case WM_PAINT:       Paint(hWnd); return 0;
     case WM_ERASEBKGND:  return 1;                  // every band fills itself
-    case WM_LBUTTONDOWN: SetCapture(hWnd); Click((short)LOWORD(lParam), (short)HIWORD(lParam)); return 0;
-    case WM_LBUTTONUP:   ReleaseCapture(); Release((short)LOWORD(lParam), (short)HIWORD(lParam)); return 0;
+    case WM_SIZE:
+        g_cx = LOWORD(lParam); g_cy = HIWORD(lParam);
+        InvalidateRect(hWnd, NULL, FALSE);
+        return 0;
+    case WM_LBUTTONDOWN:
+        Click((short)LOWORD(lParam), (short)HIWORD(lParam));
+        if (g_downRow >= 0 || g_downPreset >= 0) SetCapture(hWnd);
+        return 0;
+    case WM_MOUSEMOVE:
+        if (g_downRow >= 0 || g_downPreset >= 0) Move((short)LOWORD(lParam), (short)HIWORD(lParam));
+        return 0;
+    case WM_LBUTTONUP:
+        if (GetCapture() == hWnd) ReleaseCapture();
+        Release((short)LOWORD(lParam), (short)HIWORD(lParam));
+        return 0;
+    case WM_CAPTURECHANGED:
+    case WM_CANCELMODE:
+    case WM_KILLFOCUS:
+        CancelPress();
+        return 0;
     case WM_TIMER:       OnTimer(wParam); return 0;
     case WM_KEYDOWN:     OnKey(wParam); return 0;
     case WM_CLOSE:
+        CancelPress();
         if (g_keepLeft > 0) Revert();               // an unconfirmed setting does not outlive the window
         DestroyWindow(hWnd);
         return 0;
-    case WM_DESTROY:     PostQuitMessage(0); return 0;
+    case WM_DESTROY:
+        CancelPress();
+        if (g_update)    { DeleteObject(g_update);    g_update    = NULL; }
+        if (g_font)      { DeleteObject(g_font);      g_font      = NULL; }
+        if (g_brAmber)   { DeleteObject(g_brAmber);   g_brAmber   = NULL; }
+        if (g_brRed)     { DeleteObject(g_brRed);     g_brRed     = NULL; }
+        if (g_brTrack)   { DeleteObject(g_brTrack);   g_brTrack   = NULL; }
+        if (g_penNeedle) { DeleteObject(g_penNeedle); g_penNeedle = NULL; }
+        if (g_penGhost)  { DeleteObject(g_penGhost);  g_penGhost  = NULL; }
+        if (g_penTick)   { DeleteObject(g_penTick);   g_penTick   = NULL; }
+        PostQuitMessage(0);
+        return 0;
     }
     return DefWindowProc(hWnd, msg, wParam, lParam);
 }
