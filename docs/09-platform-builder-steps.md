@@ -1,143 +1,63 @@
-# After installing Platform Builder 6.0: step by step
+# Platform Builder Windows VM Workflow
 
-Written 2026-11-02 for the first session in the Windows VM. Each step says
-what to run, what to look at, and what to bring back to this repository
-(files go under `notes/ce/`, which is git-ignored except for the summaries
-you write yourself: the shared-source kernel files are for our own use and
-must not be committed).
+Windows CE images (`NK.bin` and `EXT.bin`) are built in a Windows VM running **Platform Builder 5.0** (active target: `bsp/classpad50/`). *(The archived CE 6.0 R3 BSP in `bsp/classpad/` uses Visual Studio 2005 + Platform Builder 6.0 R3.)*
 
-Prerequisites assumed done: VS2005 + SP1, PB 6.0 with **SH4** and
-**Shared Source** selected, SP1, R2, R3, QFEs; a VM snapshot taken after the
-last installer; a shared folder between the VM and this Mac.
+## 1. VM Prerequisites
 
-## Step 1. Check what the install gave you (10 min)
+- **OS:** Windows XP SP3 or Windows 7 32-bit VM (40 GB disk, 2–4 GB RAM) with a shared folder or SMB mount accessible from macOS/Linux (e.g. `/Volumes/WINCE500`).
+- **Platform Builder 5.0** installed with:
+  - **SH4** CPU support (`%_WINCEROOT%\SDK\BIN\I386\SH\shcl.exe`, `shlink.exe`, `PUBLIC\COMMON\OAK\LIB\SH4\...`).
+  - **Shared Source** (`%_WINCEROOT%\PRIVATE\WINCEOS\COREOS\NK\KERNEL\SH\...`) — required for the SH-3 PE loader patch (`bsp/kernel/`).
+  - Recommended: take a VM snapshot right after installation and QFEs.
 
-Open a plain command prompt in the VM and run:
+## 2. Staging the BSP from macOS / Linux
 
-```
-dir %_WINCEROOT%
-dir %_WINCEROOT%\PLATFORM
-dir %_WINCEROOT%\PLATFORM\COMMON\SRC
-dir %_WINCEROOT%\PRIVATE\WINCEOS\COREOS\NK\KERNEL
-dir %_WINCEROOT%\PRIVATE\WINCEOS\COREOS\NK\KERNEL\SH
-dir %_WINCEROOT%\SDK\BIN\I386\SH
-dir %_WINCEROOT%\PUBLIC\COMMON\OAK\LIB\SH4
+Platform Builder's `build.exe` requires **CRLF** line endings in `dirs`, `sources`, `.bib`, `.reg`, and batch files. Always stage `bsp/classpad50/` with `tools/stage_bsp50.py`:
+
+```sh
+python3 tools/stage_bsp50.py /Volumes/WINCE500/PLATFORM/CLASSPAD
 ```
 
-`_WINCEROOT` is normally `C:\WINCE600`. What matters:
+What `stage_bsp50.py` does:
+- Converts all text files to CRLF and copies them into `PLATFORM\CLASSPAD`.
+- Preserves pre-staged third-party binaries already in the destination (such as realigned `mfcce300.dll`, Math Xpander files in `FILES\xpander\`, and SpreadCE in `FILES\spreadce\`) unless `--force-binaries` is passed.
 
-- `SDK\BIN\I386\SH\shcl.exe` and `shlink.exe` exist: the SH4 compiler.
-- `PUBLIC\COMMON\OAK\LIB\SH4\...` exists: prebuilt SH4 OS libraries.
-- `PRIVATE\WINCEOS\COREOS\NK\KERNEL\SH` exists: the kernel's SH4 sources
-  (shared source). If this directory is missing, the Shared Source option
-  was not installed; rerun the PB installer and add it before anything else.
-- `PLATFORM` lists the sample BSPs. Note which of them is SH4 (look for a
-  `\SRC\OAL` folder and a `*.bat` that sets `_TGTCPU=SH4`). If none is, say
-  so: the OAL then starts from `PLATFORM\COMMON\SRC\SH4` and the common OAL
-  libraries instead of a cloned board.
+See [bsp/classpad50/README.md](../bsp/classpad50/README.md) for preparing optional third-party Pocket PC binaries (`tools/pe4k.py`, `tools/sh3prep.py`, `tools/sh3imports.py`).
 
-Bring back: the output of the `dir` commands (save as `notes/ce/install-dirs.txt`).
+## 3. Building in Platform Builder 5.0
 
-## Step 2. Build a stock image once (1-2 hours, mostly machine time)
+1. **Full build (first time or after OS Design / catalog changes):**
+   - Open the `CLASSPAD` workspace (`PBWorkspaces\CLASSPAD\`) in Platform Builder 5.0.
+   - Select **CLASSPAD: SH4 Release**.
+   - Run **Build OS → Sysgen** (builds OS libraries + BSP + `Make Run-Time Image`).
+2. **Incremental BSP / driver rebuild (typical edit loop):**
+   - Stage updated source files with `tools/stage_bsp50.py`.
+   - In Platform Builder, either right-click the modified directory (e.g. `DRIVERS\DISPLAY` or `OAL\OALLIB`) → **Build Current Project**, or run **Build OS → Build Current BSP and Subprojects**.
+   - Run **Build OS → Copy Files to Release Directory** and **Build OS → Make Run-Time Image**.
+   - `PostFmergeBib.bat` and `PostRomImage.bat` automatically split `EXT` entries out of `ce.bib` and run `romimage` twice, producing both `NK.bin` and `EXT.bin` in `PBWorkspaces\CLASSPAD\RelDir\CLASSPAD_SH4_Release\`.
 
-This proves the toolchain before any of our code is involved.
+## 4. Post-Build Verification & Packaging (macOS / Linux)
 
-1. Start **Visual Studio 2005**. File > New > Project > Platform Builder for
-   CE 6.0 > OS Design. Name it `stock_sh4`.
-2. Wizard: BSP = the SH4 BSP found in step 1 (or, if there is none, any
-   SH4 choice the wizard offers). Design template: **Custom Device**, then
-   remove everything it preselects except the kernel. Finish.
-3. Build > Advanced Build Commands > **Sysgen**. Wait (30-60 min the first
-   time). Then Build > Build Solution.
-4. The image is `NK.bin` in the flat release directory: Build > Open
-   Release Directory in Build Window, then `dir NK.bin`. Also note
-   `ce.bib`, `config.bib` and `.map` files there.
+After Platform Builder finishes:
 
-Bring back: `NK.bin` (copy to the shared folder, then to
-`notes/ce/stock-NK.bin`), plus `config.bib` and `ce.bib` from the release
-directory. Then, on the Mac:
+```sh
+REL="/Volumes/WINCE500/PBWorkspaces/CLASSPAD/RelDir/CLASSPAD_SH4_Release"
 
-```bash
-python3 tools/nkbin.py notes/ce/stock-NK.bin
+# 1. Inspect the built NK.bin (verify CPU 0x01A6 SH4 and ROM bounds)
+python3 tools/nkbin.py "$REL/NK.bin"
+
+# 2. If nk.exe (OAL/kernel) changed, check if kdev signatures changed
+python3 tools/kernel_devfuncs.py "$REL/NK.bin" "$REL/kern.map" --table kdev_funcs50 > /tmp/kdev50.h
+diff -u dbt/rt/kernel_dev50.h /tmp/kdev50.h
+# (If kdev50.h changed, update dbt/rt/kernel_dev50.h and rebuild wince.hh3!)
+
+# 3. Pack compressed NK.bin / EXT.bin for the calculator (~50% smaller)
+python3 tools/cepack.py -o dbt/build/cez "$REL/NK.bin" "$REL/EXT.bin"
+dbt/build/ceztest "$REL/NK.bin" dbt/build/cez/NK.bin
+dbt/build/ceztest "$REL/EXT.bin" dbt/build/cez/EXT.bin
+
+# 4. Smoke-test in casio-emu before flashing to real hardware
+make -C dbt NKBIN="$REL/NK.bin" EXTBIN="$REL/EXT.bin" RUN_SECS=300 run
 ```
 
-Expect: CPU 0x01A6 (SH4), a ROM range in the 0x8Cxxxxxx P1 area, a module
-list starting with `nk.exe`. If the CPU type is not 0x01A6, the SH4
-selection did not take; stop and fix the design settings (`_TGTCPU=SH4`).
-
-If `python3 tools/nkbin.py` is happy, run the image under the translator
-once, expecting it to stop early:
-
-```bash
-make -C dbt NKBIN=notes/ce/stock-NK.bin run
-```
-
-Save the output as `notes/ce/stock-first-run.txt`. Whatever it says
-("record outside guest RAM", a halt inside the kernel, a fault) is the
-first real data point.
-
-## Step 3. Read the kernel's SH4 sources (1 hour, the important step)
-
-In `%_WINCEROOT%\PRIVATE\WINCEOS\COREOS\NK\KERNEL\SH\` open every `.src`
-and `.c` file; the names vary between QFE levels, but you are looking for:
-
-| What | Likely files | What to note |
-|---|---|---|
-| Exception vectors and entry | `exvector.src`, `excall.src` / `except.src` | At the general-exception and TLB-miss entries: which registers are saved first and how (`stc r0_bank`? direct use of r0-r7 with RB=1?). Whether the handler lowers RB or BL before calling C. Copy the first ~80 lines of each entry. |
-| API call convention | `kcall.src`, `apicall.*`, headers with `FIRST_METHOD` | The address range of API traps (expected 0xF0010000 downward) and which exception they expect (address error 0x0E0 or TLB miss). |
-| Address-space switch | search for `PTEH`, `ASID`, `SetCPUASID`, `SwitchAddressSpace`, `MMUCR` | Where PTEH is written with a new ASID, and the instruction sequence after it (is there an `rte` or `ldc sr` before user code runs?). This is where `trapa #0xFA` goes. |
-| TLB invalidation | search for `ldtlb`, `0xF6000000`, `MMUCR`, `InvalidateTLB`, `FlushTLB` | How entries are removed: array writes, MMUCR.TI, or `ldtlb` with V=0. This is where `trapa #0xF9` goes. |
-| Cache flush | search for `icbi`, `ocbwb`, `ocbp`, `OEMCacheRangeFlush` | Confirms the loader path that will carry `trapa #0xF2`. |
-| rte sites | search for `rte` | What is in each delay slot (must never touch r0-r7). |
-| FPU state | search for `fpscr`, `FPSCR`, `fmov` | How thread FPU state is saved; the FPSCR value the kernel installs. |
-
-Bring back: the matching excerpts in `notes/ce/kernel-sh-notes.md`
-(file name, line numbers, the lines). The whole `SH` directory can go to
-`notes/ce/kernel-sh/` on the Mac for me to read; it stays uncommitted.
-
-## Step 4. Find the OAL pieces to replace (30 min)
-
-In the SH4 BSP's `SRC\OAL` (or `PLATFORM\COMMON\SRC\SH4`), list the files
-and find:
-
-- `startup.src` or `startup.s`: the image entry (`StartUp`), what it does
-  before `KernelStart`.
-- The timer: files mentioning `TMU`, `TCOR`, `TSTR` (SH7750 addresses
-  `0xFFD8xxxx`).
-- Interrupts: `IPR`, `INTEVT`, `OEMInterruptEnable`, the ISR table.
-- Debug serial: `OEMInitDebugSerial`, `OEMWriteDebugByte`.
-- `OEMInit`, `OEMIdle`, `OEMPowerOff`, `OEMIoControl`, `OEMCacheRangeFlush`.
-
-Bring back: `notes/ce/oal-files.txt` with the file list and, per item above,
-the file and function names. With that list I write `PLATFORM\CLASSPAD`
-(docs/05 section 3 has the SH7305 register map).
-
-## Step 5. Set up the transfer loop (15 min)
-
-For the rest of the work the cycle is: edit OAL sources on the Mac
-(committed here under `bsp/`), copy them into the VM's
-`PLATFORM\CLASSPAD`, build, copy `NK.bin` back, run in casio-emu. Make the
-shared folder hold both directions and keep a `build.bat` in the VM that
-runs the build from a command prompt (`blddemo` / `build -c` in the BSP
-directory, then `makeimg`) so no clicking is needed. Note the exact commands
-that worked in `notes/ce/build-commands.txt`.
-
-## Done with the results (2026-11-02)
-
-Steps 1-4 came back: the stock HARP image (not loadable in the window, as
-expected), the kernel's SH4 sources and the HARP OAL. Findings are in
-`notes/ce/kernel-sh-notes.md` and `notes/ce/oal-files.txt`; the OAL is
-written in `bsp/classpad` (its README has the install steps for
-`PLATFORM\CLASSPAD`). Before the first boot attempt two translator items
-remain: device-aware translation of kernel.dll's CCN register accesses and
-SR.FD emulation (docs/05 section 3).
-
-## What I do with the results
-
-1. Step 2's run output tells whether the loader, ROMHDR and entry are
-   right for a real image (likely fixes: image placed outside the guest
-   window, `config.bib` addresses).
-2. Step 3's notes settle the bank-1 assumption and locate the three
-   hypercall sites (docs/04 "Address spaces", docs/05 section 3).
-3. Step 4's list is the skeleton of `bsp/classpad/`, which then goes into
-   the VM as `PLATFORM\CLASSPAD`.
+> **Tip:** Never commit Microsoft Shared Source files (`PRIVATE\...`) or proprietary Pocket PC binaries into git. Use `notes/ce/` (git-ignored except `.md`/`.txt` summaries) for any temporary exports from the VM.

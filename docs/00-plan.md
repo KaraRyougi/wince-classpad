@@ -1,110 +1,40 @@
-# Plan and status
+# Project Plan & Architecture Overview
 
-Last updated: 2026-11-03 (milestones below); status note added 2026-11-10
+This document explains why `wince-classpad` uses a dynamic binary translator, which alternative approaches were considered, and how the project evolved from its initial prototype to Windows CE 5.0 on real fx-CP400 hardware.
 
-> **Where the project stands (2026-11-10).** Route D below was built and
-> works: Windows CE runs under the translator in casio-emu and on a real
-> fx-CP400. The target moved from CE 6.0 R3 to CE 5.0 on 2026-11-08
-> (milestone 4). Milestones 5 to 7 are done in substance; their history is
-> in docs/05 (image and OAL), docs/06 (suspend), docs/07 and docs/08 (the
-> CE 5.0 port and the calculator). The rest of this page is kept as written.
+## The Fundamental Blocker: Endianness
 
-## The blocker found on day one: endianness
+Windows Embedded CE for SuperH supports **little-endian only**. Every Casio SH7305 graphing calculator (fx-CP400, fx-CG500, fx-CG50, fx-CG100) runs in **big-endian** mode: Casio's OS, the ROM bootloader, `gint` (`-mb`), and `casio-emu` all assume big-endian execution.
 
-Windows Embedded CE supports **little-endian only** (Microsoft's own CE 6.0
-architecture notes say so). Every Casio SH7305 calculator runs the core in
-**big-endian** mode: Casio's OS, the bootloader at flash offset 0x300, gint
-(`-mb`) and casio-emu all assume it. On SuperH the byte order is latched from
-a mode pin (MD5 on SH7708/SH7750; the SH-4A SoCs use the same scheme) at
-power-on reset. There is no software switch, and SH instruction words are
-themselves subject to the data endianness, so CE's binaries cannot run on a
-big-endian core by any amount of kernel work.
+On SuperH, endianness is latched from a hardware mode pin at power-on reset — there is no software switch, and instruction words themselves follow the latched byte order. Consequently, unmodified little-endian Windows CE binaries cannot run natively on a stock Casio calculator through kernel work alone.
 
-Consequences:
+## Routes Evaluated
 
-- A **pure-software port is impossible** on an unmodified calculator.
-- A port is possible only on a **hardware-modified unit** whose endian strap
-  is flipped to little-endian. On such a unit Casio's OS, bootloader and every
-  existing add-in stop working; the reset vector in flash must already hold
-  our own little-endian boot code before the strap is flipped. The fx-CP400
-  SoC is a chip-on-board under epoxy, so that mod is realistic (if at all)
-  only on an fx-CG50/CG100 board where the strap resistor can be located.
-- The same port can be developed and run in **casio-emu with a little-endian
-  mode**, which does not exist yet but is a contained change to an emulator
-  that already stores guest memory as byte-swapped longwords.
-
-## Routes
-
-| Route | What it gives | Cost / risk |
+| Route | Description | Trade-offs |
 |---|---|---|
-| A. Emulator-only | WinCE booting on an emulated SH7305 (LE mode) with a full debugger | casio-emu LE mode; no device |
-| B. Strapped device | WinCE on a sacrificial fx-CG50/CG100 | find and flip the MD strap; flash own LE bootloader first; brick risk; device loses Casio OS |
-| C. Drop WinCE, go Linux | Big-endian SH4A is supported, GCC `-m4al` needs no FPU emulation, mainline SH7305 work started 2026-10 | no Win32 stack; all hardware knowledge carries over |
-| **D. Same-ISA translator (chosen)** | A little-endian SH-4 guest (WinCE) runs on the stock big-endian device under a dynamic binary translator that byte-swaps every memory access and emulates the FPU; no hardware mod | translator overhead on every load/store; all guest MMIO must be pre-swapped; the translator owns VBR and the DSP transfer registers (`docs/04-dbt-design.md`) |
+| **A. Emulator-only** | Add little-endian mode to `casio-emu` and run WinCE natively there | No real-hardware path |
+| **B. Hardware strap mod** | Flip the endian mode resistor on a sacrificial calculator and pre-flash a little-endian bootloader | High brick risk, permanently breaks Casio OS, impractical on epoxy-potted fx-CP400 SoCs |
+| **C. Port Linux instead** | Big-endian SH-4A Linux with `-m4al` needs no FPU emulation | Loses Win32 / Pocket PC software compatibility (no Math Xpander) |
+| **D. Same-ISA DBT *(chosen)*** | Run little-endian SH-4 Windows CE on the unmodified big-endian SH7305 via a bare-metal dynamic binary translator | 2–4× overhead on memory-heavy code; OAL/drivers pre-swap MMIO; translator owns VBR and DSP scratch registers |
 
-Route D is what we are building. Route A (emulator LE mode) is no longer
-needed: casio-emu runs the translator as an ordinary big-endian add-in.
+Route D requires zero hardware modification, preserves Casio's stock OS completely, and runs identically in `casio-emu` and on real fx-CP400 hardware.
 
-## What exists
+## Milestones Achieved
 
-- `fpuemu/`: SH-4 FPU trap-and-emulate core (integer-only, endian-neutral),
-  verified bit-exact against the host FPU for add/sub/mul/div/sqrt/fmac/
-  conversions/compares in RN and RZ, plus instruction-level decoder tests.
-- `tools/nkbin.py`: CE `.bin` image inspector (records, ROMHDR, module table).
-- `dbt/`: the translator (decoder, emitter, block translator with resume
-  metadata; host tests), its bare-metal runtime (code cache, lookup/link
-  stubs, exception vectors, FPU/mac helpers, hypercall console), a `.g3a`
-  launcher and three little-endian test guests. As of 2026-10-22 all three
-  guests pass in casio-emu (with `dbt/emu-patch` applied to the emulator).
-- Docs 01-05 and 09: hardware facts, FPU emulation design, boot/image notes, DBT design, CE image/OAL plan, Platform Builder post-install steps.
+1. **Translator core & FPU emulator (`dbt/`, `fpuemu/`)** — Bit-exact integer SH-4 FPU emulator, SH-4 decoder/emitter/block translator with byte-swapped memory accesses, branch chaining, inline caches, and exception/interrupt delivery (`hello`, `exc`, `fpu`, `tmu`, `lcd`, `apicall`, `mmu`, `aspace` test guests passing).
+2. **CE 6.0 R3 bring-up (`bsp/classpad/`)** — Built the initial SH7305 OAL, display/keyboard/touch drivers, and XIP flash boot; reached the Windows CE 6.0 desktop in `casio-emu` and on real hardware. High RAM footprint and per-process ASID overhead led to pivoting to Windows CE 5.0 (see [07-ce42-port-lessons.md](07-ce42-port-lessons.md)).
+3. **Windows CE 5.0 port (`bsp/classpad50/`)** — Rebuilt the OAL and drivers for Platform Builder 5.0; moved core `NK.bin` into the persistent 5 MiB hole inside Casio's OS flash region and `EXT.bin` (Math Xpander + MFC) into the eActivity area.
+4. **Full hardware & app ecosystem** — Added DCS panel support (older and newer fx-CP400 panels), 4-way screen rotation, 20-step backlight control, IIC0 touchscreen, keypad, Fugue flash storage (`\Storage`), USB Function (Mass Storage, CDC ACM serial, PPP USB Network + Telnet), battery gauge, SH7305 R-standby deep suspend/resume, CEtune overclocking, Plotter-Z, PegHelp, and SH-3 Pocket PC compatibility (`SH3CRT.dll`, `DocList.dll`, `pe4k.py`).
+5. **Performance & reliability pass** — Added lazy recovery metadata, 16-bank second-chance code cache, ASID-tagged lookup hash, `kdev` selective P4 checks, fast privileged stubs, inline FPU translation, DMAC0 LCD pushes, 2D dirty-rect GPE fast paths, and compressed `.cez` image flashing in `wince.hh3`.
 
-## Milestones (route D)
+## Where to Read Next
 
-1. ~~Translator core + runtime; hello/exception/FPU guests pass in casio-emu.~~
-   Done 2026-10-22.
-2. ~~Interrupt guest: TMU through pre-swapped MMIO, interrupt through the
-   guest VBR under the translator, `rte` back into translated code.~~ Done
-   2026-10-22 (34 checks, including interrupts at arbitrary points of
-   store/load/branch-heavy loops). Next: a guest that writes the LCD
-   framebuffer.
-3. ~~Measure: translated vs native slowdown.~~ Done 2026-10-22 (docs/04
-   "Performance"). With branch chaining, inline caches and cheaper calls
-   (all done): ALU 1.0x, branches 1.3x, memory 2.3-2.8x, stack push/pop
-   4.1x, calls 2.8-3.8x. Remaining optimization: store spill avoidance.
-   Block metadata compacted (bss 2.3 -> 1.2 MiB, 2048 blocks). Still to
-   do: code-cache pressure with a larger guest.
-   The `lcd` guest (framebuffer pushed to the R61524 through pre-swapped
-   MMIO, screenshot in docs/img) completes the device-side checks of this
-   milestone; `apicall` and `mmu` cover the CE API-call fault and TLB-mapped
-   code, `aspace` the ASID/remap invalidation: the translator prerequisites
-   for the kernel.
-4. ~~Guest image choice~~: self-built CE 6.0 R3 SH4 image (decided
-   2026-10-22; Pocket PC 2000 SH3 ROMs would mean emulating a Jornada 540).
-   **Revised 2026-11-07/08: port Windows CE 5.0 instead** (the user's
-   assessment: 6.0 does not suit the hardware; 4.2 was considered first).
-   Everything the CE 6.0 image needed, and what to re-check, is in
-   docs/07-ce42-port-lessons.md; the CE 5.0 port itself (bsp/classpad50,
-   the translator's nk.exe handling) is in docs/08-ce50-port.md.
-5. CE image loading: ~~`.bin` records to guest RAM, ROMHDR, entry~~ done
-   (dbt/rt/nkbin.c, image in emulated flash via HLE_OSROM; docs/05).
-   ~~Platform Builder VM~~ up, stock HARP image built (2026-11-02); kernel
-   SH4 sources read (notes/ce/kernel-sh-notes.md): translator now preserves
-   register bank 1 and offers a BL=1-safe debug ring. ~~SH7305 OAL~~ written
-   as bsp/classpad, compiled in the VM. ~~Device-aware translation of
-   kernel.dll~~ done. **Headless boot inside casio-emu reached the file
-   system** (2026-11-03: FSDMGR, ROM FS, registry, boot phases 0-1). Next:
-   see how far boot phase 2 and shell.exe get, SR.FD emulation, speed
-   (Release image, COMPRESSION=OFF), then the display driver. Plan and
-   register map in docs/05-ce-image-and-oal.md.
-6. Display driver (flat framebuffer, 320x528 CP400 / 396x224 CG50-class),
-   keyboard, touch. GWES up.
-7. Real hardware: run the `.g3a` on an fx-CG50/CP400; fix anything the
-   emulator was lenient about (cache coherency, TLB, DSP register state).
-
-## Open questions
-
-- Exact MD pin/strap on the fx-CG50 and fx-CG100 boards (teardown needed).
-- Does `shcl.exe` in PB 6.0 have a no-FPU code generation switch? Only
-  affects code we compile ourselves; the prebuilt OS binaries need the trap.
-- CE's SH4 default FPSCR value (believed 0x00040001: RZ, DN=1); affects what
-  rounding the emulator sees most of the time.
+- [01-hardware.md](01-hardware.md) — SH7305 SoC, memory map, NOR flash, and peripherals.
+- [02-fpu-emulation.md](02-fpu-emulation.md) — Software SH-4 FPU design and rounding/NaN semantics.
+- [03-boot-and-images.md](03-boot-and-images.md) — Flash map, XIP layout, `wince.hh3` loader, and `.cez` packing.
+- [04-dbt-design.md](04-dbt-design.md) — Dynamic binary translator internals and performance architecture.
+- [05-ce-image-and-oal.md](05-ce-image-and-oal.md) — Windows CE image loading, RAM budget, and SH7305 OAL design.
+- [06-deep-suspend.md](06-deep-suspend.md) — SH7305 R-standby suspend/resume sequence.
+- [07-ce42-port-lessons.md](07-ce42-port-lessons.md) — Engineering lessons carried from CE 6.0 R3 to CE 5.0.
+- [08-ce50-port.md](08-ce50-port.md) — Windows CE 5.0 BSP, real-hardware bring-up, and Pocket PC SH-3 app compatibility.
+- [09-platform-builder-steps.md](09-platform-builder-steps.md) — Setting up and working with the Platform Builder Windows VM.

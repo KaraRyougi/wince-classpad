@@ -163,7 +163,7 @@ python3 tools/cesym.py /path/to/NK.bin /path/to/RelDir ADDR  # Resolve guest PC 
 
 ## Documentation
 
-The `docs/` directory holds dated engineering notes written alongside the implementation (older files may describe superseded filenames such as `wince.hhk` → `wince.hh3`; `07` and most of `08` are in Chinese):
+The `docs/` directory holds architecture references, hardware specs, and bring-up guides for the translator, OAL, and Windows CE 5.0 port:
 
 | Document | Topic |
 |---|---|

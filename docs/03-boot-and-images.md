@@ -1,388 +1,61 @@
-# Boot and image notes
+# Boot Flow, Flash Map & Image Formats
 
-## CE image format
+This document covers the fx-CP400 NOR flash layout, how Windows CE 5.0 images (`NK.bin` and `EXT.bin`) are packaged and flashed, and how `wince.hh3` hands control over to the dynamic binary translator.
 
-ROMIMAGE produces `NK.bin` (B000FF): image start/length, then records of
-(address, length, checksum, data) and a terminator whose length field is the
-entry point. `tools/nkbin.py` dumps it, locates the ROMHDR via the "ECEC"
-signature at image start + 0x40 and prints the module table. `--flat` writes
-the equivalent flat memory image (what a loader must place at `image start`).
+## 1. fx-CP400 64 MiB NOR Flash Map
 
-## Where the image lives
+The fx-CP400 uses a 64 MiB linear x16 NOR flash (`P1 0x80000000`–`0x83FFFFFF`, `P2 0xA0000000`–`0xA3FFFFFF`, 512 × 128 KiB sectors). Under Casio OS 02.01.7003, the chip is partitioned as follows:
 
-- **RAM image** (the first images): all records are written to SDRAM. 16 MiB
-  is enough for a headless kernel (about 2 MiB) but a GWES image plus the
-  RAM file system ran out of pages (docs/05).
-- **XIP image** (current, in the emulator and on the device): `ROMSTART` in
-  `config.bib` points into the NOR at 0x81000000 (chip offset 16 MiB); code
-  executes from flash, RAM holds data and the object store. casio-emu places
-  the flat image with `HLE_OSROM` (`tools/nkflash.py`); on the device
-  `wince.hh3` programs it (below). The window is 0x81000000-0x813DFFFF,
-  3.875 MiB (`NK_FLASH`/`NK_FLASH_MAX` in `dbt/Makefile`, `ROMSIZE` in
-  `config.bib`); the next section says why.
+| Chip Offset | P1 Address | Size | Casio OS Use | Windows CE Use |
+|---|---|---|---|---|
+| `0x0000000`–`0x0EDFFFF` | `0x80000000`–`0x80EDFFFF` | 14.875 MiB | Casio OS code & data (HollyHock patches sit below `0x920000`) | Untouched |
+| **`0x0EE0000`–`0x13DFFFF`** | **`0x80EE0000`–`0x813DFFFF`** | **5.0 MiB** | **Unused erased hole inside OS image** | **`NK.bin` (XIP Core OS — persistent)** |
+| `0x13E0000`–`0x14FFFFF` | `0x813E0000`–`0x814FFFFF` | 1.125 MiB | Casio OS tail data, region tag (`LY777D`), OS build date | Untouched |
+| `0x1500000`–`0x1A1FFFF` | `0x81500000`–`0x81A1FFFF` | 5.125 MiB | MCS main-memory backup | Untouched |
+| `0x1A20000`–`0x385FFFF` | `0x81A20000`–`0x8385FFFF` | 30.25 MiB | Storage memory (`\fls0`, Fugue FAT16, 24.1 MiB logical) | Mounted read/write as `\Storage` (`FUGUEDSK`) |
+| **`0x3860000`–`0x3FFFFFF`** | **`0x83860000`–`0x83FFFFFF`** | **7.625 MiB** | **eActivity volume (Fugue FAT12, 5.5 MiB logical)** | **`EXT.bin` (XIP extra apps — Math Xpander, MFC)** |
 
-## The fx-CP400 flash map (2026-11-05)
+### Persistence Rules
 
-The chip is **64 MiB** (P1 0x80000000-0x83FFFFFF, P2 0xA0000000-0xA3FFFFFF),
-not the 32 MiB the earlier notes assumed: casio-emu's ClassPad profile models
-it so, the OS writes beyond 32 MiB, and Casio's advertised capacities (24 MB
-storage + 5.5 MB eActivity + a 21 MiB OS) only fit a 64 MiB part. The layout
-below is what OS 02.01.7003 produces when it formats a blank chip in casio-emu
-(`~/Downloads/nor-fx-cp400.bin`), compared with the pristine OS update image:
+- **`NK.bin` in the 5 MiB hole (`0x80EE0000`):** Casio OS 02.01.7003 never writes to this hole during normal operation and does not verify the whole-OS checksum at boot (only the factory diagnostics menu checks it). `NK.bin` holds the complete CE 5.0 kernel, GWES, shell, drivers, Plotter-Z, CEtune, PegHelp, SH3CRT, and DocList — so CE boots cleanly even without `EXT.bin`. Only a Casio OS firmware update erases this window.
+- **`EXT.bin` in the eActivity area (`0x83860000`):** Whenever Casio's stock OS boots after `EXT.bin` was written, Casio's Fugue driver silently reformats the 61 eActivity sectors. Because `EXT.bin` stays stored as a file in `\fls0\`, `wince.hh3` detects the mismatch and offers to re-flash `EXT.bin` before booting CE (or boot CE directly without Math Xpander).
+- **Safety check before erasing:** `hhk/nkflash.c` refuses to erase any sector unless the window is blank (`0xFF`), already holds a CE image (`ECEC` ROMHDR at `+0x40` or `B000FF` header), or (for the `EXT` window only) holds a Casio Fugue eActivity header.
 
-| chip offset | what |
-|---|---|
-| 0x0000000-0x14FFFFF | Casio's OS update image (21 MiB, written whole by the updater): code and data to 0x0EE0000; **erased 0x0EE0000-0x13E0000** (5 MiB); data 0x13E0000-0x14A0000; erased 0x14A0000-0x14E0000; 0x14E0000-0x14FFFFF end of image (`LY777D` region tag at 0x14FFEB0, mirrored from 0x300; the OS build date at 0x14FFFE0, HollyHock 3's "safe guard") |
-| 0x1500000-0x1A1FFFF | MCS (main memory) backup: `CASIOMEMDATA` sectors at 0x1580000 and 0x15A0000, `CASIOMCSDATA` from 0x1600000; the rest erased but the OS's to use |
-| 0x1A20000-0x385FFFF | "storage memory": Fugue FAT16 file system (`\fls0\`, 24 MiB logical; log-structured, so it spreads over the whole range) |
-| 0x3860000-0x3FFFFFF | eActivity area: Fugue FAT12 (5.5 MiB logical) |
+## 2. Image Formats & Compression (`.cez`)
 
-The only part of the chip Casio's OS never touches after an OS update is the
-erased hole inside its own image, 0x0EE0000-0x13E0000. Offset 16 MiB lies in
-it, so `NK_FLASH` stays 0x81000000 and the usable window ends at 0x13E0000:
-3.875 MiB, enough for the 2.5 MiB GWES image. Consequences:
+Platform Builder's `romimage` outputs standard Windows CE `B000FF` `.bin` files (`NK.bin` and `EXT.bin`): a list of `(address, length, checksum, data)` records followed by an entry-point terminator, with a ROMHDR marked by `"ECEC"` at `image_start + 0x40`.
 
-- an OS update rewrites the whole 21 MiB image and erases the window: flash
-  NK again afterwards. HollyHock's patches sit below 0x920000 and in the
-  last sector of the image, never in the window;
-- another OS version may lay its image out differently. The flasher
-  therefore erases a sector only when it reads blank (all 0xFF) or the window
-  already holds a CE image (ROMHDR `ECEC` at +0x40 or a `B000FF` header), and
-  stops before the first erase otherwise;
-- the evidence is from the emulated OS (format, first boot, file operations)
-  and the pristine image; the hole was never written. Real-device confirmation
-  (dump the window from HollyHock before the first flash) is still worth
-  doing;
-- `docs/01` and the memory table in `docs/05` carry the corrected sizes.
+To cut USB transfer time and `\fls0\` storage usage roughly in half (~6 MB instead of ~12 MB), images can be packed with `tools/cepack.py`:
 
-## Boot paths
+```sh
+python3 tools/cepack.py -o dbt/build/cez /path/to/NK.bin /path/to/EXT.bin
+```
 
-- **Emulator**: casio-emu loads `dbt/build/dbt-<guest>.g3a`, a raw payload
-  at 0x00300000 (`dbt/loader/loader.S` copies the translator image to its
-  link address 0x8CC80000, syncs the caches and jumps). The CE image comes
-  from the emulated NOR (`make -C dbt NKBIN=/abs/NK.bin run`). `make -C dbt
-  hhkrun` runs the device stub below the same way, and `make -C dbt
-  flashtest` runs the NOR programming code against the emulator's chip model
-  (`HLE_FLASH_CMD=1`).
-- **Device, HollyHock 3** (`dbt/hhk/`, `make -C dbt hhk`): one HollyHock 3
-  program, `wince.hh3`, a big-endian SH ELF file whose ALLOC sections the
-  launcher copies to their addresses before calling the entry. Since
-  2026-11-10 it is a gint program (gint's `libgint-cp` and `fxcp_hh3.ld` from the fxSDK sysroot): the
-  code sits in the VRAM backup area at 0x8C052800, gint drives the display,
-  keyboard and clock and reads the storage memory through POSIX calls, and
-  nothing in our code names an OS address:
-  - `wince.hh3`: the loader (`hhk/loader.c`,
-    screens in `hhk/ui.c` after `docs/design/loader-luna.html`) and the
-    translator image `dbt-<guest>.bin` as a second loadable section pinned
-    at `HHK_PAYLOAD` 0x8C900000 (`--section-start`), outside gint's regions;
-    `takeover.S` moves it to `IMAGE_BASE` 0x8C800000 once interrupts are
-    shut out. The loader checks the payload against the byte sum recorded
-    at build time, looks for `\fls0\NK.bin` and `\fls0\EXT.bin`, and offers
-    four actions in a Windows XP Luna-style menu: Flash CE Core OS (NK into
-    the hole, persistent), Flash Additional Applications (EXT into the
-    eActivity area, cleared by Casio's OS at its next start), both, or boot
-    what the flash holds. Actions whose file is missing or rejected are
-    greyed out with the reason; the status box says whether each file
-    already matches its window (compared while the menu is up), and a file
-    that matches is not written again. Flashing shows the steps (check,
-    erase N sectors, write N records, verify by comparing again), a bar for
-    the step and one for the whole job (no time estimate); a failure stops
-    on an error screen that says what was and was not written. A translator
-    built with `FLASHLOG=1` (diagnostic, for a boot that hangs on the
-    calculator) writes the boot's debug output into the last sector of the NK
-    window (`rt/nor.c`), and the loader of the next start copies it to
-    `\fls0\WINCE.LOG`. EXE (or a tap
-    on Start) runs the action, Clear (or Cancel, or the close box) returns to
-    HollyHock; a tap on an action selects it. The menu answers at once: the
-    files are compared 64 KiB at a time between reads of the keys and the
-    touch screen, Cancel and Boot stop the comparison. The start screen fades
-    in from black, and a `DEVICE=1` translator keeps its marquee moving
-    (`rt/bootmarquee.c`, on the system tick, timed by the RTC) until the
-    display driver's "CLASSPAD DDI:" line (`MARQUEE=0` leaves it still). Then
-    `hhk/takeover.S` masks interrupts (IMASK=15, RB=0),
-    quiets the OS's interrupt sources (TMU stopped, all INTC priorities 0 and
-    sources masked, IRQ pins masked, RTC interrupts off), turns the MMU off
-    with the TLB flushed, syncs the caches over the image and jumps to it.
-    From there the path is the emulator's: `crt0.S`, `dbt_main` finds the
-    XIP image at `NK_FLASH`, the kernel starts. A `DEVICE=1` translator also writes
-    its log on the panel (`rt/lcdcon.c`: the top 96 rows, 40 columns of a
-    4x8 font drawn 2x, scrolling; the DCS commands the display driver uses)
-    from the takeover until the driver's "CLASSPAD DDI:" sign-on, and
-    `dbt_halt` takes the panel back to show the last lines, the halt reason
-    and the last exception context, then masks interrupts (BL=1) before
-    sleeping so a dead kernel is not "rebooted" by the next tick.
-    With `"Console"=dword:1` under the display driver's registry key the
-    driver signs on with "console kept", never pushes the top 96 rows and
-    pushes atomically (`HC_LCD_PUSH`), so the log stays visible beside the
-    running desktop: the way to read driver messages on the device.
-  - The flasher (`hhk/nkflash.c`) writes `\fls0\NK.bin` (Platform Builder's output, copied
-    to the calculator's USB storage) into the window. The files may be packed first:
-    `python3 tools/cepack.py NK.bin EXT.bin -o out/` writes them under the same names
-    at about half the size ("CEZ1": 32 KiB blocks, each a raw deflate stream, behind a
-    table of their lengths), and the loader reads either kind (`hhk/cez.c` unpacks a
-    block at a time while it compares, writes and verifies; `make -C dbt cez-test`
-    checks the reader on the host). So the storage memory holds about 6 MB of images
-    instead of 12, next to the 12 MB in the two windows. An XIP build has each
-    record programmed at its own address (P1 address - 0x80000000), a RAM
-    image goes as is to `NK_FLASH`; the same decision `tools/nkflash.py`
-    makes for the emulator. The window check above runs before the first
-    erase; records outside the window or an image whose start is not
-    `NK_FLASH` are refused. Programming uses the chip's AMD command set
-    through P2 (unlock at 0xAAA/0x554, sector erase, 32-word write buffer,
-    data polling, read-back verify: `hhk/norflash.c`), with interrupts masked
-    around every operation since the OS's handlers live in the chip.
-  - The loader's pictures and fonts are generated and committed:
-    `hhk/font_data.c` (`tools/mkbitmapfont.py c`: Tahoma and Trebuchet MS
-    hinted to 1 bit, the way XP draws them without ClearType) and
-    `hhk/art_data.c` (`tools/mkloaderart.py`: the mockup's icons, the XP
-    flag and the CE 5.0 lettering, `docs/design/art/`). `make -C dbt
-    hhk-preview` renders every screen on the host into `<build>/ui-*.ppm`.
-  - `hhk/os.c` (the OS's text output, files and KEYSC through HollyHock's
-    symbol table or the OS 02.01.7002 addresses) is left only for the
-    `lcdprobe.hh3` diagnostic.
-- **Strapped device** (route B, not pursued): a little-endian bootloader at
-  physical 0 after flipping the endian strap; `docs/00-plan.md`.
+`cepack.py` wraps the image in the **`CEZ2`** container (independent 32 KiB raw deflate blocks plus an embedded `B000FF` record table with per-record CRC-32s and a whole-file CRC-32) under the same `NK.bin`/`EXT.bin` filenames. `wince.hh3` (`hhk/cez.c`, `hhk/nkflash.c`) checks flash equivalence via CRC-32 without decompressing, streams both raw `B000FF` and `CEZ2` transparently during flash/verify, and erases sectors **last-to-first** (preserving the first-sector `ECEC` marker if interrupted mid-erase). Verify packed images on the host with `dbt/build/ceztest`.
 
-### Procedure (first hardware attempt)
+## 3. Real-Device Boot (`wince.hh3`)
 
-1. Build the image in the VM with the current `config.bib` (ROMSIZE 3.875
-   MiB) and verify it in the emulator: `make -C dbt NKBIN=/abs/NK.bin
-   RUN_SECS=400 nkshot`.
-2. Build the programs: `make -C dbt DEVICE=1 BUILD=build-dev hhk` (DEVICE=1
-   leaves the emulator-only debug port out of the translator; `hhk-check`
-   confirms the `.hhk` carries the same translator bytes as the `.g3a` of
-   that build and loads inside the HollyHock window). Copy
-   `dbt/build-dev/wince.hh3`, `NK.bin` and `EXT.bin` to the
-   root of the calculator's storage (`\fls0\`). If the launcher lists only
-   `.hh3` files, use the `.hh3` copies.
-3. Run `wince.hh3` from the HollyHock launcher: it shows the four actions
-   with the status of `NK.bin` and `EXT.bin`; choose one with the arrows and
-   EXE. Flashing takes about a minute for 2.5 MiB, then the start screen
-   stays until the CE display driver runs.
-4. Nothing is visible until the display driver
-   starts (minutes under the translator: the Release GWES image takes about
-   15 s of emulated time, so expect several real minutes); a RESET (back of
-   the calculator) returns to Casio's OS, whose RAM state is gone but whose
-   flash is untouched outside the window.
+`wince.hh3` (`dbt/hhk/`, built via `make -C dbt DEVICE=1 BUILD=build-dev hhk`) is a `gint` HollyHock 3 ELF add-in:
 
-What can still go wrong on hardware, in the order worth checking: the
-HollyHock launcher crashing while copying the translator into the heap top
-at 0x8CC80000 (then stage the payload through `File_Read` into `Mem_Malloc`
-memory instead: `hhk/os.c` already has both); `hhk_takeover` leaving a
-peripheral the kernel does not expect (USB, SCIF, DMAC are left alone); the
-translator's assumptions about SH7305 registers that casio-emu models
-loosely (`docs/04` "Limits"); the window not being free on that OS version
-(the flasher refuses).
+- **Memory placement:** Loader code executes in gint's VRAM backup area (`0x8C052800`); the big-endian translator binary (`dbt-hello.bin`) is linked as a separate loadable section pinned at `0x8C900000` (`HHK_PAYLOAD`).
+- **UI (`hhk/ui.c`):** Windows XP Luna-style menu offering four actions:
+  1. Flash Core OS (`NK.bin`)
+  2. Flash Additional Applications (`EXT.bin`)
+  3. Flash Both
+  4. Boot Windows CE Directly
+  
+  While the menu is open, the loader incrementally compares `\fls0\NK.bin` and `\fls0\EXT.bin` against flash in 64 KiB slices (keeping keys and touch responsive) and skips writing any region that already matches.
+- **NOR flashing (`hhk/norflash.c`):** Programs XIP records directly to `P1_addr - 0x80000000` through P2 (`0xA0000000+`) using the AMD/Spansion unlock sequence (`0xAAA`/`0x554`), 128 KiB sector erase, 32-word write buffer, and read-back verification, with interrupts masked during each flash command.
+- **Takeover (`hhk/takeover.S`):** Once the user starts CE, the loader fades in the Windows CE 5.0 boot screen, masks interrupts (`IMASK=15, RB=0`), quiets all Casio OS interrupt sources (TMU, INTC, IRQ pins, RTC), disables and flushes the MMU/TLB, copies the translator payload from `0x8C900000` to `IMAGE_BASE` (`0x8C800000`), syncs caches, and jumps to `crt0.S`.
+- **Boot marquee (`dbt/rt/bootmarquee.c`):** In `DEVICE=1` builds (`MARQUEE=1`, default), the translator animates the three blue progress blocks on every TMU0 tick (timed via the 128 Hz RTC `R64CNT`) until the CE display driver prints `"CLASSPAD DDI: "` on startup.
+- **Diagnostic build flags (off by default):**
+  - `CONSOLE=1`: enables an on-screen 96-row debug console (`rt/lcdcon.c`).
+  - `FLASHLOG=1`: logs boot output to the last sector of the NK window (`rt/nor.c`), saved to `\fls0\WINCE.LOG` on the next `wince.hh3` launch.
 
-## SH4 OAL startup checklist
+## 4. Emulator Boot (`casio-emu`)
 
-- Entry from the loader with MMU off (SH4 kernel code runs in P1/P2),
-  caches invalidated, interrupts masked.
-- `OEMAddressTable` is not used on SH4; the kernel maps RAM at the P1 address.
-- Timer tick: TMU channel 0 at the SH7305 address (gint has it).
-- Interrupt dispatch: SH-4A INTC (INTEVT codes, IPR/IMR at 0xA4080000 class),
-  mapped to SYSINTR ids in `OEMInterruptHandler`.
-- Debug serial: SCIF; KITL over the same port.
-- Memory: `MainMemoryEndAddress` = 0x8CFFFFFF on 16 MiB units.
+In `casio-emu`, the add-in window is limited to 2 MiB, so the translator travels in `dbt/build/dbt-hello.g3a` (`dbt/loader/loader.S` relocates it to `0x8C800000`), while `tools/nkflash.py` flattens `NK.bin`, `EXT.bin`, and an optional Casio Fugue storage image (`--fugue`) into a single NOR blob loaded via `HLE_OSROM` / `HLE_OSROM_PAD`:
 
-## The regions swapped: NK in the hole, EXT in the eActivity area (2026-11-09)
-
-The 2026-11-09 CE 5.0 image is 4.88 MiB, so NK fits the 5 MiB hole (with the
-BSP's own programs moved in and ws2.dll dropped: about 120 KiB to spare), and
-the two sections below describe the layout the other way round. Since the
-hole is the one place Casio's OS never writes after an OS update and the
-eActivity area is reformatted at every Casio boot, the image worth keeping
-goes into the hole: `config.bib` `NK 80EE0000 00500000`, `ext.bib.hdr`
-`EXT 83860000 007A0000`, `classpad_extrom.h` 0x83860000 / 0x7A0000,
-`dbt/Makefile` `NK_WINDOW=hole` (the default; `eact` is the old layout for
-the images built before). EXT holds Math Xpander and mfcce300 only; Plotter-Z,
-PegHelp, the rotation programs, SH3CRT and DocList are NK modules now, so
-`NK.bin` alone is a complete system and a wiped eActivity area costs only
-Xpander. `wince.hh3` flashes NK once (found identical afterwards); after a
-Casio boot has wiped the area, Flash Additional Applications (the menu's
-default when only EXT differs) rewrites EXT, and Boot Windows CE Directly
-starts without it. The flasher's rule
-"erase only blank sectors, our own image, or the eActivity volume" now applies
-the eActivity clause to the EXT window (`EXT_WINDOW_EACT`). The OAL's check
-of the region is unchanged: after Casio's format the first sector holds a
-Fugue header, not `ECEC`, so the region is cleanly absent. Host test
-(`bsp/tests/test_extrom`), the `extrom`, `nkxip` and `flashtest` guests and
-the hhk build run at the new addresses.
-
-## The EXT region in the hole (2026-11-06, layout until 2026-11-09)
-
-With the NK image in the eActivity area, the hole 0x0EE0000-0x13E0000 is free,
-all 5 MiB of it from its real start (the NK window used 3.875 MiB from 16 MiB).
-`config.bib` makes it a second XIP region, `EXT 80EE0000 00500000 RAMIMAGE`,
-listed before `NK 83860000 007A0000` (address order), with `AUTOSIZE=OFF`;
-romimage writes `EXT.bin` next to `NK.bin`. The first VM build (2026-11-06)
-had NK listed first and `AUTOSIZE=ON` with `DLLADDR_AUTOSIZE=ON`: romimage
-laid NK out from 0x80EE0000 and moved RAM to 0x8127B000, inside EXT ("Ram
-start overlaps rom binary"); AUTOSIZE only fits RAM right behind an image. `platform.bib` puts Math Xpander there (`FILES\xpander`): its 23
-SH3 DLLs as modules with flag `P` (romimage does not check their CPU type;
-the kernel loads ROM modules without a CPU check), `MathXpander.exe`, help
-pages, bitmaps and the Start menu link as files. `mfcce300.dll` is an XIP
-module in NK. The Pocket PC SH3 binaries have 1 KiB sections and romimage
-refuses them as XIP modules ("only 4k page alignments supported"), so
-`stage.py` realigns every `MODULES` entry under `FILES` with `tools/pe4k.py`:
-the file layout stays, the sections move to 4 KiB boundaries, and the RVAs
-(entry point, directories, import thunks, export arrays, resource entries),
-every HIGHLOW fixup and the .reloc table follow; the check relocates the
-original and the copy to one base and compares every section. The EXE is
-linked /FIXED (no relocations); as a plain file CE 6 refused it ("not a
-valid Windows CE application": the loader takes no section of a file image
-that is not page aligned either), so `pe4k.reconstruct_relocs` rebuilds its
-222 fixups (pinned by SHA-256 in `stage.py`) and it becomes an XIP module
-too.
-
-`OEMInit` validates the region (`classpad_extrom.h`: signature, ROMHDR, every
-module's name, e32/o32 records and section data, every file inside the
-window) and sets `g_pOemGlobal->pROMChain`; `KernelFindMemory` (after
-`OEMInit` on SH, `mdsh3.c`) appends the NK region, and the loader and the ROM
-file system walk the chain, so EXT's modules run in place and its files
-appear in `\Windows`. Without a valid region the OAL says so and CE boots
-without them. `wince.hh3` (NK_WINDOW=eact) flashes
-`\fls0\EXT.bin` there next to `NK.bin` (window table in `hhk/nkflash.c`),
-only when it differs; the translator keeps EXT's blocks over whole-cache
-flushes like NK's (`rom2_lo/hi`). In the emulator `EXTBIN=` adds a region to
-the NOR (`tools/nkflash.py --ext`); `tools/mkextrom.py` writes small test
-regions for `bsp/tests/test_extrom.c` and the `extrom` guest.
-
-Is the hole safe to write? Casio's OS checksum covers it: a byte sum over
-[0x20000, 0x14FFEB0) + [0x14FFEF0, 0x14FFFF8), stored big-endian at 0x14FFFF8
-(0xce1e234b on OS 02.01.7003; casio-emu `docs/classpad-experimental.txt`), so
-any data there breaks the stored sum, and it cannot be restored from inside
-the hole (erased bytes are already the maximum). In casio-emu's cold boot,
-which runs Casio's boot code from the reset vector, it does not matter: with
-1 MiB written into the hole (sum 0xc626234b) the boot reaches the same
-Language screen as the pristine NOR, frame for frame, and after 1M ticks no
-sector of the chip has changed, the hole included (emulator only; other
-paths such as the OS updater may still check the sum). An OS update rewrites
-the image and erases the region; CE then boots without it ("no EXT ROM
-region" from the OAL).
-
-Who checks the sum (static analysis of OS 02.01.7003, 2026-11-06; the
-device dump `~/Downloads/nor-fx-cp400.bin` has the same code, its
-[0x20000, 0x14FFEB0) identical to the update package's image, only the region
-tag byte at 0x14FFEB5 differs):
-
-- The boot code (0x0-0x1FFFF) does not sum the OS: before jumping it compares
-  the 8 bytes "CASIOWIN" at 0xA0020000 (0xA0000348). Its byte-sum loops
-  (0xA0008122 and nearby) add 2 to 4 bytes of communication packets.
-- The OS has the fx-CG100's integrity routine (CG100 0x8023014A) at
-  0x80063EB8: sum [0xA0020000, 0xA14FFEB0) + [0xA14FFEF0, end) against the
-  big-endian word at 0xA1800000 - 0xA0008 - 0x2A0000 = 0xA14BFFF8. On this
-  layout that word is erased (0xFFFFFFFF) and the second range is empty, so it
-  fails even on a pristine image. Its only caller, 0x80063FF0 (identity
-  record at 0xA0000300 = 0xA14FFEB0, then this sum), is never called: no bsr,
-  bra or literal anywhere in the OS refers to it. The CG100 diverts to its
-  OS-update receiver from the same routine; the ClassPad OS does not run it.
-- The factory test mode ("OS    SUM  Testing!", "ABS   SUM  Testing!",
-  "USER  SUM  Testing!", " NG"/" OK", strings at 0x808BD660; routines at
-  0x8008D5D6, 0x800923FA, 0x800944FC, 0x8009901C) sums the OS and shows the
-  result: with EXT written it would say NG there, and that is all.
-
-So writing EXT without fixing the stored sum is harmless for booting and
-running Casio's OS 02.01.7003 (and casio-emu's cold boot agrees). Not
-covered: other OS versions, and what the PC-side updater checks before it
-rewrites the image (it erases the hole either way). Hardware check, still
-open: write EXT, RESET and power-cycle, check that Casio's OS boots and EXT
-survives.
-
-## The eActivity area as an alternative window (experiment, 2026-11-05)
-
-The Standard Shell image is 6.95 MB (`notes/ce/NK-shell1.bin`, not
-committed) and does not fit the 3.875 MiB hole, so the eActivity area
-0x3860000-0x3FFFFFF (7.625 MiB raw, a Fugue FAT12 volume of 5.5 MiB logical)
-was tried in casio-emu's ClassPad cold boot (OS 02.01.7003, the NOR behind
-the flash map above; stylus and key injection by
-`dbt/emu-patch/add_classpad_touchseq.py`, a patched OS accepted with
-`HLE_CLASSPAD_NOVERIFY=1` from `add_classpad_noverify.py`; the harness that
-drives the first-boot wizard, opens eActivity and creates a folder is in the
-hand-over note). Results:
-
-1. **Foreign data over the whole area** (a recognisable pattern in every
-   page): at boot the OS erases all 61 sectors and reformats the volume
-   before the first dialog; it also rewrites four sectors of the MCS backup
-   area. Nothing survives.
-2. **Valid volume header kept** (the two formatted sectors at 0x3860000 and
-   0x3880000: Fugue header, FAT12 boot sector, FATs, root directory) with
-   the pattern behind it: the boot, the menu and opening the eActivity
-   application leave every sector alone. The first write to the volume
-   (creating a folder from the save dialog) rewrote pages of the header
-   sector and **erased ten of the pattern sectors** (0x38A0000-0x39C0000):
-   Fugue is log-structured and reclaims "free" physical sectors by erasing
-   them as it needs them, whether or not the FAT lists their clusters as
-   free. So an image behind a valid header lives exactly until the user
-   saves an eActivity, then it is gone. Not acceptable as the only copy.
-3. **Shrinking or disabling the volume by an OS patch**: the volume table at
-   OS offset 0x6473E0 (`... 000000F2 0000003D ...`: the storage volume's 242
-   and the eActivity volume's 61 sectors; the device descriptor size
-   0x025E0000 = 303 sectors from 0x1A20000 appears at OS offsets 0x7B280,
-   0x1731C0, 0x61D240, 0x9F1224, 0x9F122C; the eActivity start is the
-   literal 0x01E40000 at 0x48695C and 0x03860000 at 0x4A9958, in the mount
-   code near P1 0x804A98xx) was patched one word at a time: a sector count
-   of 0, 6 or 8 ends in "DRV0 INITIALIZE Format Error!" with all 61 sectors
-   erased; 12 formats the same 11542-sector volume and still erases all 61;
-   the device size reduced to 0x1F00000 (with either count) gives the format
-   error again. The erase extent and the logical size come from the Fugue
-   mount/format code itself, so the patch needs that code disassembled
-   (start at the function holding 0x4A9958). Its size is unknown; it is not
-   a one-word change.
-4. **Translator side** (done, default unchanged): `make -C dbt
-   NK_WINDOW=eact ...` sets `NK_FLASH` 0x83860000 and `NK_FLASH_MAX`
-   0x7A0000 for the translator, `wince.hh3` and the `nkxip`
-   test guest (which passes at that address: `make NK_WINDOW=eact
-   GUEST=nkxip nkrun`); `tools/nkflash.py` accepts P1 addresses up to the
-   64 MiB chip. `config.bib` carries the alternative `ROMSTART=83860000
-   ROMSIZE=007A0000` as a comment: an image built with it is needed before
-   that window can be exercised with CE in the emulator. The shell image
-   as built (ROMSTART 0x81000000) boots in casio-emu with the window check
-   relaxed, `make -C dbt NK_FLASH_MAX=0x00800000 NKBIN=/abs/NK-shell1.bin
-   RUN_SECS=900 nkshot` (POSTINIT, hello window; the emulator's NOR has no
-   OS image, so the overlap with the real chip's OS data at 0x13E0000 does
-   not show).
-
-Why the eActivity volume is 5.5 MiB in 7.625 MiB raw: not a FAT12 limit
-(8 sectors per cluster allow 16 MiB; the volume has 1440 clusters) but the
-OS's fixed geometry (11542 logical sectors; the storage volume is FAT16 with
-49503 sectors because its 6188 clusters exceed FAT12's 4084) and Fugue's
-overhead: it writes 4 KiB pages with a 512-byte header (the formatted
-sectors show data only at 4 KiB multiples) and keeps spare sectors for
-wear levelling, more of them in proportion on the small volume (storage
-24.17 of 30.25 MiB = 80 %, eActivity 5.64 of 7.625 MiB = 74 %).
-
-Conclusion: the eActivity area holds a CE image safely only with an OS
-patch that stops Fugue from using it, which is disassembly work still to
-do; without it the image survives until the first eActivity save. For a
-7 MiB image the alternatives are a smaller image (compression on, fewer
-components) or that patch.
-
-### Using the eActivity area without a patch: reflash after every return (2026-11-05)
-
-The reformat in result 1 above is silent: the boot continues normally, the
-OS just spends the sector erases, and the only other writes are the MCS
-backup log advancing (a new `CASIOMCSDATA` record, the sector sequence
-tags toggled: a normal main-memory commit, not a reset). So the area can
-be used **without any OS patch** by giving the image up every time Casio's
-OS boots:
-
-1. keep `NK.bin` as a file in `\fls0\` (the 24 MiB storage volume);
-2. `make -C dbt NK_WINDOW=eact DEVICE=1 BUILD=build-eact hhk` builds
-   `wince.hh3` for `NK_FLASH` 0x83860000 (image built with
-   `ROMSTART=83860000 ROMSIZE=007A0000`); with `NK_WINDOW=eact` the flasher
-   also treats a Fugue volume in the window (the `Fugue FAT File System`
-   header at +0x2020) as erasable, so it works on a freshly reformatted
-   area;
-3. from HollyHock: `wince.hh3` (it flashes `NK.bin` first, about a minute
-   for 7 MB: 56 sector erases plus programming, then boots);
-4. after a RESET, Casio's OS finds the volume invalid, erases the 61 sectors
-   and formats it again: the image is gone, the eActivity application works
-   as before (empty), and the next CE session starts at step 3.
-
-What it costs: one reflash per CE session (the 7 MB copy over USB only once,
-the file stays), 61 erase cycles per Casio boot after a CE session (NOR
-endurance is 100k cycles), and every eActivity the user keeps must live
-elsewhere (they are erased with the volume). Unverified on hardware like
-the rest; the emulator run that established the behaviour is the foreign
-data boot in result 1.
+```sh
+make -C dbt NKBIN=/path/to/NK.bin EXTBIN=/path/to/EXT.bin RUN_SECS=300 run
+```
