@@ -96,7 +96,7 @@ void sh4_decode(sf_u32 op, sh_insn *d)
             switch (m) {
             case 0x0: br(d, BR_BSRF, 0, n, 1); return;
             case 0x2: br(d, BR_BRAF, 0, n, 1); return;
-            case 0x8: case 0x9: case 0xA: case 0xB: d->touched |= R(n); return;   /* pref ocbi ocbp ocbwb */
+            case 0x8: case 0x9: case 0xA: case 0xB: case 0xE: d->touched |= R(n); return;   /* pref ocbi ocbp ocbwb icbi */
             case 0xC: mem(d, 4, 1, AM_REG, n, 0, 0); d->movca = 1; return;        /* movca.l r0,@rn */
             }
             d->kind = K_ILLEGAL; return;
@@ -122,6 +122,7 @@ void sh4_decode(sf_u32 op, sh_insn *d)
             if (op == 0x000B) { br(d, BR_RTS, 0, -1, 1); return; }
             if (op == 0x001B) { d->kind = K_TRAP; return; }                      /* sleep */
             if (op == 0x002B) { br(d, BR_RTE, 0, -1, 1); return; }
+            if (op == 0x00AB) return;                                            /* synco */
             d->kind = K_ILLEGAL; return;
         case 0xC: mem(d, 1, 0, AM_R0IDX, m, n, 0); return;
         case 0xD: mem(d, 2, 0, AM_R0IDX, m, n, 0); return;

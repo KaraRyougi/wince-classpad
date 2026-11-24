@@ -47,17 +47,20 @@ GUEST_RAM_LO ?= 0x8C000000
 GUEST_RAM_HI ?= 0x8C800000
 GUEST_LINK   := 0x8C100000
 IMAGE_BASE   ?= 0x8C800000
-IMAGE_STACK  ?= 0x8CBF0000
-CACHE_BASE   ?= 0x8CBF0000
-CACHE_SIZE   ?= 0x00410000
-BLOCKS       ?= 25680
-ARENA_KB     ?= 1200
+IMAGE_STACK  ?= 0x8CC00000
+CACHE_BASE   ?= 0x8CC00000
+CACHE_SIZE   ?= 0x00400000
+BLOCKS       ?= 28800
+ARENA_KB     ?= 1280
 LAYOUT_DEFS  := -DGUEST_RAM_LO=$(GUEST_RAM_LO)u -DGUEST_RAM_HI=$(GUEST_RAM_HI)u -DGUEST_LINK=$(GUEST_LINK)u -DIMAGE_BASE=$(IMAGE_BASE) \
-                -DCACHE_BASE=$(CACHE_BASE)u -DCACHE_SIZE=$(CACHE_SIZE)u -DMAX_BLOCKS=$(BLOCKS) -DMETA_ARENA_BYTES=$(ARENA_KB)*1024u
+                -DCACHE_BASE=$(CACHE_BASE)u -DCACHE_SIZE=$(CACHE_SIZE)u -DMAX_BLOCKS=$(BLOCKS) -DMETA_ARENA_BYTES=$(ARENA_KB)*1024u \
+                -DCACHE_BANKS=16 -DDBT_DECODE_ALIGN4 -DDBT_IC_T_ONLY -DDBT_SHORT_DEVICE_TEST \
+                -DDBT_PAGE_GROUP_FILTER -DDBT_PRUNE_LINK_BANKS -DDBT_DEDUP_LITERALS
 LAYOUT_LD    := -Wl,--defsym,IMAGE_BASE=$(IMAGE_BASE) -Wl,--defsym,_image_stack_top=$(IMAGE_STACK) -Wl,--defsym,GUEST_RAM_LO=$(GUEST_RAM_LO)
 
 HOST_CFLAGS  := -mb -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables \
                 -Wall -Wextra -Wno-unused-parameter -I rt -I src -I ../fpuemu/src $(LAYOUT_DEFS) $(EXTRA_CFLAGS)
+IMG_LTO      ?= -flto
 GUEST_CFLAGS := -ml -m4-nofpu -O2 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables -Wall \
                 -DGUEST_RAM_LO=$(GUEST_RAM_LO)u -DGUEST_RAM_HI=$(GUEST_RAM_HI)u -DGUEST_LINK=$(GUEST_LINK)u -DMAX_BLOCKS=$(BLOCKS)
 
@@ -282,7 +285,7 @@ $(BUILD)/extrom-test.bin: guest/extrom.txt guest/extrom-data.txt ../tools/mkextr
 # --- translator image (big-endian) ---
 # image files are named after the guest so that switching GUEST= relinks
 $(IMG).elf: $(RT_SRC) $(wildcard src/*.h) rt/guest_blob.S rt/image.ld rt/rt.h rt/nkbin.h rt/kdev.h rt/kernel_dev.h rt/kernel_dev50.h rt/ctx_offsets.h rt/lcdcon.h rt/lcdfont.h rt/bootmarquee.h $(BUILD)/$(GUEST).bin $(LAYOUT_STAMP)
-	$(CC) $(HOST_CFLAGS) $(LAYOUT_LD) -DGUEST='"$(BUILD)/$(GUEST).bin"' -T rt/image.ld -o $@ $(RT_SRC) rt/guest_blob.S -lgcc
+	$(CC) $(HOST_CFLAGS) $(IMG_LTO) $(LAYOUT_LD) -DGUEST='"$(BUILD)/$(GUEST).bin"' -T rt/image.ld -o $@ $(RT_SRC) rt/guest_blob.S -lgcc
 
 $(IMG).bin: $(IMG).elf
 	$(OBJCOPY) -O binary $< $@

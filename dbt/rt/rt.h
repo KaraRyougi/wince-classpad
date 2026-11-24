@@ -68,10 +68,13 @@ int    dbt_exc_c(dbt_gctx *ctx);
 /* Helpers called from the stubs with the guest context: FPU instruction,
  * mac fallback, and ldc rm,sr (writes ctx->sr with the SR to really load). */
 void   dbt_fpu_c(dbt_gctx *ctx, sf_u32 opcode);
+sf_u32 dbt_fpu_arith_c(sf_u32 *sr_ptr, sf_u32 arg);
 void   dbt_fallback_c(dbt_gctx *ctx, sf_u32 opcode);
 int    dbt_ldc_sr_c(dbt_gctx *ctx, sf_u32 newsr);   /* returns 1 when the new SR switches register banks */
 /* Guest rte: returns host address for the guest SPC; updates *ssr for the real rte. */
 sf_u32 dbt_rte_c(sf_u32 guest_spc, sf_u32 *ssr);
+/* Boot-time scratch buffer (g_arena) reused by kdev.c before dbt_rt_init. */
+sf_u8 *dbt_kdev_arena(void);
 /* Drop every block overlapping [lo, hi) of guest code (after code writes). */
 void   dbt_invalidate(sf_u32 lo, sf_u32 hi);
 /* Print what the guest appended to the debug ring (docs/04). */
@@ -81,13 +84,16 @@ void   dbt_dbgring_drain(void);
 sf_u32 dbt_bench_native(sf_u32 which, sf_u32 n);      /* rt/bench.c */
 extern volatile sf_u32 dbt_shadow_vbr;
 extern volatile sf_u32 dbt_shadow_md;
+extern sf_u32 dbt_asid_va_mask;
+extern sf_u32 dbt_vbr100_vbr, dbt_vbr100_host;
+extern sf_u32 dbt_tlbf5_en, dbt_tlbf_save[4], dbt_pteh_tracked;
 
 /* provided by stubs.S */
 extern char dbt_vectors[];                          /* real VBR value */
 #include "ctx_offsets.h"
 void dbt_enter(sf_u32 host_entry) __attribute__((noreturn));
 void dbt_sync_code(sf_u32 addr, sf_u32 len);        /* ocbwb + icbi over the range */
-extern char dbt_lookup[], dbt_lookup_link[], dbt_lookup_ic[], dbt_rte_stub[], dbt_fpu_stub[], dbt_fallback_stub[], dbt_ldc_sr_stub[];
+extern char dbt_lookup[], dbt_lookup_link[], dbt_lookup_ic[], dbt_rte_stub[], dbt_fpu_stub[], dbt_fpu_arith_stub[], dbt_fallback_stub[], dbt_ldc_sr_stub[];
 /* window labels for exception recovery inside the stubs (see stubs.S) */
 extern char dbt_lk_s1[], dbt_lk_s2[], dbt_lk_s3[], dbt_lkl_s1[], dbt_lkl_s2[], dbt_lkl_s3[], dbt_lki_s1[], dbt_lki_s2[], dbt_lki_s3[], dbt_lk_region_end[];
 extern char dbt_lk_ts[], dbt_lkl_ts[], dbt_lki_ts[];
@@ -96,6 +102,8 @@ extern char dbt_full_m1[], dbt_full_m2[], dbt_full_m3[], dbt_full_m4[], dbt_full
 extern char dbt_bank_tramp[], dbt_bt_s1[], dbt_bt_end[];
 extern char dbt_rte_tramp[], dbt_rt_s1[], dbt_rt_s2[], dbt_rt_s3[], dbt_rt_masked[], dbt_rte_tramp_end[];
 extern char dbt_hfpu_s1[], dbt_hfpu_s2[], dbt_hfpu_s3[], dbt_hfpu_masked[];
+extern char dbt_hfa_s1[], dbt_hfa_s2[], dbt_hfa_s3[], dbt_hfa_masked[];
+extern char dbt_fafast_a[], dbt_fafast_b[], dbt_fafast_c[], dbt_fafast_end[];
 extern char dbt_hfb_s1[], dbt_hfb_s2[], dbt_hfb_s3[], dbt_hfb_masked[];
 extern char dbt_hsr_s1[], dbt_hsr_s2[], dbt_hsr_s3[], dbt_hsr_masked[];
 #ifdef DBT_FAST_LDC_SR

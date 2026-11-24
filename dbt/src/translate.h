@@ -27,6 +27,7 @@ typedef struct {
     sf_u32 rt_lookup_ic;     /* X0 = guest target, X1 = address of the site's inline-cache literal pair */
     sf_u32 rt_rte;           /* guest rte: SPC is the guest PC */
     sf_u32 rt_fpu;           /* X0 = opcode, X1 = return address */
+    sf_u32 rt_fpu_arith;     /* lightweight stub for pure FPU arith (1 op or 2 packed ops in X0); 0 = use rt_fpu */
     sf_u32 fpu_fr, fpu_fpscr, fpu_fpul;  /* fpuemu's register file (fr[32]: bank 1 at +64 bytes), FPSCR and FPUL, for the in-line FPU moves (tr_fpu_inline); 0 = none */
     sf_u32 rt_fallback;      /* X0 = opcode, X1 = return address */
     sf_u32 rt_ldc_sr;        /* X0 = new SR, X1 = return address */
@@ -53,6 +54,10 @@ typedef struct {
     sf_u32 current_asid_addr; /* native runtime word; never a guest address */
 #endif
     int no_borrow;
+    /* 1: skip populating out->meta[] and out->spills[] (for DBT_LAZY_META
+     * initial translation; emits bit-identical host code so on-demand rebuild
+     * with no_meta = 0 reproduces exact offsets). */
+    int no_meta;
     /* Optional relocation output (moving a block, rt.c DBT_SECOND_CHANCE):
      * the pool's byte offset, and one bit per 4-byte pool word that holds
      * an address inside the block. NULL = not wanted. */

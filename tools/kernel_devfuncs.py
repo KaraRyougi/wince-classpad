@@ -75,6 +75,14 @@ def literal_words(words, base):
             lit.add((a - base) // 2)
     return lit
 
+# Verified non-P4 hot kernel functions: they either sit inside the exception
+# vector area or read r4_bank1 (pCurThread), or carry 0xFFxxxxxx bitmasks,
+# without ever dereferencing a P4 control register.
+NON_P4_FUNCS = frozenset({
+    '_ZeroPage', 'SyscallHandler', '_APICallReturn',
+    '_SC_CreateThread', '__stod', '___SH3Raise',
+})
+
 def p4_reasons(get16, get32, lo, hi):
     words = [get16(a) for a in range(lo, hi, 2)]
     lit = literal_words(words, lo)
@@ -85,7 +93,7 @@ def p4_reasons(get16, get32, lo, hi):
         if w >> 12 == 0xD:
             a = ((pc + 4) & ~3) + 4 * (w & 0xFF)
             v = get32(a)
-            if v is not None and 0xFF000000 <= v < 0xFFFF0000: why.add('literal %08x' % v)
+            if v is not None and 0xFF000000 <= v < 0xFF300000: why.add('literal %08x' % v)
         if (w & 0xF08F) == 0x0082 or (w & 0xF08F) == 0x408E or (w & 0xF08F) == 0x4087:
             why.add('banked register')                        # stc Rm_BANK,Rn / ldc Rm,Rn_BANK / ldc.l @Rm+,Rn_BANK
         if (w & 0xF0FF) == 0xE0FF:                            # mov #-1,Rn, then shifts of Rn
@@ -94,7 +102,7 @@ def p4_reasons(get16, get32, lo, hi):
                 sh = {0x4000: 1, 0x4008: 2, 0x4018: 8, 0x4028: 16}.get(w2 & 0xF0FF) if (w2 >> 8) & 15 == n else None
                 if sh: v = (v << sh) & 0xFFFFFFFF
                 elif (w2 >> 8) & 15 == n and w2 >> 12 in (0x6, 0xE, 0xD, 0x9, 0x3, 0x7): break   # Rn rewritten
-                if v >> 24 == 0xFF and v < 0xFFFF0000:
+                if 0xFF000000 <= v < 0xFF300000:
                     why.add('builds %08x' % v); break
     return why
 
@@ -169,6 +177,7 @@ def main():
     if len(vec) != 2: raise SystemExit('ExceptionBase/_ExceptionEndAddress not in the map')
     keep = []
     for flo, fhi, name in funcs:
+        if name in NON_P4_FUNCS: continue
         lo, hi = ra + flo - rva, ra + fhi - rva
         why = p4_reasons(get16, get32, lo, hi)
         if vec['ExceptionBase'] <= flo < vec['_ExceptionEndAddress']: why.add('exception vector area')

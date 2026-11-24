@@ -8,7 +8,7 @@
 
 #include "../../fpuemu/src/softfloat.h"
 
-#define EMIT_MAX_LITS 64
+#define EMIT_MAX_LITS 128
 
 typedef struct {
     sf_u16 *buf;        /* output buffer */
@@ -18,6 +18,9 @@ typedef struct {
     /* literal pool: 32-bit values referenced by mov.l @(disp,PC) */
     struct { int at; sf_u32 value; int tag; } lits[EMIT_MAX_LITS];
     int     nlits;
+#ifdef DBT_DEDUP_LITERALS
+    int     unique_lits;
+#endif
 } emitter;
 
 void emit_init(emitter *e, sf_u16 *buf, int cap);
@@ -50,7 +53,11 @@ int  emit_flush_lits(emitter *e);
 /* Byte offset of the literal with the given tag, valid after flushing. -1 if none. */
 int  emit_lit_offset(const emitter *e, int tag);
 /* Worst-case bytes the pool will need (for block size budgeting). */
+#ifdef DBT_DEDUP_LITERALS
+static inline int emit_lits_bytes(const emitter *e) { return e->unique_lits * 4 + 2; }
+#else
 static inline int emit_lits_bytes(const emitter *e) { return e->nlits * 4 + 2; }
+#endif
 
 /* --- encodings (n = Rn, m = Rm) --- */
 #define OP_NOP             0x0009u
@@ -67,11 +74,18 @@ static inline int emit_lits_bytes(const emitter *e) { return e->nlits * 4 + 2; }
 #define OP_MOVT(n)         (0x0029u | ((n) << 8))
 #define OP_TST_RR(m,n)     (0x2008u | ((n) << 8) | ((m) << 4))
 #define OP_AND_RR(m,n)     (0x2009u | ((n) << 8) | ((m) << 4))
+#define OP_XOR_RR(m,n)     (0x200Au | ((n) << 8) | ((m) << 4))
 #define OP_NOT_RR(m,n)     (0x6007u | ((n) << 8) | ((m) << 4))
 #define OP_NEG_RR(m,n)     (0x600Bu | ((n) << 8) | ((m) << 4))
+#define OP_SHLL(n)         (0x4000u | ((n) << 8))
+#define OP_ROTL(n)         (0x4004u | ((n) << 8))
+#define OP_ROTR(n)         (0x4005u | ((n) << 8))
+#define OP_SHLL2(n)        (0x4008u | ((n) << 8))
+#define OP_SHLL8(n)        (0x4018u | ((n) << 8))
+#define OP_SHLL16(n)       (0x4028u | ((n) << 8))
 #define OP_SHLR8(n)        (0x4019u | ((n) << 8))
 #define OP_SHLR16(n)       (0x4029u | ((n) << 8))
-#define OP_SHLL2(n)        (0x4008u | ((n) << 8))
+#define OP_CMPPZ(n)        (0x4011u | ((n) << 8))
 #define OP_EXTUB(m,n)      (0x600Cu | ((n) << 8) | ((m) << 4))
 #define OP_EXTUW(m,n)      (0x600Du | ((n) << 8) | ((m) << 4))
 #define OP_BRAF(n)         (0x0023u | ((n) << 8))
@@ -107,6 +121,8 @@ static inline int emit_lits_bytes(const emitter *e) { return e->nlits * 4 + 2; }
 #define OP_MOVL_LOAD(m,n)  (0x6002u | ((n) << 8) | ((m) << 4))      /* mov.l @rm,rn */
 #define OP_MOVL_PREDEC(m,n) (0x2006u | ((n) << 8) | ((m) << 4))     /* mov.l rm,@-rn */
 #define OP_MOVL_POSTINC(m,n) (0x6006u | ((n) << 8) | ((m) << 4))    /* mov.l @rm+,rn */
+#define OP_MOVL_DISP_LOAD(d4,m,n)  (0x5000u | ((n) << 8) | ((m) << 4) | ((d4) & 0xF)) /* mov.l @(4*d4,rm),rn */
+#define OP_MOVL_DISP_STORE(m,d4,n) (0x1000u | ((n) << 8) | ((m) << 4) | ((d4) & 0xF)) /* mov.l rm,@(4*d4,rn) */
 #define OP_MOVCA(n)        (0x00C3u | ((n) << 8))                   /* movca.l r0,@rn */
 
 /* DSP transfer registers used as spill slots (SH-DSP encodings). */

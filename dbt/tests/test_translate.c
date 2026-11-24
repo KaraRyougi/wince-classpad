@@ -1155,6 +1155,80 @@ int main(void)
         env.fpu_fr = fr; env.fpu_fpscr = fs; env.fpu_fpul = fu;
     }
 
+    /* New Phase 1-3 translator features: icbi/synco pass-through, extended
+     * inline FPU (fneg/fabs/fschg/frchg/lds.l/sts.l), 2-op FPU batching, and
+     * no_meta bit-for-bit host-code identity. */
+    {
+        sf_u32 ops_pass[] = { 0x04E3, 0x00AB, 0x000B, 0x0009 }; /* icbi @r4; synco; rts; nop */
+        expect("icbi and synco pass through",
+               translate(ops_pass, 4, 4) == DBT_OK && blk.end_reason == END_BRANCH &&
+               blk.guest_len == 8 && hbuf[0] == 0x04E3 && hbuf[1] == 0x00AB);
+    }
+    {
+        sf_u32 fr = env.fpu_fr, fs = env.fpu_fpscr, fu = env.fpu_fpul, fa = env.rt_fpu_arith;
+        sf_u16 h0[DBT_BLOCK_WORDS], h1[DBT_BLOCK_WORDS];
+        dbt_block b0, b1;
+        sf_u32 ops_mix[] = {
+            0xF24D, /* fneg fr2 */
+            0xF35D, /* fabs fr3 */
+            0xF3FD, /* fschg */
+            0xFBFD, /* frchg */
+            0x4556, /* lds.l @r5+,fpul */
+            0x4566, /* lds.l @r5+,fpscr */
+            0x4552, /* sts.l fpul,@-r5 */
+            0x4562, /* sts.l fpscr,@-r5 */
+            0xF12C, /* fmov fr2,fr1 (SZ=0 & SZ=1) */
+            0x2612, /* mov.l r1,@r6 (triggers borrow) */
+            0x000B, /* rts */
+            0x0009, /* nop */
+        };
+        sf_u32 ops_batch[] = {
+            0xF120, /* fadd fr2,fr1 */
+            0xF132, /* fmul fr3,fr1 -> paired with fadd! */
+            0x000B, /* rts */
+            0x0009, /* nop */
+        };
+        env.fpu_fr = 0x8C8F0008u; env.fpu_fpscr = 0x8C8F0000u; env.fpu_fpul = 0x8C8F0004u;
+        env.rt_fpu_arith = 0x8C802000u;
+        env.no_meta = 0;
+        expect("extended FPU translate (meta=1)", translate(ops_mix, 12, 12) == DBT_OK);
+        memcpy(h0, hbuf, sizeof h0); b0 = blk;
+        env.no_meta = 1;
+        expect("extended FPU translate (no_meta=1)", translate(ops_mix, 12, 12) == DBT_OK);
+        memcpy(h1, hbuf, sizeof h1); b1 = blk;
+        expect("no_meta produces bit-identical host code",
+               b0.host_len == b1.host_len && b0.code_len == b1.code_len &&
+               b0.guest_len == b1.guest_len && b0.nlinks == b1.nlinks &&
+               b0.nmeta == b1.nmeta && b0.nspills == b1.nspills &&
+               b0.borrow == b1.borrow && b0.ic_off == b1.ic_off &&
+               memcmp(h0, h1, b0.host_len) == 0);
+        /* Verify 2-op FPU batching packs (op1 << 16) | op0 into pool and matches with no_meta */
+        env.no_meta = 0;
+        expect("2-op FPU batch translates", translate(ops_batch, 4, 4) == DBT_OK && blk.guest_len == 8);
+        memcpy(h0, hbuf, sizeof h0); b0 = blk;
+        {
+            int found_pair = 0, i;
+            for (i = 0; i < b0.host_len / 2 - 1; i++)
+                if (h0[i] == 0xF132u && h0[i + 1] == 0xF120u) { found_pair = 1; break; }
+            expect("2-op FPU batch packs op1|op0", found_pair);
+        }
+        env.no_meta = 1;
+        expect("2-op FPU batch no_meta bit-identical",
+               translate(ops_batch, 4, 4) == DBT_OK && b0.host_len == blk.host_len &&
+               memcmp(h0, hbuf, b0.host_len) == 0);
+        {
+            /* Dense inlined FPU block: must break cleanly before spilling or literal overflow */
+            sf_u32 ops_dense[24];
+            int k;
+            for (k = 0; k < 24; k++) ops_dense[k] = (k & 1) ? 0xF12Cu : 0xF248u; /* fmov.s @r4,fr2 ; fmov fr2,fr1 */
+            env.no_meta = 0;
+            expect("dense FPU block never overflows", translate(ops_dense, 24, 24) == DBT_OK);
+            env.no_meta = 1;
+            expect("dense FPU block no_meta never overflows", translate(ops_dense, 24, 24) == DBT_OK);
+        }
+        env.no_meta = 0; env.fpu_fr = fr; env.fpu_fpscr = fs; env.fpu_fpul = fu; env.rt_fpu_arith = fa;
+    }
+
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

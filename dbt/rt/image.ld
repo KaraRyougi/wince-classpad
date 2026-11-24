@@ -52,6 +52,8 @@ SECTIONS
 }
 ASSERT(SIZEOF(.ilram) <= 4096, "stubs exceed the 4 KiB IL memory")
 ASSERT(SIZEOF(.xyram) <= 16384, "hot data exceeds the 16 KiB XRAM+YRAM pair")
-/* leave at least 128 KiB between the end of bss and the C stack top */
-ASSERT(_image_end + 0x20000 <= _image_stack_top, "translator image too large for its RAM region (see dbt/Makefile layout)")
+/* Runtime C stack reuses the top of the image region (boot stack is dead after dbt_enter). */
+PROVIDE(_dbt_stack_rt_top = _image_stack_top);
+/* leave at least 24 KiB between the end of bss and the C stack top */
+ASSERT(_image_end + 0x6000 <= _image_stack_top, "translator image too large for its RAM region (see dbt/Makefile layout)")
 ASSERT(_low_bss_end <= GUEST_RAM_LO, "boot workspace tables overlap CE RAM (the first MiB is CE's since 2026-11-06)")

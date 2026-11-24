@@ -1,5 +1,6 @@
 #include <string.h>
 #include "translate.h"
+#include "../../fpuemu/src/fpuemu.h"
 
 #define R(n) (1u << (n))
 #define SR_MD 0x40000000u
@@ -43,6 +44,9 @@ typedef struct {
     dbt_block *blk;
     sf_u32 gpc;            /* guest pc of the instruction being translated */
     dbt_imeta *cur;        /* meta entry being filled */
+    dbt_imeta dummy_meta;  /* scratch meta when env->no_meta is set */
+    int meta_cnt;          /* logical meta entries created (matches b->nmeta when !no_meta) */
+    int spill_cnt;         /* logical spill entries created (matches b->nspills when !no_meta) */
     int err;
     sf_u32 fault;
     int    slot_x0;          /* translating the delay slot of a branch whose target sits in X0 */
@@ -106,18 +110,21 @@ static int pick_scratch(const tctx *t, sf_u32 avoid)
 
 static void spill(tctx *t, int gpr, int slot)
 {
-    dbt_block *b = t->blk;
-    if (b->nspills < DBT_MAX_BLOCK_SPILLS) {
-        dbt_spill *s = &b->spills[b->nspills++];
+    if (t->spill_cnt < DBT_MAX_BLOCK_SPILLS) {
+        t->spill_cnt++;
+        if (!t->env->no_meta) {
+            dbt_block *b = t->blk;
+            dbt_spill *s = &b->spills[b->nspills++];
 #ifndef DBT_COMPACT_SPILL6
-        s->insn = (sf_u8)(t->cur - b->meta);
+            s->insn = (sf_u8)(t->cur - b->meta);
 #endif
-        s->gpr = (sf_u8)gpr; s->slot = (sf_u8)slot;
+            s->gpr = (sf_u8)gpr; s->slot = (sf_u8)slot;
 #ifndef DBT_COMPACT_SPILL6
-        s->pad = 0;
+            s->pad = 0;
 #endif
-        s->start = (sf_u16)emit_pos(&t->em);
-        s->end = 0xFFFF;
+            s->start = (sf_u16)emit_pos(&t->em);
+            s->end = 0xFFFF;
+        }
     } else {
         t->err = DBT_ERR_OVERFLOW;
     }
@@ -126,13 +133,15 @@ static void spill(tctx *t, int gpr, int slot)
 
 static void restore(tctx *t, int gpr, int slot)
 {
-    dbt_block *b = t->blk;
-    int i;
-    for (i = b->nspills - 1; i >= 0; i--)
-        if (b->spills[i].gpr == gpr && b->spills[i].slot == slot && b->spills[i].end == 0xFFFF) {
-            b->spills[i].end = (sf_u16)emit_pos(&t->em);
-            break;
-        }
+    if (!t->env->no_meta) {
+        dbt_block *b = t->blk;
+        int i;
+        for (i = b->nspills - 1; i >= 0; i--)
+            if (b->spills[i].gpr == gpr && b->spills[i].slot == slot && b->spills[i].end == 0xFFFF) {
+                b->spills[i].end = (sf_u16)emit_pos(&t->em);
+                break;
+            }
+    }
     emit16(&t->em, op_sts_slot(slot, gpr));
 }
 
@@ -286,18 +295,22 @@ static void tr_p4_store(tctx *t, const sh_insn *d)
     sf_u32 goff = t->gpc - b->guest_pc;
     spill(t, a, SA(t)); spill(t, v, SB(t));
     emit16(e, OP_STC_SR(v));
-    if (b->nspills >= DBT_MAX_BLOCK_SPILLS) { t->err = DBT_ERR_OVERFLOW; return; }
-    t_index = b->nspills++;
+    if (t->spill_cnt >= DBT_MAX_BLOCK_SPILLS) { t->err = DBT_ERR_OVERFLOW; return; }
+    t->spill_cnt++;
+    t_index = -1;
+    if (!t->env->no_meta) {
+        t_index = b->nspills++;
 #ifndef DBT_COMPACT_SPILL6
-    b->spills[t_index].insn = (sf_u8)(t->cur - b->meta);
+        b->spills[t_index].insn = (sf_u8)(t->cur - b->meta);
 #endif
-    b->spills[t_index].gpr = DBT_SPILL_T;
-    b->spills[t_index].slot = (sf_u8)SC(t);
+        b->spills[t_index].gpr = DBT_SPILL_T;
+        b->spills[t_index].slot = (sf_u8)SC(t);
 #ifndef DBT_COMPACT_SPILL6
-    b->spills[t_index].pad = 0;
+        b->spills[t_index].pad = 0;
 #endif
-    b->spills[t_index].start = (sf_u16)emit_pos(e);
-    b->spills[t_index].end = 0xffff;
+        b->spills[t_index].start = (sf_u16)emit_pos(e);
+        b->spills[t_index].end = 0xffff;
+    }
     emit16(e, op_lds_slot(v, SC(t)));
     emit16(e, OP_MOV_RR(d->base, a));
     if (d->am == AM_PREDEC) emit16(e, OP_ADD_IMM(-4, a));
@@ -333,8 +346,8 @@ static void tr_p4_store(tctx *t, const sh_insn *d)
     emit_patch16(e, mmucr, OP_BT((protected_at - mmucr - 4) / 2));
     emit_patch16(e, selected, OP_BRA((restore_at - selected - 4) / 2));
     emit16(e, op_sts_slot(SC(t), v));
-    b->spills[t_index].end = (sf_u16)emit_pos(e);
-    emit16(e, OP_LDC_SR(v));
+    if (t_index >= 0) b->spills[t_index].end = (sf_u16)emit_pos(e);
+    emit16(e, OP_SHLR(v));
     restore(t, v, SB(t));
     dispatch = emit_pos(e); emit16(e, OP_BRAF(a));
     restore(t, a, SA(t));
@@ -790,29 +803,34 @@ static void ic_miss_tail(tctx *t, int rT)
  * an interrupt between cmp/eq and ldc sr also sees the original value. */
 static void ic_save_t(tctx *t, int r)
 {
-    dbt_block *b = t->blk;
     emit16(&t->em, OP_STC_SR(r));
-    if (b->nspills < DBT_MAX_BLOCK_SPILLS) {
-        dbt_spill *s = &b->spills[b->nspills++];
+    if (t->spill_cnt < DBT_MAX_BLOCK_SPILLS) {
+        t->spill_cnt++;
+        if (!t->env->no_meta) {
+            dbt_block *b = t->blk;
+            dbt_spill *s = &b->spills[b->nspills++];
 #ifndef DBT_COMPACT_SPILL6
-        s->insn = (sf_u8)(t->cur - b->meta);
+            s->insn = (sf_u8)(t->cur - b->meta);
 #endif
-        s->gpr = DBT_SPILL_T; s->slot = SLOT_X1;
+            s->gpr = DBT_SPILL_T; s->slot = SLOT_X1;
 #ifndef DBT_COMPACT_SPILL6
-        s->pad = 0;
+            s->pad = 0;
 #endif
-        s->start = (sf_u16)emit_pos(&t->em); s->end = 0xffff;
+            s->start = (sf_u16)emit_pos(&t->em); s->end = 0xffff;
+        }
     } else t->err = DBT_ERR_OVERFLOW;
     emit16(&t->em, op_lds_slot(r, SLOT_X1));
 }
 static void ic_restore_t(tctx *t, int r, int close)
 {
-    int i;
     emit16(&t->em, op_sts_slot(SLOT_X1, r));
-    if (close) for (i = t->blk->nspills - 1; i >= 0; --i) {
-        dbt_spill *s = &t->blk->spills[i];
-        if (s->gpr == DBT_SPILL_T && s->end == 0xffff) {
-            s->end = (sf_u16)emit_pos(&t->em); break;
+    if (close && !t->env->no_meta) {
+        int i;
+        for (i = t->blk->nspills - 1; i >= 0; --i) {
+            dbt_spill *s = &t->blk->spills[i];
+            if (s->gpr == DBT_SPILL_T && s->end == 0xffff) {
+                s->end = (sf_u16)emit_pos(&t->em); break;
+            }
         }
     }
 #ifdef DBT_IC_T_ONLY
@@ -1253,45 +1271,92 @@ static void trace_prologue(tctx *t)
  * finds a, v and T in their slots. -DDBT_NO_FPU_INLINE keeps the helper
  * for everything. */
 #ifndef DBT_NO_FPU_INLINE
+static int fpu_inline_kind(const dbt_env *env, sf_u32 op)
+{
+    if (!env->fpu_fr) return 0;
+    switch (op & 0xF0FFu) {
+    case 0x405Au: return 1;                      /* lds rm,fpul */
+    case 0x406Au: return 2;                      /* lds rm,fpscr */
+    case 0x005Au: return 3;                      /* sts fpul,rn */
+    case 0x006Au: return 4;                      /* sts fpscr,rn */
+    case 0xF08Du: return 5;                      /* fldi0 frn */
+    case 0xF09Du: return 6;                      /* fldi1 frn */
+    case 0xF00Du: return 7;                      /* fsts fpul,frn */
+    case 0xF01Du: return 8;                      /* flds frm,fpul */
+    case 0xF04Du: return 22;                     /* fneg frn */
+    case 0xF05Du: return 23;                     /* fabs frn */
+#ifndef DBT_NO_FPU_INLINE_MEM
+    case 0x4056u: return 18;                     /* lds.l @rm+,fpul */
+    case 0x4066u: return 19;                     /* lds.l @rm+,fpscr */
+    case 0x4052u: return 20;                     /* sts.l fpul,@-rn */
+    case 0x4062u: return 21;                     /* sts.l fpscr,@-rn */
+#endif
+    default:
+        if (op == 0xF3FDu) return 16;            /* fschg */
+        if (op == 0xFBFDu) return 17;            /* frchg */
+        if ((op & 0xF00Fu) == 0xF00Cu) return 9; /* fmov frm,frn (SZ=0 and SZ=1) */
+#ifndef DBT_NO_FPU_INLINE_MEM
+        /* fmov.s between memory and a register (FPSCR.SZ = 0): one native
+         * access and a byte swap, as tr_mem_plain does for mov.l. These were
+         * about 70% of the FPU instructions that still reached the helper
+         * (the CE compiler's loads, stores and register saves). */
+        if ((op & 0xF00Fu) == 0xF008u) return 10;   /* fmov.s @rm,frn */
+        if ((op & 0xF00Fu) == 0xF009u) return 11;   /* fmov.s @rm+,frn */
+        if ((op & 0xF00Fu) == 0xF006u) return 12;   /* fmov.s @(r0,rm),frn */
+        if ((op & 0xF00Fu) == 0xF00Au) return 13;   /* fmov.s frm,@rn */
+        if ((op & 0xF00Fu) == 0xF00Bu) return 14;   /* fmov.s frm,@-rn */
+        if ((op & 0xF00Fu) == 0xF007u) return 15;   /* fmov.s frm,@(r0,rn) */
+#endif
+        return 0;
+    }
+}
+
 static int spill_t_save(tctx *t, int v)          /* stc sr,v ; v -> SC: SR.T saved, as tr_p4_store does */
 {
-    dbt_block *b = t->blk;
-    int idx;
     emit16(&t->em, OP_STC_SR(v));
-    if (b->nspills >= DBT_MAX_BLOCK_SPILLS) { t->err = DBT_ERR_OVERFLOW; return -1; }
-    idx = b->nspills++;
+    if (t->spill_cnt >= DBT_MAX_BLOCK_SPILLS) { t->err = DBT_ERR_OVERFLOW; return -1; }
+    t->spill_cnt++;
+    if (!t->env->no_meta) {
+        dbt_block *b = t->blk;
+        int idx = b->nspills++;
 #ifndef DBT_COMPACT_SPILL6
-    b->spills[idx].insn = (sf_u8)(t->cur - b->meta);
-    b->spills[idx].pad = 0;
+        b->spills[idx].insn = (sf_u8)(t->cur - b->meta);
+        b->spills[idx].pad = 0;
 #endif
-    b->spills[idx].gpr = DBT_SPILL_T; b->spills[idx].slot = (sf_u8)SC(t);
-    b->spills[idx].start = (sf_u16)emit_pos(&t->em); b->spills[idx].end = 0xFFFF;
+        b->spills[idx].gpr = DBT_SPILL_T; b->spills[idx].slot = (sf_u8)SC(t);
+        b->spills[idx].start = (sf_u16)emit_pos(&t->em); b->spills[idx].end = 0xFFFF;
+    }
     emit16(&t->em, op_lds_slot(v, SC(t)));
-    return idx;
+    return 0;
 }
 static void spill_reopen(tctx *t, int gpr, int slot)   /* a record only: the slot already holds the value */
 {
-    dbt_block *b = t->blk;
-    if (b->nspills >= DBT_MAX_BLOCK_SPILLS) { t->err = DBT_ERR_OVERFLOW; return; }
+    if (t->spill_cnt >= DBT_MAX_BLOCK_SPILLS) { t->err = DBT_ERR_OVERFLOW; return; }
+    t->spill_cnt++;
+    if (!t->env->no_meta) {
+        dbt_block *b = t->blk;
 #ifndef DBT_COMPACT_SPILL6
-    b->spills[b->nspills].insn = (sf_u8)(t->cur - b->meta);
-    b->spills[b->nspills].pad = 0;
+        b->spills[b->nspills].insn = (sf_u8)(t->cur - b->meta);
+        b->spills[b->nspills].pad = 0;
 #endif
-    b->spills[b->nspills].gpr = (sf_u8)gpr; b->spills[b->nspills].slot = (sf_u8)slot;
-    b->spills[b->nspills].start = (sf_u16)emit_pos(&t->em); b->spills[b->nspills].end = 0xFFFF;
-    b->nspills++;
+        b->spills[b->nspills].gpr = (sf_u8)gpr; b->spills[b->nspills].slot = (sf_u8)slot;
+        b->spills[b->nspills].start = (sf_u16)emit_pos(&t->em); b->spills[b->nspills].end = 0xFFFF;
+        b->nspills++;
+    }
 }
-static void spill_t_restore(tctx *t, int v)     /* SC -> v ; ldc v,sr: T back, record closed */
+static void spill_t_restore(tctx *t, int v)     /* SC -> v ; shlr v: T back without ldc sr stall */
 {
-    dbt_block *b = t->blk;
-    int i;
     emit16(&t->em, op_sts_slot(SC(t), v));
-    for (i = b->nspills - 1; i >= 0; i--)
-        if (b->spills[i].gpr == DBT_SPILL_T && b->spills[i].slot == SC(t) && b->spills[i].end == 0xFFFF) {
-            b->spills[i].end = (sf_u16)emit_pos(&t->em);
-            break;
-        }
-    emit16(&t->em, OP_LDC_SR(v));
+    if (!t->env->no_meta) {
+        dbt_block *b = t->blk;
+        int i;
+        for (i = b->nspills - 1; i >= 0; i--)
+            if (b->spills[i].gpr == DBT_SPILL_T && b->spills[i].slot == SC(t) && b->spills[i].end == 0xFFFF) {
+                b->spills[i].end = (sf_u16)emit_pos(&t->em);
+                break;
+            }
+    }
+    emit16(&t->em, OP_SHLR(v));
 }
 
 static int tr_fpu_inline(tctx *t, const sh_insn *d, int in_slot)
@@ -1299,109 +1364,129 @@ static int tr_fpu_inline(tctx *t, const sh_insn *d, int in_slot)
     emitter *e = &t->em;
     sf_u32 op = d->op;
     int n = (op >> 8) & 15, m = (op >> 4) & 15;
-    int kind, a, v, bf_fd, bf_sz = -1, bra_done, slow, done, skip, t_restored = 0;
+    int kind, a, v, bf_fd, bf_sz = -1, bra_done, slow, done, skip, t_restored = 0, has_mem;
     sf_u32 goff = t->gpc - t->blk->guest_pc;
     dbt_imeta parent = *t->cur;                   /* a branch range when this is a delay slot */
-    if (!t->env->fpu_fr) return 0;
-    switch (op & 0xF0FFu) {
-    case 0x405A: kind = 1; break;                 /* lds rm,fpul */
-    case 0x406A: kind = 2; break;                 /* lds rm,fpscr */
-    case 0x005A: kind = 3; break;                 /* sts fpul,rn */
-    case 0x006A: kind = 4; break;                 /* sts fpscr,rn */
-    case 0xF08D: kind = 5; break;                 /* fldi0 frn */
-    case 0xF09D: kind = 6; break;                 /* fldi1 frn */
-    case 0xF00D: kind = 7; break;                 /* fsts fpul,frn */
-    case 0xF01D: kind = 8; break;                 /* flds frm,fpul */
-    default:
-        if ((op & 0xF00Fu) == 0xF00Cu) kind = 9;  /* fmov frm,frn */
-#ifndef DBT_NO_FPU_INLINE_MEM
-        /* fmov.s between memory and a register (FPSCR.SZ = 0): one native
-         * access and a byte swap, as tr_mem_plain does for mov.l. These were
-         * about 70% of the FPU instructions that still reached the helper
-         * (the CE compiler's loads, stores and register saves). */
-        else if ((op & 0xF00Fu) == 0xF008u) kind = 10;   /* fmov.s @rm,frn */
-        else if ((op & 0xF00Fu) == 0xF009u) kind = 11;   /* fmov.s @rm+,frn */
-        else if ((op & 0xF00Fu) == 0xF006u) kind = 12;   /* fmov.s @(r0,rm),frn */
-        else if ((op & 0xF00Fu) == 0xF00Au) kind = 13;   /* fmov.s frm,@rn */
-        else if ((op & 0xF00Fu) == 0xF00Bu) kind = 14;   /* fmov.s frm,@-rn */
-        else if ((op & 0xF00Fu) == 0xF007u) kind = 15;   /* fmov.s frm,@(r0,rn) */
-#endif
-        else return 0;
-    }
-    if (t->blk->nspills + 6 > DBT_MAX_BLOCK_SPILLS) return 0;
+    kind = fpu_inline_kind(t->env, op);
+    if (!kind) return 0;
+    if (t->spill_cnt + 6 > DBT_MAX_BLOCK_SPILLS) return 0;
     a = pick_scratch(t, d->touched);
     v = pick_scratch(t, d->touched | (a >= 0 ? R(a) : 0));
     if (a < 0 || v < 0) return 0;
+    has_mem = (kind >= 10 && kind <= 15) || (kind >= 18 && kind <= 21);
     spill(t, a, SA(t)); spill(t, v, SB(t));
     if (spill_t_save(t, v) < 0) return 0;
-    /* SR.FD (bit 15): set -> the helper raises the FPU-disable exception */
-    emit_mov_lit(e, a, 0x8000u, TAG_NONE);
-    emit16(e, OP_TST_RR(a, v));
+    /* SR.FD (bit 15): shift into bit 31 and test with cmp/pz (0 literals). */
+    emit16(e, OP_SHLL16(v));
+    emit16(e, OP_CMPPZ(v));
     bf_fd = emit_pos(e); emit16(e, OP_BF(0));
     switch (kind) {
-    case 1: emit_mov_lit(e, a, t->env->fpu_fpul, TAG_NONE);  emit16(e, OP_MOVL_STORE(n, a)); break;   /* lds/sts name the register in bits 8-11 */
+    case 1: emit_mov_lit(e, a, t->env->fpu_fpul, TAG_NONE);  emit16(e, OP_MOVL_STORE(n, a)); break;
     case 2: emit_mov_lit(e, v, 0x003FFFFFu, TAG_NONE);       /* FPSCR_MASK, as fpuemu's lds */
             emit16(e, OP_AND_RR(n, v));
             emit_mov_lit(e, a, t->env->fpu_fpscr, TAG_NONE); emit16(e, OP_MOVL_STORE(v, a)); break;
     case 3: emit_mov_lit(e, a, t->env->fpu_fpul, TAG_NONE);  emit16(e, OP_MOVL_LOAD(a, n)); break;
     case 4: emit_mov_lit(e, a, t->env->fpu_fpscr, TAG_NONE); emit16(e, OP_MOVL_LOAD(a, n)); break;
+    case 16: case 17:                                         /* fschg / frchg */
+            emit_mov_lit(e, a, t->env->fpu_fpscr, TAG_NONE);
+            emit16(e, OP_MOVL_LOAD(a, v));
+            emit_mov_lit(e, a, kind == 16 ? 0x00100000u : 0x00200000u, TAG_NONE);
+            emit16(e, OP_XOR_RR(a, v));
+            emit_mov_lit(e, a, t->env->fpu_fpscr, TAG_NONE);
+            emit16(e, OP_MOVL_STORE(v, a));
+            break;
+    case 18:                                                  /* lds.l @rn+,fpul */
+            emit_mov_lit(e, a, t->env->fpu_fpul, TAG_NONE);
+            emit16(e, OP_MOVL_LOAD(n, v));
+            swap32(t, v, v);
+            emit16(e, OP_MOVL_STORE(v, a));
+            spill_t_restore(t, v); t_restored = 1;
+            commit(t, FIX_NONE, 0); emit16(e, OP_ADD_IMM(4, n));
+            break;
+    case 19:                                                  /* lds.l @rn+,fpscr */
+            emit16(e, OP_MOVL_LOAD(n, v));
+            swap32(t, v, v);
+            emit_mov_lit(e, a, 0x003FFFFFu, TAG_NONE);
+            emit16(e, OP_AND_RR(a, v));
+            emit_mov_lit(e, a, t->env->fpu_fpscr, TAG_NONE);
+            emit16(e, OP_MOVL_STORE(v, a));
+            spill_t_restore(t, v); t_restored = 1;
+            commit(t, FIX_NONE, 0); emit16(e, OP_ADD_IMM(4, n));
+            break;
+    case 20:                                                  /* sts.l fpul,@-rn */
+            emit_mov_lit(e, a, t->env->fpu_fpul, TAG_NONE);
+            emit16(e, OP_MOVL_LOAD(a, v));
+            swap32(t, v, v);
+            spill_t_restore(t, a); t_restored = 1;
+            commit(t, FIX_NONE, 0); emit16(e, OP_MOVL_PREDEC(v, n));
+            break;
+    case 21:                                                  /* sts.l fpscr,@-rn */
+            emit_mov_lit(e, a, t->env->fpu_fpscr, TAG_NONE);
+            emit16(e, OP_MOVL_LOAD(a, v));
+            swap32(t, v, v);
+            spill_t_restore(t, a); t_restored = 1;
+            commit(t, FIX_NONE, 0); emit16(e, OP_MOVL_PREDEC(v, n));
+            break;
     default:
-        /* the bank: FPSCR.FR (bit 21) adds 64 bytes; fmov also needs SZ (bit 20) clear */
+        /* Load FPSCR to inspect FR (bit 21) and, for fmov, SZ (bit 20)
+         * without mask literals, then address FRn via @(4*n, a). */
         emit_mov_lit(e, a, t->env->fpu_fpscr, TAG_NONE); emit16(e, OP_MOVL_LOAD(a, v));
-        if (kind >= 9) {
-            emit_mov_lit(e, a, 0x00100000u, TAG_NONE); emit16(e, OP_TST_RR(a, v));
+        emit16(e, OP_SHLL8(v));
+        emit16(e, OP_SHLL2(v));                               /* bit 31 = FR, bit 30 = SZ */
+        if (kind >= 9 && kind <= 15) {
+            emit16(e, OP_ROTL(v));                            /* bit 31 = SZ, bit 0 = FR */
+            emit16(e, OP_CMPPZ(v));                           /* T = (SZ == 0) */
             bf_sz = emit_pos(e); emit16(e, OP_BF(0));
+            emit16(e, OP_SHLR(v));                            /* T = FR */
+            emit_mov_lit(e, a, t->env->fpu_fr, TAG_NONE);
+            skip = emit_pos(e); emit16(e, OP_BF(0)); emit16(e, OP_ADD_IMM(64, a));
+            emit_patch16(e, skip, OP_BF((emit_pos(e) - skip - 4) / 2));
+        } else {
+            emit16(e, OP_CMPPZ(v));                           /* T = (FR == 0) */
+            emit_mov_lit(e, a, t->env->fpu_fr, TAG_NONE);
+            skip = emit_pos(e); emit16(e, OP_BT(0)); emit16(e, OP_ADD_IMM(64, a));
+            emit_patch16(e, skip, OP_BT((emit_pos(e) - skip - 4) / 2));
         }
-        emit_mov_lit(e, a, 0x00200000u, TAG_NONE); emit16(e, OP_TST_RR(a, v));   /* T = bank 0 */
         switch (kind) {
-        case 5: case 6:                                                             /* fldi0/1 frn */
-            emit_mov_lit(e, a, t->env->fpu_fr + 4u * n, TAG_NONE);
-            skip = emit_pos(e); emit16(e, OP_BT(0)); emit16(e, OP_ADD_IMM(64, a));
-            emit_patch16(e, skip, OP_BT((emit_pos(e) - skip - 4) / 2));
+        case 5: case 6:                                       /* fldi0/1 frn */
             if (kind == 5) emit16(e, OP_MOV_IMM(0, v)); else emit_mov_lit(e, v, 0x3F800000u, TAG_NONE);
-            emit16(e, OP_MOVL_STORE(v, a));
+            emit16(e, OP_MOVL_DISP_STORE(v, n, a));
             break;
-        case 7:                                                                     /* fsts fpul,frn */
-            emit_mov_lit(e, a, t->env->fpu_fr + 4u * n, TAG_NONE);
-            skip = emit_pos(e); emit16(e, OP_BT(0)); emit16(e, OP_ADD_IMM(64, a));
-            emit_patch16(e, skip, OP_BT((emit_pos(e) - skip - 4) / 2));
+        case 7:                                               /* fsts fpul,frn */
             emit_mov_lit(e, v, t->env->fpu_fpul, TAG_NONE); emit16(e, OP_MOVL_LOAD(v, v));
-            emit16(e, OP_MOVL_STORE(v, a));
+            emit16(e, OP_MOVL_DISP_STORE(v, n, a));
             break;
-        case 8:                                                                     /* flds frm,fpul: the register is in bits 8-11 */
-            emit_mov_lit(e, a, t->env->fpu_fr + 4u * n, TAG_NONE);
-            skip = emit_pos(e); emit16(e, OP_BT(0)); emit16(e, OP_ADD_IMM(64, a));
-            emit_patch16(e, skip, OP_BT((emit_pos(e) - skip - 4) / 2));
-            emit16(e, OP_MOVL_LOAD(a, a));
-            emit_mov_lit(e, v, t->env->fpu_fpul, TAG_NONE); emit16(e, OP_MOVL_STORE(a, v));
+        case 8:                                               /* flds frm,fpul */
+            emit16(e, OP_MOVL_DISP_LOAD(n, a, v));
+            emit_mov_lit(e, a, t->env->fpu_fpul, TAG_NONE); emit16(e, OP_MOVL_STORE(v, a));
             break;
-        case 10: case 11: case 12:                                                  /* fmov.s from memory to frn */
-            /* Nothing the guest can see changes before the last word, so
-             * an exception anywhere (the load's own TLB miss included)
-             * restarts the instruction once the spills are undone. The
-             * post-increment is the commit point: after it the instruction
-             * is complete and a resume goes on with the next range. T goes
-             * back before the commit: in the slot of bt/s or bf/s the next
-             * range decides by SSR.T, read before the spills are undone. */
-            emit_mov_lit(e, a, t->env->fpu_fr + 4u * n, TAG_NONE);
-            skip = emit_pos(e); emit16(e, OP_BT(0)); emit16(e, OP_ADD_IMM(64, a));
-            emit_patch16(e, skip, OP_BT((emit_pos(e) - skip - 4) / 2));
+        case 22:                                              /* fneg frn */
+            emit16(e, OP_MOVL_DISP_LOAD(n, a, v));
+            emit16(e, OP_ROTL(v));                            /* bit 31 -> bit 0 & T */
+            emit16(e, OP_BF(0));                              /* bit 31 == 0 -> +1 */
+            emit16(e, OP_ADD_IMM(-2, v));                     /* bit 31 == 1 -> -2 + 1 = -1 */
+            emit16(e, OP_ADD_IMM(1, v));
+            emit16(e, OP_ROTR(v));
+            emit16(e, OP_MOVL_DISP_STORE(v, n, a));
+            break;
+        case 23:                                              /* fabs frn */
+            emit16(e, OP_MOVL_DISP_LOAD(n, a, v));
+            emit16(e, OP_SHLL(v));
+            emit16(e, OP_SHLR(v));
+            emit16(e, OP_MOVL_DISP_STORE(v, n, a));
+            break;
+        case 10: case 11: case 12:                            /* fmov.s from memory to frn */
             if (kind == 12) emit16(e, 0x000Eu | ((sf_u32)v << 8) | ((sf_u32)m << 4));  /* mov.l @(r0,rm),v */
             else emit16(e, OP_MOVL_LOAD(m, v));
             swap32(t, v, v);
-            emit16(e, OP_MOVL_STORE(v, a));
+            emit16(e, OP_MOVL_DISP_STORE(v, n, a));
             if (kind == 11) {
                 spill_t_restore(t, v); t_restored = 1;
                 commit(t, FIX_NONE, 0); emit16(e, OP_ADD_IMM(4, m));
             }
             break;
-        case 13: case 14: case 15:                                                  /* fmov.s frm to memory */
-            /* the store is the commit point, as for an integer store; T
-             * goes back before it (through a, free once v is loaded) */
-            emit_mov_lit(e, a, t->env->fpu_fr + 4u * m, TAG_NONE);
-            skip = emit_pos(e); emit16(e, OP_BT(0)); emit16(e, OP_ADD_IMM(64, a));
-            emit_patch16(e, skip, OP_BT((emit_pos(e) - skip - 4) / 2));
-            emit16(e, OP_MOVL_LOAD(a, v));
+        case 13: case 14: case 15:                            /* fmov.s frm to memory */
+            emit16(e, OP_MOVL_DISP_LOAD(m, a, v));
             swap32(t, v, v);
             spill_t_restore(t, a); t_restored = 1;
             commit(t, FIX_NONE, 0);
@@ -1409,13 +1494,41 @@ static int tr_fpu_inline(tctx *t, const sh_insn *d, int in_slot)
             else if (kind == 14) emit16(e, OP_MOVL_PREDEC(v, n));
             else emit16(e, 0x0006u | ((sf_u32)n << 8) | ((sf_u32)v << 4));           /* mov.l v,@(r0,rn) */
             break;
-        default:                                                                    /* fmov frm,frn, SZ = 0 */
-            emit_mov_lit(e, a, t->env->fpu_fr + 4u * m, TAG_NONE);
-            emit_mov_lit(e, v, t->env->fpu_fr + 4u * n, TAG_NONE);
-            skip = emit_pos(e); emit16(e, OP_BT(0)); emit16(e, OP_ADD_IMM(64, a)); emit16(e, OP_ADD_IMM(64, v));
-            emit_patch16(e, skip, OP_BT((emit_pos(e) - skip - 4) / 2));
-            emit16(e, OP_MOVL_LOAD(a, a)); emit16(e, OP_MOVL_STORE(a, v));
+        default: {                                            /* kind == 9: fmov frm,frn (SZ=0 and SZ=1) */
+            int bra_sz0, sz1;
+            int me = m & ~1, ne = n & ~1, mb = m & 1, nb = n & 1;
+            emit16(e, OP_MOVL_DISP_LOAD(m, a, v));
+            emit16(e, OP_MOVL_DISP_STORE(v, n, a));
+            bra_sz0 = emit_pos(e); emit16(e, OP_BRA(0)); emit16(e, OP_NOP);
+            /* SZ=1 pair move: v still holds FR in bit 0 */
+            sz1 = emit_pos(e);
+            emit_patch16(e, bf_sz, OP_BF((sz1 - bf_sz - 4) / 2));
+            bf_sz = -1;
+            emit16(e, OP_SHLR(v));                            /* T = FR (preserved by loads/stores/adds) */
+            if (mb == nb) {
+                emit_mov_lit(e, a, t->env->fpu_fr, TAG_NONE);
+                emit16(e, mb ? OP_BT(0) : OP_BF(0)); emit16(e, OP_ADD_IMM(64, a));
+                emit16(e, OP_MOVL_DISP_LOAD(me, a, v));
+                emit16(e, OP_MOVL_DISP_STORE(v, ne, a));
+                emit16(e, OP_MOVL_DISP_LOAD(me + 1, a, v));
+                emit16(e, OP_MOVL_DISP_STORE(v, ne + 1, a));
+            } else {
+                emit_mov_lit(e, a, t->env->fpu_fr, TAG_NONE);
+                emit16(e, mb ? OP_BT(0) : OP_BF(0)); emit16(e, OP_ADD_IMM(64, a));
+                emit16(e, OP_MOVL_DISP_LOAD(me, a, v));
+                emit_mov_lit(e, a, t->env->fpu_fr, TAG_NONE);
+                emit16(e, nb ? OP_BT(0) : OP_BF(0)); emit16(e, OP_ADD_IMM(64, a));
+                emit16(e, OP_MOVL_DISP_STORE(v, ne, a));
+                emit_mov_lit(e, a, t->env->fpu_fr, TAG_NONE);
+                emit16(e, mb ? OP_BT(0) : OP_BF(0)); emit16(e, OP_ADD_IMM(64, a));
+                emit16(e, OP_MOVL_DISP_LOAD(me + 1, a, v));
+                emit_mov_lit(e, a, t->env->fpu_fr, TAG_NONE);
+                emit16(e, nb ? OP_BT(0) : OP_BF(0)); emit16(e, OP_ADD_IMM(64, a));
+                emit16(e, OP_MOVL_DISP_STORE(v, ne + 1, a));
+            }
+            emit_patch16(e, bra_sz0, OP_BRA((emit_pos(e) - bra_sz0 - 4) / 2));
             break;
+        }
         }
         break;
     }
@@ -1429,14 +1542,14 @@ static int tr_fpu_inline(tctx *t, const sh_insn *d, int in_slot)
     /* A fast path with a commit point needs the helper call in a range of
      * its own (as tr_mem_dev's slow path): the call is that range's commit,
      * and a resume after the fast path's commit skips it (resume_pc). */
-    if (kind >= 10) begin_meta_kind(t, META_INSN, goff, 0, 0);
+    if (has_mem) begin_meta_kind(t, META_INSN, goff, 0, 0);
     spill_reopen(t, a, SA(t)); spill_reopen(t, v, SB(t)); spill_reopen(t, DBT_SPILL_T, SC(t));
     spill_t_restore(t, v);
     restore(t, v, SB(t)); restore(t, a, SA(t));
     call_helper(t, t->env->rt_fpu, 0, 2, d->op | (in_slot ? 0x10000u : 0), d->touched);
     done = emit_pos(e);
     emit_patch16(e, bra_done, OP_BRA((done - bra_done - 4) / 2));
-    if (kind >= 10 && parent.kind != META_INSN)
+    if (has_mem && parent.kind != META_INSN)
         begin_meta_kind(t, parent.kind, parent.guest_off, parent.target, parent.fallthrough);   /* inside a branch: keep its resume rule for what follows */
     return t->err == 0;
 }
@@ -1458,7 +1571,12 @@ static void tr_insn(tctx *t, const sh_insn *d, int in_slot)
 #ifndef DBT_NO_FPU_INLINE
         if (tr_fpu_inline(t, d, in_slot)) break;
 #endif
-        call_helper(t, t->env->rt_fpu, 0, 2, d->op | (in_slot ? 0x10000u : 0), d->touched); break;   /* bit 16: delay slot (FPU-disable raises 0x820 there) */
+        {
+            sf_u32 helper = (t->env->rt_fpu_arith && fpuemu_is_arith_op(d->op))
+                            ? t->env->rt_fpu_arith : t->env->rt_fpu;
+            call_helper(t, helper, 0, 2, d->op | (in_slot ? 0x10000u : 0), d->touched);
+        }
+        break;   /* bit 16: delay slot (FPU-disable raises 0x820 there) */
     case K_FALLBACK: call_helper(t, t->env->rt_fallback, 0, 2, d->op, d->touched); break;
     case K_PRIV:  tr_priv(t, d); break;
     case K_BRANCH: /* handled by caller */ break;
@@ -1500,7 +1618,21 @@ static void begin_meta_kind(tctx *t, int kind, sf_u32 guest_off, sf_u32 target, 
 {
     dbt_block *b = t->blk;
     dbt_imeta *m;
-    if (b->nmeta >= DBT_MAX_META - 1) { t->err = DBT_ERR_OVERFLOW; return; }
+    if (t->meta_cnt >= DBT_MAX_META - 1) { t->err = DBT_ERR_OVERFLOW; return; }
+    t->meta_cnt++;
+    if (t->env->no_meta) {
+        m = &t->dummy_meta;
+        m->host_off = (sf_u16)emit_pos(&t->em);
+        m->guest_off = (sf_u16)guest_off;
+        m->kind = (sf_u8)kind;
+        m->commit_rel = 0xFF;
+        m->fix_kind = 0;
+        m->fix_reg = 0;
+        m->target = target;
+        m->fallthrough = fallthrough;
+        t->cur = m;
+        return;
+    }
     m = &b->meta[b->nmeta++];
 #ifndef DBT_META_MEMSET          /* DBT_META_WORD_INIT until 2026-11-07 */
     {
@@ -1626,7 +1758,11 @@ static void prepass(tctx *t, sf_u32 guest_pc, int max)
                 gpc += 2;
                 if (!sh4_slot_legal(sl)) break;
                 if (borrow_user(t, sl)) score += 2;
-                if (sl->kind == K_FPU || sl->kind == K_FALLBACK) score -= 2;
+                if (sl->kind == K_FALLBACK || (sl->kind == K_FPU
+#ifndef DBT_NO_FPU_INLINE
+                    && !fpu_inline_kind(t->env, sl->op)
+#endif
+                    )) score -= 2;
             }
             if (d->br != BR_BT && d->br != BR_BF && d->br != BR_BTS && d->br != BR_BFS) {
                 if (d->br != BR_BRA && d->br != BR_BSR) score -= 1;
@@ -1638,7 +1774,12 @@ static void prepass(tctx *t, sf_u32 guest_pc, int max)
             continue;
         }
         if (borrow_user(t, d)) score += 2;
-        if (d->kind == K_FPU || d->kind == K_FALLBACK || (d->kind == K_PRIV && d->ctrl == CR_SR && !d->is_store)) score -= 2;
+        if (d->kind == K_FALLBACK || (d->kind == K_PRIV && d->ctrl == CR_SR && !d->is_store) ||
+            (d->kind == K_FPU
+#ifndef DBT_NO_FPU_INLINE
+             && !fpu_inline_kind(t->env, d->op)
+#endif
+            )) score -= 2;
         if (d->kind == K_TRAP && (d->op & 0xFF00) == 0xC300) break;
         if (d->kind == K_PRIV && d->ctrl == CR_SR && !d->is_store) break;
         if (d->kind == K_ILLEGAL) break;
@@ -1664,6 +1805,7 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
     /* Literal slots are fully written by emit_mov_lit before nlits exposes
      * them. Do not clear the 768-byte unused array on every translation. */
     t.env = env; t.blk = b; t.gpc = guest_pc; t.cur = 0;
+    t.meta_cnt = 0; t.spill_cnt = 0;
     t.err = 0; t.fault = 0; t.slot_x0 = 0; t.slot_avoid = 0;
     t.bx = -1; t.cache_reg = -1; t.cache_size = 0; t.pre_n = 0;
 #ifdef DBT_UNIFORM_STORE
@@ -1688,9 +1830,9 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
         const sh_insn *d;
         /* size budget: code + worst-case tail must stay within literal reach */
 #ifdef DBT_BODY_BUDGET
-        if (emit_pos(&t.em) > DBT_BODY_BUDGET || emit_lits_bytes(&t.em) > 160 || b->nlinks >= DBT_MAX_LINKS - 1) break;
+        if (emit_pos(&t.em) > DBT_BODY_BUDGET || emit_lits_bytes(&t.em) > 160 || t.em.nlits >= EMIT_MAX_LITS - 24 || t.spill_cnt >= DBT_MAX_BLOCK_SPILLS - 10 || t.meta_cnt >= DBT_MAX_META - 4 || b->nlinks >= DBT_MAX_LINKS - 1) break;
 #else
-        if (emit_pos(&t.em) > 560 || emit_lits_bytes(&t.em) > 160 || b->nlinks >= DBT_MAX_LINKS - 1) break;
+        if (emit_pos(&t.em) > 520 || emit_lits_bytes(&t.em) > 160 || t.em.nlits >= EMIT_MAX_LITS - 24 || t.spill_cnt >= DBT_MAX_BLOCK_SPILLS - 10 || t.meta_cnt >= DBT_MAX_META - 4 || b->nlinks >= DBT_MAX_LINKS - 1) break;
 #endif
         t.gpc = gpc;
 #ifdef DBT_DECODE_REF
@@ -1701,7 +1843,7 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
 #endif
 #ifdef DBT_LINEAR_META
         if (n > 0 && d->kind == K_PASS) {
-            dbt_imeta *prev = b->nmeta ? &b->meta[b->nmeta - 1] : 0;
+            dbt_imeta *prev = env->no_meta ? (t.meta_cnt ? &t.dummy_meta : 0) : (b->nmeta ? &b->meta[b->nmeta - 1] : 0);
             if (prev && prev->kind == META_LINEAR &&
                 prev->guest_off + emit_pos(&t.em) - prev->host_off == gpc - guest_pc)
                 t.cur = prev;
@@ -1747,6 +1889,37 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
 #endif
             continue;
         }
+        /* Pair two consecutive non-inlined pure FPU arithmetic ops on the
+         * same 1 KiB page into one rt_fpu_arith call (X0 = (op1<<16)|op0). */
+        if (d->kind == K_FPU && env->rt_fpu_arith && n < max &&
+            fpuemu_is_arith_op(d->op) &&
+#ifndef DBT_NO_FPU_INLINE
+            !fpu_inline_kind(env, d->op) &&
+#endif
+            (((gpc ^ (gpc + 2)) & ~0x3FFu) == 0)) {
+            sh_insn decoded2;
+            const sh_insn *d2;
+            sf_u32 op0 = d->op;
+            d2 = fetch(&t, gpc + 2, &decoded2);
+            if (t.err) { t.err = 0; t.fault = 0; d2 = 0; }
+            if (d2 && d2->kind == K_FPU && fpuemu_is_arith_op(d2->op)
+#ifndef DBT_NO_FPU_INLINE
+                && !fpu_inline_kind(env, d2->op)
+#endif
+               ) {
+                call_helper(&t, env->rt_fpu_arith, 0, 2, (d2->op << 16) | op0, 0);
+#ifdef DBT_CONST_DEVICE_ADDRESS
+                t.known_mask = 0;
+#endif
+#ifdef DBT_UNIFORM_STORE
+                t.uniform_mask = 0;
+#endif
+                if (t.cache_reg >= 0) cache_kill(&t);
+                n++;
+                gpc += 4;
+                continue;
+            }
+        }
         tr_insn(&t, d, 0);
         gpc += 2;
         if (d->kind == K_TRAP && (d->op & 0xFF00) == 0xC300) { ended = 1; b->end_reason = END_TRAP; }
@@ -1765,15 +1938,20 @@ int dbt_translate_block(const dbt_env *env, sf_u32 guest_pc, sf_u32 host_base,
     /* fall-through exit: also after trapa / ldc sr / illegal, where execution
      * resumes at the next guest instruction. The jump belongs to the
      * sentinel range (resume = next guest pc). */
-    b->meta[b->nmeta].host_off = (sf_u16)emit_pos(&t.em);
-    b->meta[b->nmeta].guest_off = (sf_u16)b->guest_len;
-    b->meta[b->nmeta].kind = META_INSN;
-    b->meta[b->nmeta].commit_rel = 0xFF;
+    if (!env->no_meta) {
+        b->meta[b->nmeta].host_off = (sf_u16)emit_pos(&t.em);
+        b->meta[b->nmeta].guest_off = (sf_u16)b->guest_len;
+        b->meta[b->nmeta].kind = META_INSN;
+        b->meta[b->nmeta].commit_rel = 0xFF;
+    } else {
+        b->nmeta = (sf_u8)t.meta_cnt;
+    }
     if (!ended || b->end_reason != END_BRANCH) {
-        t.cur = &b->meta[b->nmeta];
+        t.cur = env->no_meta ? &t.dummy_meta : &b->meta[b->nmeta];
         t.gpc = gpc - 2;                       /* "branch" pc for the backward flag: never backward */
         jump_direct(&t, gpc, 0, 0);
     }
+    if (env->no_meta) b->nspills = (sf_u8)t.spill_cnt;
     b->code_len = emit_pos(&t.em);
 
     /* exit stubs: one per link. Enter with all guest registers intact. */

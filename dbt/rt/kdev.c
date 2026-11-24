@@ -41,9 +41,10 @@ static unsigned rd16(sf_u32 a)           /* guest halfword (little-endian), any 
     return p[0] | ((unsigned)p[1] << 8);
 }
 
-static sf_u16 g_raw[KDEV_MAX_WORDS], g_out[KDEV_MAX_WORDS];
-static sf_u8 g_lit[KDEV_MAX_WORDS];
-static sf_u8 g_w0set[65536 / 8];       /* first words of the table being searched */
+/* Boot-time scratch overlaid onto rt.c's g_arena (before dbt_rt_init):
+ * saves 18 KiB of permanent BSS. */
+static sf_u16 *g_raw, *g_out;
+static sf_u8 *g_lit, *g_w0set;
 
 /* n words at base, masked as for a function [lo, hi), into g_out */
 static void kmask(sf_u32 base, unsigned n, sf_u32 lo, sf_u32 hi)
@@ -96,6 +97,13 @@ unsigned kdev_locate(sf_u32 text, sf_u32 len, sf_u32 *ranges, unsigned max, int 
     const char *mod = is_nk ? "nk.exe" : "kernel.dll";
     sf_u32 at[KDEV_MAX_RANGES], pos, end = text + len;
     unsigned hits[KDEV_MAX_RANGES], f, n = 0, i, any_zero = 0, any_br = 0;
+    {
+        sf_u8 *scr = dbt_kdev_arena();
+        g_raw = (sf_u16 *)scr;
+        g_out = (sf_u16 *)(scr + KDEV_MAX_WORDS * 2u);
+        g_lit = scr + KDEV_MAX_WORDS * 4u;
+        g_w0set = scr + KDEV_MAX_WORDS * 5u;
+    }
     if (max < nf || nf > KDEV_MAX_RANGES) return 0;
     /* The image this table was generated from, or a relink that left these
      * functions where they were (nk.exe and the translator ship together):
@@ -114,7 +122,7 @@ unsigned kdev_locate(sf_u32 text, sf_u32 len, sf_u32 *ranges, unsigned max, int 
      * a CE 5.0 boot when done at every position): masked word 0 is the raw
      * word, or 0 for an aligned P1/P2 address pair (a literal inside the
      * window can only mask words 1-3), or the bare bra/bsr opcode. */
-    memset(g_w0set, 0, sizeof g_w0set);
+    memset(g_w0set, 0, 65536 / 8);
     for (f = 0; f < nf; ++f) {
         unsigned w0 = tab[f].w[0];
         hits[f] = 0;

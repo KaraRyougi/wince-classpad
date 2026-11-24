@@ -3,6 +3,9 @@
 void emit_init(emitter *e, sf_u16 *buf, int cap)
 {
     e->buf = buf; e->cap = cap; e->len = 0; e->overflow = 0; e->nlits = 0;
+#ifdef DBT_DEDUP_LITERALS
+    e->unique_lits = 0;
+#endif
 }
 
 
@@ -10,6 +13,16 @@ int emit_mov_lit(emitter *e, int rn, sf_u32 value, int tag)
 {
     int idx = e->nlits;
     if (idx >= EMIT_MAX_LITS) { e->overflow = 1; return -1; }
+#ifdef DBT_DEDUP_LITERALS
+    {
+        int dup = 0, j;
+        if (tag == -1) {
+            for (j = 0; j < idx; j++)
+                if (e->lits[j].tag == -1 && e->lits[j].value == value) { dup = 1; break; }
+        }
+        if (!dup) e->unique_lits++;
+    }
+#endif
     e->lits[idx].at = emit_pos(e);
     e->lits[idx].value = value;
     e->lits[idx].tag = tag;
@@ -22,6 +35,9 @@ int emit_lit_only(emitter *e, sf_u32 value, int tag)
 {
     int idx = e->nlits;
     if (idx >= EMIT_MAX_LITS) { e->overflow = 1; return -1; }
+#ifdef DBT_DEDUP_LITERALS
+    e->unique_lits++;
+#endif
     e->lits[idx].at = -1;              /* no instruction to patch */
     e->lits[idx].value = value;
     e->lits[idx].tag = tag;
