@@ -1,6 +1,8 @@
 # Windows CE 5.0 on a Casio ClassPad II (fx-CP400 / fx-CG500)
 
-The project has two parts: 
+This project brings Windows CE 5.0 to the ClassPad calculator. 
+
+It has two parts: 
 - A bare-metal, same-ISA dynamic binary translator (DBT) that bridges the calculator's big-endian SH7305 CPU and little-endian Windows CE binaries, without replacing Casio's stock OS.
 - A custom Windows CE 5.0 BSP and OS image with deep hardware integration, including full drivers for the display (with rotation), touchscreen, physical keyboard, power management, backlight control, USB, internal flash storage, and more.
 
