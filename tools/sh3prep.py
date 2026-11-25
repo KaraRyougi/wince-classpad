@@ -73,7 +73,7 @@ def prepare(name, data):
         if errs:
             raise pe4k.PEError("; ".join(errs[:5]))
         idle = [n for n, c in moved if not c]
-        msgs.append("%d floating-point imports -> SH3CRT.dll" % len(moved))
+        msgs.append("%d imports -> SH3CRT.dll" % len(moved))
         if idle:
             msgs.append("imports but never calls %s" % ",".join(idle))
         new = fixed

@@ -65,3 +65,4 @@ EXPORTS
     _isnan=sh3__isnan
     _finite=sh3__finite
     _fpclass=sh3__fpclass
+    SHHandleWMActivate=sh3_SHHandleWMActivate

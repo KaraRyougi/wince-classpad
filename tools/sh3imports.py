@@ -40,12 +40,18 @@ COREDLL_ORDINALS = {
     "_isnan": 1024, "_finite": 1012, "_fpclass": 1015,
 }
 BY_ORDINAL = {v: k for k, v in COREDLL_ORDINALS.items()}
+# aygshell.def ordinals shimmed by SH3CRT.dll (sh3crt.def): Pocket PC apps
+# (mfcce300.dll) import SHHandleWMActivate by ordinal 84.
+AYGSHELL_ORDINALS = {
+    "SHHandleWMActivate": 84,
+}
+AYGSHELL_BY_ORDINAL = {v: k for k, v in AYGSHELL_ORDINALS.items()}
 SHIM = b"SH3CRT.dll"
 SH3_MACHINES = (0x1A2, 0x1A3)
 
 
-def coredll_slots(pe, m):
-    """[(slot rva, name)] of the COREDLL imports SH3CRT.dll replaces."""
+def redirect_slots(pe, m):
+    """[(slot rva, name)] of the COREDLL / AYGSHELL imports SH3CRT.dll replaces."""
     out = []
     rva, _ = pe.dir(1)
     while rva:
@@ -54,16 +60,22 @@ def coredll_slots(pe, m):
             break
         dll = bytes(m[name:m.index(b"\0", name)]).lower()
         if dll == b"coredll.dll":
+            by_ord, by_name = BY_ORDINAL, COREDLL_ORDINALS
+        elif dll == b"aygshell.dll":
+            by_ord, by_name = AYGSHELL_BY_ORDINAL, AYGSHELL_ORDINALS
+        else:
+            by_ord = by_name = None
+        if by_ord is not None:
             t, s = oft or ft, ft
             while True:
                 e = struct.unpack_from("<I", m, t)[0]
                 if not e:
                     break
                 if e & 0x80000000:
-                    n = BY_ORDINAL.get(e & 0xFFFF)
+                    n = by_ord.get(e & 0xFFFF)
                 else:
                     n = bytes(m[e + 2:m.index(b"\0", e + 2)]).decode("latin1")
-                    n = n if n in COREDLL_ORDINALS else None
+                    n = n if n in by_name else None
                 if n:
                     out.append((s, n))
                 t += 4
@@ -79,7 +91,7 @@ def rewrite(data):
     m, fixups = pe4k.loaded(pe, pe.base)
     if not fixups:
         raise pe4k.PEError("sh3imports: no relocations")
-    slots = coredll_slots(pe, m)
+    slots = redirect_slots(pe, m)
     if not slots:
         return bytes(pe.d), []
     hdr = pe.sh + 40 * pe.nsec
@@ -178,13 +190,13 @@ def rewrite(data):
 
 def check(old_data, new_data):
     """The new module imports the same functions, the replaced ones from
-    SH3CRT.dll; no fixup still points at a replaced COREDLL slot; every
+    SH3CRT.dll; no fixup still points at a replaced original slot; every
     replaced slot is referenced at least once from the new slots."""
     errs = []
     old, new = pe4k.PE(old_data), pe4k.PE(new_data)
     mo, fo = pe4k.loaded(old, old.base)
     mn, fn = pe4k.loaded(new, new.base)
-    slots = coredll_slots(old, mo)
+    slots = redirect_slots(old, mo)
     replaced = {s for s, _ in slots}
     io, inew = pe4k.imports(old, mo), pe4k.imports(new, mn)
     if inew[:len(io)] != io:
@@ -195,7 +207,7 @@ def check(old_data, new_data):
     for r in fn:
         t = (struct.unpack_from("<I", mn, r)[0] - new.base) & 0xFFFFFFFF
         if t in replaced:
-            errs.append("fixup at 0x%x still points at COREDLL slot 0x%x" % (r, t))
+            errs.append("fixup at 0x%x still points at replaced slot 0x%x" % (r, t))
     if sorted(fo) != sorted(fn):
         errs.append("fixup set changed")
     return errs

@@ -31,6 +31,7 @@
 #pragma optimize("t", on)
 #endif
 #include <windows.h>
+#include <sipapi.h>
 #include <math.h>
 #include <float.h>
 #include <stdlib.h>
@@ -119,3 +120,62 @@ double *sh3_wcstod(double *r, const wchar_t *s, wchar_t **e) { *r = wcstod(s, e)
 int sh3__isnan(U32 lo, U32 hi)   { return ((hi & 0x7FF00000u) == 0x7FF00000u) && (((hi & 0x000FFFFFu) | lo) != 0); }
 int sh3__finite(U32 lo, U32 hi)  { (void)lo; return (hi & 0x7FF00000u) != 0x7FF00000u; }
 int sh3__fpclass(U32 lo, U32 hi) { return _fpclass(D(lo, hi)); }
+
+// ------------------------------------------------- Pocket PC shell (aygshell)
+// SHACTIVATEINFO layout from aygshell.h (cbSize == 12; bit 1 of flags is
+// fSipOnDeactivation). Pocket PC MFC (mfcce300.dll) calls aygshell!#84
+// (SHHandleWMActivate) on WM_ACTIVATE. On Pocket PC the SIP button lived in
+// the app's own menu bar so tapping it never deactivated the window; on CE 5.0
+// Standard Shell it lives in HHTaskBar, so opening or closing the SIP from the
+// taskbar deactivates the app first and leaves fSipOnDeactivation stale when
+// focus returns (causing aygshell to call SHSipPreference to undo what the
+// user just chose). Sync fSipOnDeactivation to the live SIP state on activate
+// before forwarding to aygshell.dll!#84 (exported by ordinal only), and cancel
+// the redundant 1-second SHSipPreference timer via aygshell.dll!#21
+// (SIP_UNCHANGED == 3) so explorer.exe does not broadcast a spurious
+// SPI_SETSIPINFO that trips explorer's uninitialized-pvImData IsSipUp() bug
+// and resets the taskbar SIP icon to the red-stylus icon.
+typedef struct {
+    DWORD cbSize;
+    HWND  hwndLastFocus;
+    DWORD flags;
+} SH3_SHACTIVATEINFO;
+
+typedef BOOL (*PFN_SHHANDLEWMACTIVATE)(HWND, WPARAM, LPARAM, SH3_SHACTIVATEINFO *, DWORD);
+typedef BOOL (*PFN_SHSIPPREFERENCE)(HWND, int);
+
+#define SH3_SAI_SIP_ON_DEACTIVATE 0x02u
+#define SH3_SIP_UNCHANGED         3
+
+BOOL sh3_SHHandleWMActivate(HWND hwnd, WPARAM wParam, LPARAM lParam,
+                            SH3_SHACTIVATEINFO *psai, DWORD dwFlags)
+{
+    static PFN_SHHANDLEWMACTIVATE pfnReal;
+    static PFN_SHSIPPREFERENCE pfnSipPref;
+    static BOOL tried;
+    BOOL ret;
+    if (!tried) {
+        HMODULE h = LoadLibrary(TEXT("aygshell.dll"));
+        if (h) {
+            pfnReal = (PFN_SHHANDLEWMACTIVATE)GetProcAddress(h, (LPCTSTR)MAKEINTRESOURCE(84));
+            pfnSipPref = (PFN_SHSIPPREFERENCE)GetProcAddress(h, (LPCTSTR)MAKEINTRESOURCE(21));
+        }
+        tried = TRUE;
+    }
+    if (LOWORD(wParam) != WA_INACTIVE && psai && psai->cbSize == sizeof(*psai)) {
+        SIPINFO si;
+        ZeroMemory(&si, sizeof si);
+        si.cbSize = sizeof si;
+        if (SipGetInfo(&si)) {
+            if (si.fdwFlags & SIPF_ON)
+                psai->flags |= SH3_SAI_SIP_ON_DEACTIVATE;
+            else
+                psai->flags &= ~SH3_SAI_SIP_ON_DEACTIVATE;
+        }
+    }
+    if (!pfnReal) return FALSE;
+    ret = pfnReal(hwnd, wParam, lParam, psai, dwFlags);
+    if (LOWORD(wParam) != WA_INACTIVE && pfnSipPref && hwnd)
+        pfnSipPref(hwnd, SH3_SIP_UNCHANGED);
+    return ret;
+}
