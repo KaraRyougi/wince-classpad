@@ -1,8 +1,8 @@
-# wince-classpad
+# Windows CE 5.0 on a Casio ClassPad II (fx-CP400 / fx-CG500)
 
-**Windows CE 5.0 ported to the Casio ClassPad II (fx-CP400 / fx-CG500)** — powered by a bare-metal same-ISA dynamic binary translator that bridges the calculator's big-endian SH7305 CPU and little-endian Windows CE binaries without replacing Casio's stock OS. 
-
-The OS has deep integration with the calculator hardware, including the touchscreen, power management, backlight adjustment, USB, internal storage, etc.
+The project has two parts: 
+- A bare-metal, same-ISA dynamic binary translator (DBT) that bridges the calculator's big-endian SH7305 CPU and little-endian Windows CE binaries, without replacing Casio's stock OS.
+- A custom Windows CE 5.0 BSP and OS image with deep hardware integration, including full drivers for the display (with rotation), touchscreen, physical keyboard, power management, backlight control, USB, internal flash storage, and more.
 
 <p align="center">
   <img src="docs/img/loader-menu.png" width="170" alt="wince.hh3 Loader Menu">
@@ -21,21 +21,21 @@ The OS has deep integration with the calculator hardware, including the touchscr
 
 ## Story & Motivation
 
-In the early 2000s, HP, Texas Instruments, and Casio all converged on a remarkably similar vision for the next generation of graphing calculators: a large, portrait-oriented resistive touchscreen, a stylus, and a minimalist keypad for arithmetic and navigation.
+In the early 2000s, HP, Texas Instruments, and Casio all had the same idea for where graphing calculators were headed: a vertical touchscreen with a stylus, paired with a stripped-down keypad for basic numbers and navigation.
 
-- **HP** announced the Windows CE–based **HP Xpander** (Hitachi SH-3) in 2000, only to cancel it months before mass production. HP later released its [Math Xpander](https://www.saltire.com/xpander.html) software for Pocket PCs free of charge.
-- **Texas Instruments** built an entire family of touchscreen prototypes — the TI PLT SHH1, FHH1, and SU1 — running Inferno OS on TI's OMAP 1510 ARM processor, before quietly canceling the project in early 2004. (I happen to own a few TI PLT SHH1 prototypes, likely built for TI's 2002 T³ conference. They are pretty slow.)
-- **Casio** was the only one to ship the concept, releasing the SH-3–based **ClassPad 300** in 2003. More than two decades later, its successors — the **ClassPad II fx-CP400** and **fx-CG500** — remain the only graphing calculators with this distinctive form factor.
+- HP unveiled the Windows CE–based HP Xpander (also using the SH-3 CPU, same as the original ClasPad!) in 2000, then killed it just months before mass production. Its software, [Math Xpander](https://www.saltire.com/xpander.html), was later released as a free download for Pocket PCs.
+- Texas Instruments built a whole series of touchscreen prototypes - the TI PLT SHH1, FHH1, and SU1, running Inferno OS on an OMAP 1510 ARM chip, before quietly shelving the project in early 2004. (I actually own a few PLT SHH1 units, likely made for TI's 2002 T³ conference; they are painfully slow.)
+- Casio was the only one that actually shipped. The SH-3-based ClassPad 300 came out in 2003, and more than twenty years later, its successors — the ClassPad II fx-CP400 and fx-CG500 - are still the only calculators of their kind on the market.
 
-The shared SuperH CPU heritage between the HP Xpander and the Casio ClassPad opened up an intriguing possibility: **bringing HP's canceled Xpander back to life on a Casio ClassPad.** With the help of Claude Fable 5.1 and 5.2, I ported Windows CE 5.0 to the ClassPad II and got the original 2001 SH-3 Math Xpander binaries running without source code or recompilation.
+Since both the HP Xpander and the Casio ClassPad run on SuperH CPUs, an obvious question came up: could Casio's hardware run HP's canceled calculator? With the help of Claude Fable 5.1 and 5.2, I ported Windows CE 5.0 to the ClassPad II and got the original 2001 SH-3 Math Xpander binaries running as-is — no source code, no recompilation.
 
-> *(An earlier prototype booted Windows CE 6.0 R3 all the way to the desktop, but performance was unacceptable and only a few hundred KiB of RAM remained free. Windows CE 5.0 proved to be a much better fit; the CE 6.0 BSP is kept under `bsp/classpad/` for reference.)*
+(I first got Windows CE 6.0 R3 booting to the desktop, but it was far too sluggish and left only a few hundred KiB of free RAM. Windows CE 5.0 turned out to be a much better fit; the old CE 6.0 BSP is still in bsp/classpad/ for reference.)
 
 ---
 
 ## What Works
 
-Target platform: **Windows CE 5.0** (`bsp/classpad50/`, Platform Builder 5.0), running in `casio-emu` and on real fx-CP400 hardware via HollyHock 3.
+Target platform: **Windows CE 5.0** (`bsp/classpad50/`, Platform Builder 5.0) running on real fx-CP400 hardware via HollyHock 3.
 
 | Area | Status |
 |---|---|
